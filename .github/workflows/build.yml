@@ -1,0 +1,52 @@
+name: Build Robi firmware
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  XIAOZHI_TAG: v2.5.2
+
+jobs:
+  build:
+    name: Robi (${{ matrix.wake }})
+    runs-on: ubuntu-latest
+    container:
+      image: espressif/idf:v6.1
+    strategy:
+      fail-fast: false
+      matrix:
+        wake: [heyrobby, hiesp]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get xiaozhi-esp32 ${{ env.XIAOZHI_TAG }}
+        shell: bash
+        run: git clone --depth 1 --branch "$XIAOZHI_TAG" https://github.com/78/xiaozhi-esp32 fw
+
+      - name: Patch for Robi (Hebrew, RTL, font, faces, wake word)
+        shell: bash
+        run: python3 scripts/patch_xiaozhi.py fw ${{ matrix.wake }}
+
+      - name: Build
+        shell: bash
+        env:
+          ROBI_TEXT_FONT: ${{ github.workspace }}/assets/font_noto_sans_common_30_4.bin
+          ROBI_EMOJI_DIR: ${{ github.workspace }}/assets/faces
+        run: |
+          source "$IDF_PATH/export.sh"
+          cd fw
+          WAKE_ARGS=()
+          if [[ "${{ matrix.wake }}" == "hiesp" ]]; then WAKE_ARGS=(--wake-word wn9_hiesp); fi
+          python scripts/build.py waveshare/esp32-s3-touch-amoled-1.75 \
+            --name esp32-s3-touch-amoled-1.75 --language he-IL "${WAKE_ARGS[@]}"
+          echo "--- checks ---"
+          grep -E "CONFIG_LANGUAGE_HE_IL|CONFIG_LV_USE_BIDI|CONFIG_USE_CUSTOM_WAKE_WORD|CONFIG_CUSTOM_WAKE_WORD=|CONFIG_SR_WN_WN9_HIESP|CONFIG_SR_MN_EN" build/../sdkconfig || true
+          ls -la build/merged-binary.bin
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: robi-firmware-${{ matrix.wake }}
+          path: fw/build/merged-binary.bin
+          if-no-files-found: error
