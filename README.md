@@ -16,3 +16,13 @@ Every push to `main` builds both variants in GitHub Actions. Download
 `robi-firmware-heyrobby` (or `-hiesp`) from the run's Artifacts, unzip, and
 flash `merged-binary.bin` at address `0x0` with
 https://espressif.github.io/esptool-js/
+
+## Updating over Wi-Fi (no cable)
+
+Each build also produces:
+- `esp32-s3-touch-amoled-1.75_2.5.3.bin` - the app, for OTA
+- `robi-assets-<wake>.bin` - Robi's assets (font, faces, wake word)
+
+Put both in the home server's `data/bin` folder. A device on stock 2.5.2 that
+uses this server as its OTA address updates itself at its next power-up, then
+downloads `robi-assets-<wake>.bin` once and restarts with Robi's look.

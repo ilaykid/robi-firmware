@@ -43,10 +43,17 @@ jobs:
             --name esp32-s3-touch-amoled-1.75 --language he-IL "${WAKE_ARGS[@]}"
           echo "--- checks ---"
           grep -E "CONFIG_LANGUAGE_HE_IL|CONFIG_LV_USE_BIDI|CONFIG_USE_CUSTOM_WAKE_WORD|CONFIG_CUSTOM_WAKE_WORD=|CONFIG_SR_WN_WN9_HIESP|CONFIG_SR_MN_EN" build/../sdkconfig || true
-          ls -la build/merged-binary.bin
+          ls -la build/merged-binary.bin build/xiaozhi.bin build/generated_assets.bin
+          # app must fit an OTA slot (0x3f0000), assets the 8 MB assets partition
+          test $(stat -c %s build/xiaozhi.bin) -lt $((0x3f0000))
+          test $(stat -c %s build/generated_assets.bin) -lt $((8*1024*1024))
+          mkdir -p ../out
+          cp build/merged-binary.bin ../out/robi-full-${{ matrix.wake }}.bin
+          cp build/xiaozhi.bin ../out/esp32-s3-touch-amoled-1.75_2.5.3.bin
+          cp build/generated_assets.bin ../out/robi-assets-${{ matrix.wake }}.bin
 
       - uses: actions/upload-artifact@v4
         with:
           name: robi-firmware-${{ matrix.wake }}
-          path: fw/build/merged-binary.bin
+          path: out/
           if-no-files-found: error
