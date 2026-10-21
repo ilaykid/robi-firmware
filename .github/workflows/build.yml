@@ -57,3 +57,30 @@ jobs:
           name: robi-firmware-${{ matrix.wake }}
           path: out/
           if-no-files-found: error
+
+  publish:
+    name: Publish binaries to the 'builds' branch
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: false
+      - name: Push to builds branch
+        shell: bash
+        run: |
+          cd out
+          mkdir -p heyrobby hiesp
+          mv robi-firmware-heyrobby/* heyrobby/ && mv robi-firmware-hiesp/* hiesp/
+          rmdir robi-firmware-heyrobby robi-firmware-hiesp
+          sha256sum */*.bin > SHA256SUMS
+          echo "Built from ${GITHUB_SHA}" > README.md
+          git init -q -b builds
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Binaries from ${GITHUB_SHA}"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${GITHUB_REPOSITORY}.git" builds
