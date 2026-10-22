@@ -70,7 +70,8 @@ class ASRProvider(ASRProviderBase):
         self.api_key = config.get("api_key")
         self.model = config.get("model_name") or "gemini-3.5-flash-lite"
         self.hint = config.get("prompt") or ""
-        self.timeout = float(config.get("timeout", 12))
+        self.timeout = float(config.get("timeout", 5))
+        self.thinking = config.get("thinking_config")   # e.g. {"thinkingLevel": "minimal"}
         self.fb_url = config.get("fallback_base_url")
         self.fb_key = config.get("fallback_api_key")
         self.fb_model = config.get("fallback_model") or "whisper-large-v3"
@@ -113,7 +114,8 @@ class ASRProvider(ASRProviderBase):
                     {"inline_data": {"mime_type": "audio/wav", "data": base64.b64encode(wav).decode()}},
                 ],
             }],
-            "generationConfig": {"temperature": 0, "maxOutputTokens": 200},
+            "generationConfig": {"temperature": 0, "maxOutputTokens": 200,
+                                 **({"thinkingConfig": self.thinking} if self.thinking else {})},
         }
         url = GEMINI_URL.format(model=self.model)
         timeout = aiohttp.ClientTimeout(total=self.timeout)
@@ -164,7 +166,7 @@ class ASRProvider(ASRProviderBase):
             except Exception as e:
                 if "429" in str(e)[:12]:
                     self._rest_until = time.monotonic() + 120
-                logger.bind(tag=TAG).warning(f"Gemini ASR failed ({str(e)[:200]}); using fallback")
+                logger.bind(tag=TAG).warning(f"Gemini ASR failed ({type(e).__name__} {str(e)[:200]}); using fallback")
         else:
             logger.bind(tag=TAG).info(f"Gemini hearing budget used (today {self._day_count}/{self.rpd_cap}); using fallback")
         try:
