@@ -71,40 +71,43 @@ must_replace(fw / "main/display/lcd_display.cc",
 version = os.environ.get("ROBI_VERSION", "2.5.3")
 must_replace(fw / "CMakeLists.txt", 'set(PROJECT_VER "2.5.2")', f'set(PROJECT_VER "{version}")')
 
-# 5. one-time download of Robi's assets from the home server (after an app-only OTA)
-ROBI_ASSETS_VERSION = int(os.environ.get("ROBI_ASSETS_VERSION", "1"))
-app = fw / "main/application.cc"
-must_replace(
-    app,
-    '    std::string download_url = settings.GetString("download_url");\n',
-    '    std::string download_url = settings.GetString("download_url");\n'
-    '    // Robi: fetch Robi\'s assets (Hebrew font, faces, wake word) once from the home server\n'
-    '    bool robi_assets_download = false;\n'
-    f'    if (download_url.empty() && settings.GetInt("robi", 0) != {ROBI_ASSETS_VERSION}) {{\n'
-    '        std::string ota_url = Settings("wifi", false).GetString("ota_url");\n'
-    '        auto pos = ota_url.find("/xiaozhi/ota");\n'
-    '        if (pos != std::string::npos) {\n'
-    f'            download_url = ota_url.substr(0, pos) + "/xiaozhi/ota/download/robi-assets-{wake}.bin";\n'
-    '            robi_assets_download = true;\n'
-    '            ESP_LOGI(TAG, "Robi assets from %s", download_url.c_str());\n'
-    '        }\n'
-    '    }\n',
-)
-must_replace(
-    app,
-    '    // Apply assets\n    assets.Apply();\n',
-    '    if (robi_assets_download) {\n'
-    '        {\n'
-    '            Settings robi("assets", true);\n'
-    f'            robi.SetInt("robi", {ROBI_ASSETS_VERSION});\n'
-    '        }\n'
-    '        if (ota_) {\n'
-    '            ota_->MarkCurrentVersionValid();  // keep the new app (rollback is enabled)\n'
-    '        }\n'
-    '        ESP_LOGI(TAG, "Robi assets installed, restarting");\n'
-    '        vTaskDelay(pdMS_TO_TICKS(500));\n'
-    '        esp_restart();\n'
-    '    }\n'
-    '    // Apply assets\n    assets.Apply();\n',
-)
+# 5. optional: one-time download of Robi's assets from the home server after an app-only
+#    OTA. Off by default - a stock device fell into an update/rollback loop with it.
+#    Robi's assets go in once with the full USB image; later app OTAs keep them.
+if os.environ.get("ROBI_AUTO_ASSETS") == "1":
+    ROBI_ASSETS_VERSION = int(os.environ.get("ROBI_ASSETS_VERSION", "1"))
+    app = fw / "main/application.cc"
+    must_replace(
+        app,
+        '    std::string download_url = settings.GetString("download_url");\n',
+        '    std::string download_url = settings.GetString("download_url");\n'
+        '    // Robi: fetch Robi\'s assets (Hebrew font, faces, wake word) once from the home server\n'
+        '    bool robi_assets_download = false;\n'
+        f'    if (download_url.empty() && settings.GetInt("robi", 0) != {ROBI_ASSETS_VERSION}) {{\n'
+        '        std::string ota_url = Settings("wifi", false).GetString("ota_url");\n'
+        '        auto pos = ota_url.find("/xiaozhi/ota");\n'
+        '        if (pos != std::string::npos) {\n'
+        f'            download_url = ota_url.substr(0, pos) + "/xiaozhi/ota/download/robi-assets-{wake}.bin";\n'
+        '            robi_assets_download = true;\n'
+        '            ESP_LOGI(TAG, "Robi assets from %s", download_url.c_str());\n'
+        '        }\n'
+        '    }\n',
+    )
+    must_replace(
+        app,
+        '    // Apply assets\n    assets.Apply();\n',
+        '    if (robi_assets_download) {\n'
+        '        {\n'
+        '            Settings robi("assets", true);\n'
+        f'            robi.SetInt("robi", {ROBI_ASSETS_VERSION});\n'
+        '        }\n'
+        '        if (ota_) {\n'
+        '            ota_->MarkCurrentVersionValid();  // keep the new app (rollback is enabled)\n'
+        '        }\n'
+        '        ESP_LOGI(TAG, "Robi assets installed, restarting");\n'
+        '        vTaskDelay(pdMS_TO_TICKS(500));\n'
+        '        esp_restart();\n'
+        '    }\n'
+        '    // Apply assets\n    assets.Apply();\n',
+    )
 print("done")

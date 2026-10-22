@@ -19,10 +19,11 @@ https://espressif.github.io/esptool-js/
 
 ## Updating over Wi-Fi (no cable)
 
-Each build also produces:
-- `esp32-s3-touch-amoled-1.75_2.5.3.bin` - the app, for OTA
-- `robi-assets-<wake>.bin` - Robi's assets (font, faces, wake word)
+Flash the full image (`robi-full-<wake>.bin`) over USB once: it carries Robi's
+assets (font, faces, wake word). After that, app updates can go over Wi-Fi: put
+`esp32-s3-touch-amoled-1.75_<version>.bin` (higher version) in the home server's
+`data/bin` folder and power-cycle the device.
 
-Put both in the home server's `data/bin` folder. A device on stock 2.5.2 that
-uses this server as its OTA address updates itself at its next power-up, then
-downloads `robi-assets-<wake>.bin` once and restarts with Robi's look.
+Do not offer the app by OTA to a device that still has stock assets: the
+automatic assets download (`ROBI_AUTO_ASSETS=1`) put a stock 2.5.2 device into
+an update/rollback loop, so it is off by default.
