@@ -94,6 +94,7 @@ mkdir -p server/data server/tmp server/data/bin
 cp "$ROOT/seed/.config.yaml" server/data/.config.yaml
 chmod 600 server/data/.config.yaml
 cp "$ROOT/seed/robi-prompt.txt" server/data/robi-prompt.txt
+HOST=$(cat "$ROOT/host.txt")   # may have changed (reserved IP attached during setup)
 sed -i "s|__WS__|wss://$HOST/$SECRET/xiaozhi/v1/|; s|__VISION__|https://$HOST/$SECRET/mcp/vision/explain|" server/data/.config.yaml
 ln -sf "$ROOT/server/tmp/server.log" "$PUB/server.log"
 
