@@ -7,7 +7,9 @@ usage: python patch_xiaozhi.py <xiaozhi_dir> <wake: heyrobby|hiesp>
 - Hebrew+Latin text font and Robi's faces in the assets partition
 - dark theme by default (Robi's face is drawn for a black AMOLED)
 - wake word: custom English "hey robby" (MultiNet) or preset "Hi ESP" (WakeNet)
-- version ROBI_VERSION (env, default 2.5.3) so a device on stock 2.5.2 takes it by OTA
+- version ROBI_VERSION (env, default 2.5.4), higher than the device runs, for OTA
+- turn-based listening: device AEC off, so Robi listens, answers, then listens again
+  (it never hears itself and the server's VAD decides when the child finished)
 - after an OTA update, the device fetches Robi's assets (font, faces, wake word) once
   from the home server: <ota host>/xiaozhi/ota/download/robi-assets-<wake>.bin
 """
@@ -39,10 +41,15 @@ if wake == "heyrobby":
         "CONFIG_SR_MN_CN_NONE=y",
         "CONFIG_SR_MN_EN_MULTINET7_QUANT=y",
     ]
+if os.environ.get("ROBI_TURN_BASED", "1") == "1":
+    extra += ["CONFIG_USE_DEVICE_AEC=n"]
 found = False
 for b in cfg["builds"]:
     if b["name"] == "esp32-s3-touch-amoled-1.75":
-        b["sdkconfig_append"] = b.get("sdkconfig_append", []) + extra
+        lines = b.get("sdkconfig_append", [])
+        if "CONFIG_USE_DEVICE_AEC=n" in extra:
+            lines = [l for l in lines if not l.startswith("CONFIG_USE_DEVICE_AEC=")]
+        b["sdkconfig_append"] = lines + extra
         found = True
 if not found:
     raise SystemExit("build esp32-s3-touch-amoled-1.75 not found in config.json")
@@ -68,7 +75,7 @@ must_replace(
 must_replace(fw / "main/display/lcd_display.cc",
              'settings.GetString("theme", "light")', 'settings.GetString("theme", "dark")')
 # 4. version (must be higher than what the device runs, for OTA)
-version = os.environ.get("ROBI_VERSION", "2.5.3")
+version = os.environ.get("ROBI_VERSION", "2.5.4")
 must_replace(fw / "CMakeLists.txt", 'set(PROJECT_VER "2.5.2")', f'set(PROJECT_VER "{version}")')
 
 # 5. optional: one-time download of Robi's assets from the home server after an app-only
