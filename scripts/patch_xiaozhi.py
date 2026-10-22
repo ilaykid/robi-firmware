@@ -8,7 +8,7 @@ usage: python patch_xiaozhi.py <xiaozhi_dir> <wake: heyrobby|hiesp>
 - dark theme by default (Robi's face is drawn for a black AMOLED)
 - wake word: custom English "hey robby" (MultiNet) or preset "Hi ESP" (WakeNet)
 - version ROBI_VERSION (env, default 2.5.4), higher than the device runs, for OTA
-- round-screen subtitles: wrapped, centered lines inside the circle (no side scrolling)
+- no subtitles on the round screen (the face says it all); status line stays
 - child profiles: two big buttons on the idle screen (Lavi / Ori); a tap starts a
   conversation that opens with "זה לביא" / "זה אורי" so Robi knows who is talking
 - turn-based listening: device AEC off, so Robi listens, answers, then listens again
@@ -146,6 +146,8 @@ must_replace(
     '        RobiButton(robi_profiles_, "\\u05dc\\u05d1\\u05d9\\u05d0", "\\u05d6\\u05d4 \\u05dc\\u05d1\\u05d9\\u05d0", 0x2E86DE);  // Lavi\n'
     '        RobiButton(robi_profiles_, "\\u05d0\\u05d5\\u05e8\\u05d9", "\\u05d6\\u05d4 \\u05d0\\u05d5\\u05e8\\u05d9", 0xF39C12);  // Ori\n'
     '        lv_obj_add_flag(robi_profiles_, LV_OBJ_FLAG_HIDDEN);\n'
+    '        // Robi: no subtitles, the face says it all (the text covered the face)\n'
+    '        SetHideSubtitle(true);\n'
     '    }\n'
     '};\n',
 )
@@ -154,7 +156,7 @@ must_replace(
 must_replace(fw / "main/display/lcd_display.cc",
              'settings.GetString("theme", "light")', 'settings.GetString("theme", "dark")')
 # 4. version (must be higher than what the device runs, for OTA)
-version = os.environ.get("ROBI_VERSION", "2.5.5")
+version = os.environ.get("ROBI_VERSION", "2.5.6")
 must_replace(fw / "CMakeLists.txt", 'set(PROJECT_VER "2.5.2")', f'set(PROJECT_VER "{version}")')
 
 # 5. optional: one-time download of Robi's assets from the home server after an app-only

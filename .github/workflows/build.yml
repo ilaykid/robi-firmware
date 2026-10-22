@@ -7,7 +7,7 @@ on:
 
 env:
   XIAOZHI_TAG: v2.5.2
-  ROBI_VERSION: 2.5.5
+  ROBI_VERSION: 2.5.6
 
 jobs:
   build:
