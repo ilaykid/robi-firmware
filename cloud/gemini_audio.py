@@ -14,12 +14,19 @@ config (ASR section):
     fallback_base_url: https://api.groq.com/openai/v1/audio/transcriptions
     fallback_api_key: <groq key>
     fallback_model: whisper-large-v3
+    rpm_cap: 6        # Gemini calls per minute for hearing (the rest is left for answers)
+    rpd_cap: 220      # Gemini calls per day for hearing (free tier: 15/min, 500/day shared)
     output_dir: tmp/
+
+The free tier is shared with the LLM (same key, same model), so hearing uses Gemini
+only within its own budget and after a 429 rests for a while; Groq takes over meanwhile.
 """
 import base64
 import io
 import time
 import wave
+from collections import deque
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Tuple
 
 import aiohttp
@@ -68,7 +75,33 @@ class ASRProvider(ASRProviderBase):
         self.fb_key = config.get("fallback_api_key")
         self.fb_model = config.get("fallback_model") or "whisper-large-v3"
         self.output_dir = config.get("output_dir") or "tmp/"
+        self.rpm_cap = int(config.get("rpm_cap", 6))
+        self.rpd_cap = int(config.get("rpd_cap", 220))
+        self._recent = deque()          # times of Gemini calls in the last minute
+        self._day = None                # quota day (resets at midnight Pacific)
+        self._day_count = 0
+        self._rest_until = 0.0          # after a 429, let the LLM have the quota
         self.delete_audio_file = delete_audio_file
+
+    @staticmethod
+    def _quota_day():
+        # Gemini daily quotas reset at midnight Pacific time (UTC-8 / UTC-7)
+        return (datetime.now(timezone.utc) - timedelta(hours=7)).date()
+
+    def _gemini_allowed(self) -> bool:
+        now = time.monotonic()
+        if now < self._rest_until:
+            return False
+        day = self._quota_day()
+        if day != self._day:
+            self._day, self._day_count = day, 0
+        while self._recent and now - self._recent[0] > 60:
+            self._recent.popleft()
+        return len(self._recent) < self.rpm_cap and self._day_count < self.rpd_cap
+
+    def _count_gemini(self):
+        self._recent.append(time.monotonic())
+        self._day_count += 1
 
     async def _gemini(self, wav: bytes) -> Optional[str]:
         text = INSTRUCTION + (f"\nContext: {self.hint}" if self.hint else "")
@@ -122,12 +155,18 @@ class ASRProvider(ASRProviderBase):
             return "", None
         wav = _wav_bytes(artifacts.pcm_bytes)
         t = time.monotonic()
-        try:
-            text = await self._gemini(wav)
-            logger.bind(tag=TAG).info(f"Gemini ASR {seconds:.1f}s audio in {time.monotonic() - t:.2f}s: {text}")
-            return text, None
-        except Exception as e:
-            logger.bind(tag=TAG).warning(f"Gemini ASR failed ({e}); using fallback")
+        if self._gemini_allowed():
+            self._count_gemini()
+            try:
+                text = await self._gemini(wav)
+                logger.bind(tag=TAG).info(f"Gemini ASR {seconds:.1f}s audio in {time.monotonic() - t:.2f}s: {text}")
+                return text, None
+            except Exception as e:
+                if "429" in str(e)[:12]:
+                    self._rest_until = time.monotonic() + 120
+                logger.bind(tag=TAG).warning(f"Gemini ASR failed ({str(e)[:200]}); using fallback")
+        else:
+            logger.bind(tag=TAG).info(f"Gemini hearing budget used (today {self._day_count}/{self.rpd_cap}); using fallback")
         try:
             t = time.monotonic()
             text = await self._fallback(wav)
