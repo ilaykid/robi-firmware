@@ -3,6 +3,9 @@ name: Build Robi firmware
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - 'cloud/**'
+      - '**.md'
   workflow_dispatch:
 
 env:
