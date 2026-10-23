@@ -96,7 +96,7 @@ must_replace(
 must_replace(fw / "main/display/lcd_display.cc",
              'settings.GetString("theme", "light")', 'settings.GetString("theme", "dark")')
 # 4. version (must be higher than what the device runs, for OTA)
-version = os.environ.get("ROBI_VERSION", "2.6.0")
+version = os.environ.get("ROBI_VERSION", "2.6.1")
 must_replace(fw / "CMakeLists.txt", 'set(PROJECT_VER "2.5.2")', f'set(PROJECT_VER "{version}")')
 
 # 5. optional: one-time download of Robi's assets from the home server after an app-only
