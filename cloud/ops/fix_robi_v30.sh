@@ -90,6 +90,15 @@ print("Config valid! LLM model:", y["LLM"]["RobiGemini"]["model_name"], "| ASR m
 PY
 
 sudo systemctl restart robi
+# Authorize local PC SSH key so future updates can be run directly via SSH
+sudo mkdir -p /home/ubuntu/.ssh
+sudo chmod 700 /home/ubuntu/.ssh
+if ! sudo grep -q "IJ8JwV2ew4FD1Rz4opxxMjEMAnk7g/DMf+UpgP7G0/wU" /home/ubuntu/.ssh/authorized_keys 2>/dev/null; then
+  echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJ8JwV2ew4FD1Rz4opxxMjEMAnk7g/DMf+UpgP7G0/wU ilay@windows" | sudo tee -a /home/ubuntu/.ssh/authorized_keys >/dev/null
+  sudo chmod 600 /home/ubuntu/.ssh/authorized_keys
+  sudo chown -R ubuntu:ubuntu /home/ubuntu/.ssh
+fi
+
 for i in $(seq 1 30); do
   curl -fs http://127.0.0.1:8003/xiaozhi/ota/ >/dev/null && break
   sleep 2
