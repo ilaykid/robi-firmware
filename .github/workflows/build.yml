@@ -10,7 +10,7 @@ on:
 
 env:
   XIAOZHI_TAG: v2.5.2
-  ROBI_VERSION: 2.8.0
+  ROBI_VERSION: 2.8.1
 
 jobs:
   build:

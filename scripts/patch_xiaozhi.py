@@ -92,9 +92,11 @@ must_replace(
     '    }\n' + robi_ui + '};\n',
 )
 
-# 3. dark theme by default
-must_replace(fw / "main/display/lcd_display.cc",
-             'settings.GetString("theme", "light")', 'settings.GetString("theme", "dark")')
+# 3. dark theme by default + black boot fill + 24KB LVGL task stack for 30-FPS cyber-face
+lcd_cc = fw / "main/display/lcd_display.cc"
+must_replace(lcd_cc, 'settings.GetString("theme", "light")', 'settings.GetString("theme", "dark")')
+must_replace(lcd_cc, 'std::vector<uint16_t> buffer(width_, 0xFFFF);', 'std::vector<uint16_t> buffer(width_, 0x0000);', count=3)
+must_replace(lcd_cc, '    port_cfg.task_priority = 1;\n', '    port_cfg.task_priority = 1;\n    port_cfg.task_stack = 24576;\n', count=3)
 # 4. version (must be higher than what the device runs, for OTA)
 version = os.environ.get("ROBI_VERSION", "2.6.1")
 must_replace(fw / "CMakeLists.txt", 'set(PROJECT_VER "2.5.2")', f'set(PROJECT_VER "{version}")')
