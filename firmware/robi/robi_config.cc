@@ -126,6 +126,17 @@ void RobiConfig::EnsureLoaded() {
     // 2. Check raw flash 0x010000 ("ROBICFG1") provisioned by WebSerial Wizard
     TryImportFlashSectorLocked();
 
+    // 2b. Ensure WifiStation pins to the strongest BSSID from scan results instead of WIFI_FAST_SCAN picking a weak repeater
+    nvs_handle_t wifi_h = 0;
+    if (nvs_open("wifi", NVS_READWRITE, &wifi_h) == ESP_OK) {
+        uint8_t rem = 0;
+        if (nvs_get_u8(wifi_h, "remember_bssid", &rem) != ESP_OK || rem != 1) {
+            nvs_set_u8(wifi_h, "remember_bssid", 1);
+            nvs_commit(wifi_h);
+        }
+        nvs_close(wifi_h);
+    }
+
     // 3. Load persistent memories
     LoadMemoriesFromNvsLocked();
 
@@ -187,8 +198,20 @@ void RobiConfig::TryImportFlashSectorLocked() {
     }
 
     if (!wifi_ssid.empty()) {
-        ESP_LOGI(TAG, "Provisioning WiFi SSID '%s' from WebSerial config", wifi_ssid.c_str());
-        SsidManager::GetInstance().AddSsid(wifi_ssid, wifi_pass);
+        bool keep_existing_pass = false;
+        if (wifi_pass.empty()) {
+            const auto& list = SsidManager::GetInstance().GetSsidList();
+            for (const auto& item : list) {
+                if (item.ssid == wifi_ssid && !item.password.empty()) {
+                    keep_existing_pass = true;
+                    break;
+                }
+            }
+        }
+        if (!keep_existing_pass) {
+            ESP_LOGI(TAG, "Provisioning WiFi SSID '%s' from WebSerial config", wifi_ssid.c_str());
+            SsidManager::GetInstance().AddSsid(wifi_ssid, wifi_pass);
+        }
     }
 
     std::string clean_json = SerializeLocked(false);

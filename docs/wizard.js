@@ -102,12 +102,15 @@ function loadDraft() {
     if (Array.isArray(saved.kids)) state.kids = saved.kids.slice(0, 3);
     if (saved.wake_variant) state.wake_variant = saved.wake_variant;
     if (saved.wifi_ssid) state.wifi_ssid = saved.wifi_ssid;
+    if (saved.wifi_pass) state.wifi_pass = saved.wifi_pass;
+    if (saved.gemini_key) state.gemini_key = saved.gemini_key;
   } catch (_) {}
 }
 
 function saveDraft() {
   try {
     const safeCopy = {
+      gemini_key: state.gemini_key,
       robot_name: state.robot_name,
       language: state.language,
       voice: state.voice,
@@ -120,6 +123,7 @@ function saveDraft() {
       kids: state.kids,
       wake_variant: state.wake_variant,
       wifi_ssid: state.wifi_ssid,
+      wifi_pass: state.wifi_pass,
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(safeCopy));
   } catch (_) {}
@@ -644,7 +648,7 @@ async function fetchFirmwareBytes() {
   const variant = state.wake_variant === "hiesp" ? "hiesp" : "heyrobby";
   const url = `./firmware/robi-full-${variant}.bin`;
   appendLog(`Downloading pre-built firmware: ${url} ...`);
-  const res = await fetch(url);
+  const res = await fetch(`${url}?t=${Date.now()}`, { cache: "no-store" });
   if (!res.ok) {
     throw new Error(
       `קובץ הקושחה (${url}) לא נמצא בשרת זה (HTTP ${res.status}). ניתן לבחור קובץ .bin מקומי מתחת לכפתור או להשתמש באתר GitHub Pages הרשמי.`
@@ -861,6 +865,7 @@ window.addEventListener("DOMContentLoaded", () => {
   document.getElementById("inpGeminiKey").addEventListener("input", (e) => {
     state.gemini_key = e.target.value;
     state.keyVerified = false;
+    saveDraft();
   });
   document.getElementById("btnVerifyKey").addEventListener("click", verifyGeminiKey);
 
@@ -918,6 +923,7 @@ window.addEventListener("DOMContentLoaded", () => {
   });
   document.getElementById("inpWifiPass").addEventListener("input", (e) => {
     state.wifi_pass = e.target.value;
+    saveDraft();
   });
   document.getElementById("selWakeVariant").addEventListener("change", (e) => {
     state.wake_variant = e.target.value;

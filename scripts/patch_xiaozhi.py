@@ -244,7 +244,23 @@ must_replace(
 )
 
 # 5. AudioService raw PCM fast-path (16kHz mic -> Gemini Live, 24kHz Gemini Live -> speaker)
+audio_h = fw / "main/audio/audio_service.h"
+must_replace(
+    audio_h,
+    "#define MAX_PLAYBACK_TASKS_IN_QUEUE 2\n",
+    "#define MAX_PLAYBACK_TASKS_IN_QUEUE 8\n",
+)
 audio_cc = fw / "main/audio/audio_service.cc"
+must_replace(
+    audio_cc,
+    '        "audio_output", 2048 * 2, this, 4, &audio_output_task_handle_);\n',
+    '        "audio_output", 2048 * 2, this, 6, &audio_output_task_handle_);\n',
+)
+must_replace(
+    audio_cc,
+    '        "opus_codec", 2048 * 12, this, 2, &opus_codec_task_handle_);\n',
+    '        "opus_codec", 2048 * 12, this, 5, &opus_codec_task_handle_);\n',
+)
 must_replace(
     audio_cc,
     "    audio_engine_->OnOutput([this](std::vector<int16_t>&& data) {\n"

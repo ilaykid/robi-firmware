@@ -31,10 +31,11 @@ constexpr EventBits_t kDoneTx = (1 << 1);
 constexpr EventBits_t kDonePlay = (1 << 2);
 constexpr EventBits_t kDoneAll = kDoneRx | kDoneTx | kDonePlay;
 
-constexpr size_t kPsramRingSamples = 262144;  // 512 KB = 10.92s @ 24kHz
+constexpr size_t kPsramRingSamples = 262144;   // 512 KB = 10.92s @ 24kHz
 constexpr size_t kFallbackRingSamples = 48000;
-constexpr size_t kPreBufferSamples = 9600;    // 400ms @ 24kHz cushion before starting speaker
-constexpr size_t kPlaybackFrameSamples = 1440; // 60ms @ 24kHz
+constexpr size_t kPreBufferSamples = 14400;    // 600ms @ 24kHz cushion before starting speaker
+constexpr size_t kRebufferSamples = 4800;      // 200ms @ 24kHz cushion if network stalls mid-turn
+constexpr size_t kPlaybackFrameSamples = 1200; // 50ms @ 24kHz (divides 2400/4800/9600 evenly!)
 
 int64_t g_model_cooldown_until_us[2] = {0, 0};
 
@@ -393,7 +394,7 @@ bool GeminiLiveProtocol::TryConnectModel(const std::string& api_key, const std::
 
     ws_connected_.store(true);
 
-    // Launch worker tasks (generous stacks so SSL receive task stays ultra-light)
+    // Launch worker tasks at priority 3 so AudioOutputTask (priority 4) is never preempted during I2S DMA writes
     xTaskCreate(
         [](void* arg) {
             auto* self = static_cast<GeminiLiveProtocol*>(arg);
@@ -401,7 +402,7 @@ bool GeminiLiveProtocol::TryConnectModel(const std::string& api_key, const std::
             xEventGroupSetBits(self->worker_done_group_, kDoneRx);
             vTaskDelete(nullptr);
         },
-        "gemini_rx", 16384, this, 5, &rx_task_);
+        "gemini_rx", 16384, this, 3, &rx_task_);
 
     xTaskCreate(
         [](void* arg) {
@@ -410,7 +411,7 @@ bool GeminiLiveProtocol::TryConnectModel(const std::string& api_key, const std::
             xEventGroupSetBits(self->worker_done_group_, kDoneTx);
             vTaskDelete(nullptr);
         },
-        "gemini_tx", 10240, this, 4, &tx_task_);
+        "gemini_tx", 10240, this, 3, &tx_task_);
 
     xTaskCreate(
         [](void* arg) {
@@ -419,7 +420,7 @@ bool GeminiLiveProtocol::TryConnectModel(const std::string& api_key, const std::
             xEventGroupSetBits(self->worker_done_group_, kDonePlay);
             vTaskDelete(nullptr);
         },
-        "gemini_play", 8192, this, 5, &play_task_);
+        "gemini_play", 8192, this, 3, &play_task_);
 
     std::string setup_msg = BuildSetupJson(model_name, voice_name, lang_code, include_lang_code);
     if (!websocket_->Send(setup_msg)) {
@@ -862,6 +863,8 @@ void GeminiLiveProtocol::RxWorkerLoop() {
     std::string clause_buf;
     bool clause_had_emoji = false;
     std::string last_emo;
+    std::vector<uint8_t> pcm_bytes;
+    pcm_bytes.reserve(16384);
 
     while (!stopping_.load()) {
         std::string raw;
@@ -969,7 +972,9 @@ void GeminiLiveProtocol::RxWorkerLoop() {
                     if (b64_len == 0) continue;
 
                     size_t max_decoded = (b64_len * 3) / 4 + 4;
-                    std::vector<uint8_t> pcm_bytes(max_decoded);
+                    if (pcm_bytes.size() < max_decoded) {
+                        pcm_bytes.resize(max_decoded);
+                    }
                     size_t decoded_len = 0;
                     if (mbedtls_base64_decode(
                             pcm_bytes.data(), pcm_bytes.size(), &decoded_len,
@@ -1016,20 +1021,22 @@ void GeminiLiveProtocol::RxWorkerLoop() {
 void GeminiLiveProtocol::PlaybackFeederLoop() {
     std::vector<int16_t> frame_buf(kPlaybackFrameSamples);
     bool speaking_active = false;
+    bool rebuffer_needed = false;
+    int initial_burst_left = 0;
     uint32_t active_gen = 0;
     int frames_since_env = 0;
     int last_env_lvl = -1;
 
     while (!stopping_.load()) {
+        size_t min_needed = speaking_active
+                                ? (rebuffer_needed ? kRebufferSamples : kPlaybackFrameSamples)
+                                : kPreBufferSamples;
         {
             std::unique_lock<std::mutex> lk(ring_mutex_);
-            ring_cv_.wait_for(lk, std::chrono::milliseconds(40), [this, speaking_active]() {
+            ring_cv_.wait_for(lk, std::chrono::milliseconds(35), [this, min_needed]() {
                 if (stopping_.load() || !ws_connected_.load()) return true;
-                if (speaking_active) {
-                    return ring_count_ > 0 || turn_complete_.load() || drop_turn_.load();
-                }
-                return ring_count_ >= kPreBufferSamples ||
-                       (turn_complete_.load() && ring_count_ > 0);
+                if (drop_turn_.load() || turn_complete_.load()) return true;
+                return ring_count_ >= min_needed;
             });
         }
 
@@ -1037,6 +1044,7 @@ void GeminiLiveProtocol::PlaybackFeederLoop() {
 
         if (drop_turn_.load()) {
             speaking_active = false;
+            rebuffer_needed = false;
             continue;
         }
 
@@ -1044,12 +1052,21 @@ void GeminiLiveProtocol::PlaybackFeederLoop() {
         if (!speaking_active) {
             if (avail >= kPreBufferSamples || (turn_complete_.load() && avail > 0)) {
                 speaking_active = true;
+                rebuffer_needed = false;
+                initial_burst_left = 6;  // Immediately preload 300ms (6 * 50ms) into AudioService queue
                 active_gen = turn_gen_.load();
                 frames_since_env = 0;
                 last_env_lvl = -1;
                 EmitTtsState("start");
-                // Allow Application main loop 85ms to enter kDeviceStateSpeaking
-                vTaskDelay(pdMS_TO_TICKS(85));
+
+                // Wait up to 450ms for Application main loop to enter kDeviceStateSpeaking so 0 frames are dropped
+                int wait_spk = 0;
+                while (!stopping_.load() && active_gen == turn_gen_.load() && !drop_turn_.load() &&
+                       Application::GetInstance().GetDeviceState() != kDeviceStateSpeaking &&
+                       wait_spk < 45) {
+                    vTaskDelay(pdMS_TO_TICKS(10));
+                    ++wait_spk;
+                }
             } else {
                 continue;
             }
@@ -1057,6 +1074,7 @@ void GeminiLiveProtocol::PlaybackFeederLoop() {
 
         if (active_gen != turn_gen_.load() || drop_turn_.load()) {
             speaking_active = false;
+            rebuffer_needed = false;
             continue;
         }
 
@@ -1076,17 +1094,22 @@ void GeminiLiveProtocol::PlaybackFeederLoop() {
         }
 
         avail = RingAvailable();
-        if (avail >= kPlaybackFrameSamples || (turn_complete_.load() && avail > 0)) {
+        size_t pop_threshold = rebuffer_needed ? kRebufferSamples : kPlaybackFrameSamples;
+        if (avail >= pop_threshold || (turn_complete_.load() && avail > 0)) {
+            if (rebuffer_needed) {
+                rebuffer_needed = false;
+                initial_burst_left = 4;  // Preload 200ms after mid-turn rebuffer
+            }
             size_t to_pop = std::min(kPlaybackFrameSamples, avail);
             size_t got = PopPcm24kFromRing(frame_buf.data(), to_pop);
             ring_cv_.notify_one();
 
             if (got > 0) {
                 ++frames_since_env;
-                if (frames_since_env >= 3) {
+                if (frames_since_env >= 5) {
                     frames_since_env = 0;
                     int lvl = ComputeVoiceLevel(frame_buf.data(), got);
-                    if (std::abs(lvl - last_env_lvl) >= 6 || (lvl == 0 && last_env_lvl != 0)) {
+                    if (std::abs(lvl - last_env_lvl) >= 12 || (lvl == 0 && last_env_lvl != 0)) {
                         last_env_lvl = lvl;
                         EmitEmotion("v:" + std::to_string(lvl));
                     }
@@ -1106,45 +1129,60 @@ void GeminiLiveProtocol::PlaybackFeederLoop() {
                     if (as.PushPacketToDecodeQueue(std::move(pkt), false)) {
                         break;
                     }
-                    // AudioService queue already has ~1.2s buffered; pace gently
+                    // AudioService queue is full (40 packets = 2.0s buffered); wait for hardware DMA to drain
                     pkt = std::make_unique<AudioStreamPacket>();
                     pkt->sample_rate = 24000;
                     pkt->frame_duration = 0;
                     pkt->payload.resize(got * sizeof(int16_t));
                     std::memcpy(pkt->payload.data(), frame_buf.data(), pkt->payload.size());
-                    vTaskDelay(pdMS_TO_TICKS(20));
+                    vTaskDelay(pdMS_TO_TICKS(18));
                 }
-                vTaskDelay(pdMS_TO_TICKS(52));
+
+                if (initial_burst_left > 0) {
+                    --initial_burst_left;
+                } else {
+                    // Feed 50ms frames every 40ms so AudioService queue stays topped up and never underruns
+                    vTaskDelay(pdMS_TO_TICKS(40));
+                }
             }
             continue;
         }
 
-        // Ring is currently empty
-        if (turn_complete_.load()) {
-            turn_complete_.store(false);
-            speaking_active = false;
-
-            // Wait for hardware I2S DMA playback queue to finish draining cleanly
+        // Ring has fewer than kPlaybackFrameSamples
+        if (!turn_complete_.load()) {
             auto& as = Application::GetInstance().GetAudioService();
-            int wait_loops = 0;
-            while (!stopping_.load() && active_gen == turn_gen_.load() &&
-                   !as.IsPlaybackIdle() && wait_loops < 100) {
-                vTaskDelay(pdMS_TO_TICKS(25));
-                ++wait_loops;
+            if (as.IsPlaybackIdle()) {
+                // Hardware queue drained mid-turn due to network jitter; accumulate 200ms cushion before resuming
+                rebuffer_needed = true;
             }
-            if (!stopping_.load() && active_gen == turn_gen_.load()) {
-                EmitEmotion("v:0");
-                last_activity_us_.store(esp_timer_get_time());
-                EmitTtsState("stop");
+            continue;
+        }
 
-                if (close_after_turn_.exchange(false)) {
-                    vTaskDelay(pdMS_TO_TICKS(250));
-                    Application::GetInstance().Schedule([this]() {
-                        if (IsAudioChannelOpened()) {
-                            CloseAudioChannel(false);
-                        }
-                    });
-                }
+        // Turn is complete and ring is completely drained
+        turn_complete_.store(false);
+        speaking_active = false;
+        rebuffer_needed = false;
+
+        // Wait for hardware I2S DMA playback queue to finish draining cleanly
+        auto& as = Application::GetInstance().GetAudioService();
+        int wait_loops = 0;
+        while (!stopping_.load() && active_gen == turn_gen_.load() &&
+               !as.IsPlaybackIdle() && wait_loops < 100) {
+            vTaskDelay(pdMS_TO_TICKS(25));
+            ++wait_loops;
+        }
+        if (!stopping_.load() && active_gen == turn_gen_.load()) {
+            EmitEmotion("v:0");
+            last_activity_us_.store(esp_timer_get_time());
+            EmitTtsState("stop");
+
+            if (close_after_turn_.exchange(false)) {
+                vTaskDelay(pdMS_TO_TICKS(250));
+                Application::GetInstance().Schedule([this]() {
+                    if (IsAudioChannelOpened()) {
+                        CloseAudioChannel(false);
+                    }
+                });
             }
         }
     }
