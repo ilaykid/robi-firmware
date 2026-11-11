@@ -31,7 +31,7 @@ const char kPortalHtml[] = R"ROBIHTML(<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>רובי — ממשק ניהול בית</title>
+<title>HeyRobi — ממשק ניהול בית</title>
 <style>
 :root{--bg:#080d1a;--card:#11192e;--border:#1e2d4d;--cyan:#00e5ff;--txt:#f1f5f9;--muted:#94a3b8;--ok:#10b981;--err:#ef4444}
 *{box-sizing:border-box;font-family:system-ui,-apple-system,'Segoe UI',sans-serif}
@@ -42,6 +42,8 @@ h1{margin:0;font-size:1.65rem;background:linear-gradient(90deg,#00e5ff,#60a5fa,#
 .sub{color:var(--muted);font-size:.9rem;margin-top:4px}
 .status-bar{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-top:12px}
 .pill{background:#0d1527;border:1px solid var(--border);border-radius:99px;padding:5px 12px;font-size:.82rem;color:#cbd5e1}
+.topic-chip{display:inline-flex;align-items:center;gap:6px;background:#0f213d;border:1px solid var(--cyan);border-radius:99px;padding:5px 11px;font-size:.83rem;color:#e0f2fe;margin:4px 0 0 6px}
+.topic-chip b{cursor:pointer;color:#fca5a5;font-size:.95rem}
 .card{background:var(--card);border:1px solid var(--border);border-radius:18px;padding:18px;margin-bottom:14px;box-shadow:0 10px 30px rgba(0,0,0,.35)}
 .card h2{margin:0 0 12px;font-size:1.1rem;color:var(--cyan);display:flex;align-items:center;gap:8px}
 label{display:block;font-size:.86rem;color:#cbd5e1;margin:10px 0 5px}
@@ -70,7 +72,7 @@ button{cursor:pointer;border:none;border-radius:12px;padding:11px 16px;font-weig
 <body>
 <div class="wrap">
   <header>
-    <h1>🤖 הגדרות רובי</h1>
+    <h1>🤖 HeyRobi — ניהול בית</h1>
     <div class="sub">ניהול אלחוטי מקומי — כל השינויים מתעדכנים מיד על המכשיר</div>
     <div class="status-bar" id="statusBar"><span class="pill">טוען נתונים...</span></div>
   </header>
@@ -106,7 +108,10 @@ button{cursor:pointer;border:none;border-radius:12px;padding:11px 16px;font-weig
   </div>
 
   <div class="card">
-    <h2>🎨 עיצוב פנים וצבעים</h2>
+    <h2>🎨 סגנון פרצוף וערכת צבעים</h2>
+    <label>צורת הפנים של רובי:</label>
+    <div class="themes" id="styleGrid"></div>
+    <label style="margin-top:12px">צבע הניאון:</label>
     <div class="themes" id="themeGrid"></div>
     <label style="margin-top:12px">בדיקת הבעה בשידור חי על המסך של רובי:</label>
     <div class="emo-row">
@@ -121,7 +126,17 @@ button{cursor:pointer;border:none;border-radius:12px;padding:11px 16px;font-weig
   </div>
 
   <div class="card">
-    <h2>👧👦 ילדים ונושאי שיחה (עד 3 כפתורים על המסך)</h2>
+    <h2>💬 נושאי שיחה אישיים שההורים מוסיפים</h2>
+    <div style="color:var(--muted);font-size:.84rem;margin-bottom:8px">כתבו חופשי כל נושא שתרצו שרובי ישלב בשיחות, בחידות ובסיפורים (למשל: כדורסל, שחמט, הכנה לכיתה ג', מיתולוגיה יוונית, גיטרה...)</div>
+    <div style="display:flex;gap:8px">
+      <input type="text" id="newTopicInp" placeholder="הקלידו נושא שיחה משלכם..." onkeydown="if(event.key==='Enter'){event.preventDefault();addTopic();}">
+      <button type="button" class="btn-sec" onclick="addTopic()">+ הוסף</button>
+    </div>
+    <div id="topicsWrap" style="margin-top:8px"></div>
+  </div>
+
+  <div class="card">
+    <h2>👧👦 ילדים וכפתורי נושאים על המסך (עד 3 ילדים)</h2>
     <div style="color:var(--muted);font-size:.84rem;margin-bottom:8px">אפשר להשאיר ללא ילדים (לחיצה על הפנים של רובי לשיחה חופשית), או להוסיף עד 3 ילדים עם תחומי עניין וכפתורי פעילות מותאמים.</div>
     <div id="kidsWrap"></div>
     <button type="button" class="btn-sec" id="addKidBtn" onclick="addKid()" style="margin-top:10px">+ הוסף ילד/ה</button>
@@ -155,6 +170,13 @@ button{cursor:pointer;border:none;border-radius:12px;padding:11px 16px;font-weig
 <div class="toast" id="toast"></div>
 
 <script>
+const STYLES=[
+  {id:'cyber_visor',name:'קפסולות סייבר'},
+  {id:'round_kawaii',name:'עגול חמוד'},
+  {id:'retro_pixel',name:'רטרו פיקסל'},
+  {id:'visor_cyclops',name:'משקף סייבורג'},
+  {id:'owl_mech',name:'עדשות מכניות'}
+];
 const THEMES=[
   {id:'cyber_cyan',name:'סייבר טורקיז',hex:'#00E5FF'},
   {id:'solar_gold',name:'שמש זהובה',hex:'#FFB703'},
@@ -168,7 +190,7 @@ const DEF_ACTS=[
   {label:'ידע כללי',prompt:'ספר לי משהו מרתק ומפתיע במדע, חלל או חיות!'},
   {label:'סיפור',prompt:'בוא נמשיך או נמציא יחד סיפור הרפתקאות'}
 ];
-let state={theme:'cyber_cyan',kids:[]};
+let state={theme:'cyber_cyan',face_style:'cyber_visor',custom_topics:[],kids:[]};
 
 function showToast(msg,err){
   const t=document.getElementById('toast');
@@ -177,6 +199,18 @@ function showToast(msg,err){
   t.style.borderColor=err?'#ef4444':'#10b981';
   t.style.display='block';
   setTimeout(()=>t.style.display='none',2800);
+}
+
+function renderStyles(){
+  const g=document.getElementById('styleGrid');
+  g.innerHTML='';
+  STYLES.forEach(st=>{
+    const b=document.createElement('div');
+    b.className='theme-btn'+(state.face_style===st.id?' active':'');
+    b.textContent=st.name;
+    b.onclick=()=>{state.face_style=st.id;renderStyles();};
+    g.appendChild(b);
+  });
 }
 
 function renderThemes(){
@@ -190,6 +224,20 @@ function renderThemes(){
     g.appendChild(b);
   });
 }
+
+function renderTopics(){
+  const w=document.getElementById('topicsWrap');
+  w.innerHTML=(state.custom_topics||[]).map((t,i)=>`<span class="topic-chip">${esc(t)} <b onclick="removeTopic(${i})">×</b></span>`).join('');
+}
+function addTopic(){
+  const inp=document.getElementById('newTopicInp');
+  const v=inp.value.trim();
+  if(!v||(state.custom_topics||[]).length>=16)return;
+  if(!state.custom_topics.includes(v))state.custom_topics.push(v);
+  inp.value='';
+  renderTopics();
+}
+function removeTopic(i){state.custom_topics.splice(i,1);renderTopics();}
 
 function esc(s){return (s||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');}
 
@@ -255,6 +303,10 @@ async function saveAll(){
     voice:document.getElementById('voice').value,
     language:document.getElementById('language').value,
     theme:state.theme,
+    face_style:state.face_style,
+    volume:+document.getElementById('volRange').value,
+    brightness:+document.getElementById('briRange').value,
+    custom_topics:state.custom_topics||[],
     custom_prompt:document.getElementById('customPrompt').value.trim(),
     kids:state.kids.filter(k=>k.name&&k.name.trim())
   };
@@ -278,8 +330,12 @@ async function loadAll(){
     document.getElementById('customPrompt').value=cfg.custom_prompt||'';
     document.getElementById('keyHint').textContent=cfg.has_key?`(מוגדר: ${cfg.key_hint})`:'(טרם הוגדר מפתח!)';
     state.theme=cfg.theme||'cyber_cyan';
+    state.face_style=cfg.face_style||'cyber_visor';
+    state.custom_topics=cfg.custom_topics||[];
     state.kids=cfg.kids||[];
+    renderStyles();
     renderThemes();
+    renderTopics();
     renderKids();
 
     document.getElementById('statusBar').innerHTML=`

@@ -1,4 +1,4 @@
-name: Build OpenRobi Firmware & Deploy Setup Wizard
+name: Build HeyRobi Firmware & Deploy Setup Wizard
 
 on:
   push:
@@ -13,7 +13,7 @@ env:
 
 jobs:
   build:
-    name: OpenRobi Standalone (${{ matrix.wake }})
+    name: HeyRobi Standalone (${{ matrix.wake }})
     runs-on: ubuntu-latest
     container:
       image: espressif/idf:v6.1
@@ -28,7 +28,7 @@ jobs:
         shell: bash
         run: git clone --depth 1 --branch "$XIAOZHI_TAG" https://github.com/78/xiaozhi-esp32 fw
 
-      - name: Apply OpenRobi Standalone Patches (${{ matrix.wake }})
+      - name: Apply HeyRobi Standalone Patches (${{ matrix.wake }})
         shell: bash
         run: python3 scripts/patch_xiaozhi.py fw ${{ matrix.wake }}
 
@@ -58,7 +58,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: open-robi-firmware-${{ matrix.wake }}
+          name: heyrobi-firmware-${{ matrix.wake }}
           path: out/
           if-no-files-found: error
 
@@ -87,9 +87,9 @@ jobs:
         run: |
           mkdir -p _site/firmware
           cp -r docs/* _site/
-          cp artifacts/open-robi-firmware-heyrobby/robi-full-heyrobby.bin _site/firmware/
-          cp artifacts/open-robi-firmware-hiesp/robi-full-hiesp.bin _site/firmware/
-          cat artifacts/open-robi-firmware-*/SHA256SUMS-*.txt > _site/firmware/SHA256SUMS.txt
+          cp artifacts/heyrobi-firmware-heyrobby/robi-full-heyrobby.bin _site/firmware/
+          cp artifacts/heyrobi-firmware-hiesp/robi-full-hiesp.bin _site/firmware/
+          cat artifacts/heyrobi-firmware-*/SHA256SUMS-*.txt > _site/firmware/SHA256SUMS.txt
           touch _site/.nojekyll
           ls -lh _site/firmware/
 

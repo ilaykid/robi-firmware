@@ -1,14 +1,14 @@
 <div dir="rtl">
 
-# OpenRobi 🤖 — רובוט AI קולי לילדים בקוד פתוח (ללא שרת!)
+# HeyRobi 🤖 — רובוט AI קולי לילדים בקוד פתוח (ללא שרת!)
 
-![OpenRobi 3D Enclosure](case/Robi_v4/robi_front.png)
+![HeyRobi 3D Enclosure](case/Robi_v4/robi_front.png)
 
-**OpenRobi** הופך לוח `Waveshare ESP32-S3-Touch-AMOLED-1.75` עם מסך מגע עגול ומארז מודפס בתלת־ממד לחבר AI קולי חכם, בטוח ומותאם אישית לילדים — **בחיבור ישיר ל-Google Gemini Live מעל ה-WiFi הביתי, ללא שום צורך בשרת, ב-Docker או במחשב דולק!**
+**HeyRobi** הופך לוח `Waveshare ESP32-S3-Touch-AMOLED-1.75` עם מסך מגע עגול ומארז מודפס בתלת־ממד לחבר AI קולי חכם, בטוח ומותאם אישית לילדים — **בחיבור ישיר ל-Google Gemini Live מעל ה-WiFi הביתי, ללא שום צורך בשרת, ב-Docker או במחשב דולק!**
 
 ---
 
-## ✨ מה הופך את OpenRobi למיוחד?
+## ✨ מה הופך את HeyRobi למיוחד?
 
 - **אפס שרתים (Zero-Server On-Device):** בקר ה-`ESP32-S3` מתחבר ישירות ב-WebSocket מוצפן אל `Google Gemini Live` עם אודיו דו-כיווני חי ב-`24kHz` (ללא קידוד ביניים וללא קטיעות!).
 - **אשף התקנה מלא בדפדפן בלחיצה אחת (WebSerial Wizard):** אין צורך להתקין `Python`, `ESP-IDF` או לקמפל קוד. פותחים את אשף ההתקנה ב-Chrome/Edge, בוחרים קול (כולל השמעת דגימה חיה בדפדפן!), בוחרים עיצוב פנים מתוך 5 ערכות ניאון, מגדירים את שמות הילדים ותחומי העניין שלהם, מזינים WiFi ביתי וצורבים בלחיצה אחת בכבל USB-C!
@@ -33,8 +33,8 @@
 ## 🚀 התקנה ב-3 דקות (ללא שום ידע בתכנות!)
 
 1. הפיקו מפתח API חינמי ב-[Google AI Studio](https://aistudio.google.com/apikey).
-2. פתחו את **אשף ההתקנה של OpenRobi** בדפדפן **Google Chrome** או **Microsoft Edge** במחשב:
-   - דרך אתר הפרויקט ב-GitHub Pages: `https://<YOUR-USER>.github.io/open-robi/`
+2. פתחו את **אשף ההתקנה של HeyRobi** בדפדפן **Google Chrome** או **Microsoft Edge** במחשב:
+   - דרך אתר הפרויקט ב-GitHub Pages: `https://<YOUR-USER>.github.io/hey-robi/`
    - או מקומית מתוך תיקיית הפרויקט: `python -m http.server 8080 -d docs` וגלישה אל `http://localhost:8080`.
 3. עברו על 5 השלבים באשף:
    - **שלב 1:** הדביקו את מפתח ה-Gemini ולחצו **בדוק מפתח**.
@@ -63,9 +63,9 @@
 ## 🧩 מבנה המאגר ופיתוח מקוד מקור
 
 ```text
-open-robi/
+hey-robi/
 ├── docs/                        # אשף ההתקנה האינטראקטיבי בדפדפן + צורב WebSerial (GitHub Pages)
-├── firmware/robi/               # מודולי הליבה העצמאיים של OpenRobi ב-C++:
+├── firmware/robi/               # מודולי הליבה העצמאיים של HeyRobi ב-C++:
 │   ├── robi_config.{h,cc}       # ניהול הגדרות NVS + ייבוא ROBICFG1 מכתובת 0x010000 + זיכרון שיחה
 │   ├── robi_gemini_live.{h,cc}  # לקוח WebSocket ישיר מול Google Gemini Live + באפר PSRAM 512KB
 │   └── robi_http_portal.{h,cc}  # פורטל ניהול להורים בפורט 80 + משיב mDNS עבור robi.local
@@ -109,7 +109,7 @@ docker run --rm -v "$PWD:/work" -w /work/fw \
 
 ## 🌍 English Overview
 
-**OpenRobi** is a 100% standalone, **zero-server** open-source AI companion robot for kids built around the **Waveshare ESP32-S3-Touch-AMOLED-1.75** (`466×466` round touch AMOLED) and a 3D-printable desktop body (`case/Robi_v4/`).
+**HeyRobi** is a 100% standalone, **zero-server** open-source AI companion robot for kids built around the **Waveshare ESP32-S3-Touch-AMOLED-1.75** (`466×466` round touch AMOLED) and a 3D-printable desktop body (`case/Robi_v4/`).
 
 - **Direct ESP32-S3 → Google Gemini Live WebSocket:** Streams `16kHz` mic PCM up and plays `24kHz` native Gemini audio down through a `512KB` PSRAM jitter ring buffer — no Python backend, no cloud relay, no PC required.
 - **1-Click Browser Setup & WebSerial Installer (`docs/`):** Configure your `GEMINI_API_KEY`, preview voices live in the browser, pick from **5 cyber-optic face color themes**, set up `0–3` child profiles with custom activity buttons, enter `2.4GHz` WiFi credentials, and flash everything over USB-C directly from Chrome/Edge.

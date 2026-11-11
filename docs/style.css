@@ -612,3 +612,104 @@ input:focus, select:focus, textarea:focus {
   font-size: 0.8rem;
   color: var(--text-muted);
 }
+
+/* Face Style Cards & Custom Parent Topics */
+.section-lbl {
+  font-size: 0.92rem;
+  font-weight: 700;
+  color: #a5f3fc;
+  margin: 4px 0 10px;
+  display: block;
+}
+
+.style-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(185px, 1fr));
+  gap: 10px;
+  margin-bottom: 20px;
+}
+
+.style-card {
+  background: rgba(15, 23, 42, 0.82);
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  transition: all 0.16s ease;
+}
+.style-card:hover {
+  border-color: rgba(255, 255, 255, 0.42);
+}
+.style-card.selected {
+  border-color: var(--accent-bright);
+  box-shadow: 0 0 0 1px var(--accent-bright), 0 8px 22px rgba(6, 182, 212, 0.22);
+  background: rgba(8, 33, 56, 0.92);
+}
+.style-icon {
+  font-size: 1.55rem;
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  background: rgba(6, 182, 212, 0.14);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.style-info strong {
+  display: block;
+  font-size: 0.92rem;
+  color: #f8fafc;
+}
+.style-info span {
+  font-size: 0.76rem;
+  color: var(--text-muted);
+}
+
+.topics-box {
+  background: rgba(6, 182, 212, 0.07);
+  border: 1px solid rgba(34, 211, 238, 0.28);
+  border-radius: var(--radius-md);
+  padding: 16px;
+  margin-bottom: 18px;
+}
+
+.topic-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.topic-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(8, 47, 73, 0.85);
+  border: 1px solid var(--accent-bright);
+  color: #ecfeff;
+  font-size: 0.84rem;
+  font-weight: 600;
+}
+.topic-tag button {
+  background: none;
+  border: none;
+  color: #fda4af;
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0 2px;
+}
+
+.custom-act-builder {
+  background: rgba(15, 28, 52, 0.65);
+  border: 1px dashed rgba(56, 189, 248, 0.35);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  margin: 8px 0 12px;
+}

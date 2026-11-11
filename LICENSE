@@ -1,6 +1,6 @@
 MIT License
 
-Copyright (c) 2026 OpenRobi Contributors
+Copyright (c) 2026 HeyRobi Contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -25,7 +25,7 @@ Third-Party Software & Asset Notices
 -------------------------------------------------------------------------------
 1. xiaozhi-esp32 (https://github.com/78/xiaozhi-esp32)
    Copyright (c) Terrence (78) — Licensed under the MIT License.
-   OpenRobi builds upon xiaozhi-esp32's hardware drivers, audio pipeline, and
+   HeyRobi builds upon xiaozhi-esp32's hardware drivers, audio pipeline, and
    LVGL display foundation.
 
 2. Google Noto Sans / Noto Sans Hebrew (assets/font_noto_sans_common_30_4.bin)

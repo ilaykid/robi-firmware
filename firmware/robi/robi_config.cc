@@ -52,6 +52,11 @@ bool IsValidTheme(const std::string& t) {
            t == "cosmic_violet" || t == "coral_cute";
 }
 
+bool IsValidFaceStyle(const std::string& s) {
+    return s == "cyber_visor" || s == "round_kawaii" || s == "retro_pixel" ||
+           s == "visor_cyclops" || s == "owl_mech";
+}
+
 bool IsValidVoice(const std::string& v) {
     static const char* const kVoices[] = {
         "Puck", "Fenrir", "Zephyr", "Leda", "Aoede", "Kore",
@@ -208,7 +213,7 @@ bool RobiConfig::ParseIntoLocked(const std::string& json_str, bool keep_existing
 
     RobiConfigData next = data_;
 
-    std::string bot_name = SafeGetStr(root, "bot_name", next.bot_name);
+    std::string bot_name = SafeGetStr(root, "bot_name", SafeGetStr(root, "robot_name", next.bot_name));
     if (!bot_name.empty() && bot_name.size() <= 48) {
         next.bot_name = bot_name;
     }
@@ -233,9 +238,36 @@ bool RobiConfig::ParseIntoLocked(const std::string& json_str, bool keep_existing
         next.language = lang;
     }
 
-    std::string theme = SafeGetStr(root, "theme", next.theme);
+    std::string theme = SafeGetStr(root, "theme", SafeGetStr(root, "face_theme", next.theme));
     if (IsValidTheme(theme)) {
         next.theme = theme;
+    }
+
+    std::string fstyle = SafeGetStr(root, "face_style", next.face_style);
+    if (IsValidFaceStyle(fstyle)) {
+        next.face_style = fstyle;
+    }
+
+    if (cJSON_HasObjectItem(root, "volume")) {
+        next.volume = std::clamp(SafeGetInt(root, "volume", next.volume), 10, 100);
+    }
+    if (cJSON_HasObjectItem(root, "brightness")) {
+        next.brightness = std::clamp(SafeGetInt(root, "brightness", next.brightness), 10, 100);
+    }
+
+    const cJSON* topics_arr = cJSON_GetObjectItemCaseSensitive(root, "custom_topics");
+    if (cJSON_IsArray(topics_arr)) {
+        next.custom_topics.clear();
+        const cJSON* t_item = nullptr;
+        cJSON_ArrayForEach(t_item, topics_arr) {
+            if (next.custom_topics.size() >= 16) break;
+            if (cJSON_IsString(t_item) && t_item->valuestring != nullptr) {
+                std::string s(t_item->valuestring);
+                if (!s.empty() && s.size() <= 120) {
+                    next.custom_topics.push_back(std::move(s));
+                }
+            }
+        }
     }
 
     if (cJSON_HasObjectItem(root, "custom_prompt")) {
@@ -317,6 +349,16 @@ std::string RobiConfig::SerializeLocked(bool mask_api_key) const {
     cJSON_AddStringToObject(root, "voice", data_.voice.c_str());
     cJSON_AddStringToObject(root, "language", data_.language.c_str());
     cJSON_AddStringToObject(root, "theme", data_.theme.c_str());
+    cJSON_AddStringToObject(root, "face_style", data_.face_style.c_str());
+    cJSON_AddNumberToObject(root, "volume", data_.volume);
+    cJSON_AddNumberToObject(root, "brightness", data_.brightness);
+
+    cJSON* topics = cJSON_CreateArray();
+    for (const auto& t : data_.custom_topics) {
+        cJSON_AddItemToArray(topics, cJSON_CreateString(t.c_str()));
+    }
+    cJSON_AddItemToObject(root, "custom_topics", topics);
+
     cJSON_AddStringToObject(root, "custom_prompt", data_.custom_prompt.c_str());
 
     cJSON* kids = cJSON_CreateArray();
@@ -530,6 +572,14 @@ std::string RobiConfig::BuildSystemPrompt() const {
             }
             p += "</family_profiles>\n";
         }
+        if (!data_.custom_topics.empty()) {
+            p += "\n<favorite_conversation_topics>\n"
+                 "The parents suggested these favorite topics to weave naturally into conversations, trivia, and stories:\n";
+            for (const auto& t : data_.custom_topics) {
+                p += "- " + t + "\n";
+            }
+            p += "</favorite_conversation_topics>\n";
+        }
         if (!data_.custom_prompt.empty()) {
             p += "\n<parent_guidelines>\n" + data_.custom_prompt + "\n</parent_guidelines>\n";
         }
@@ -557,6 +607,15 @@ std::string RobiConfig::BuildSystemPrompt() const {
                      std::to_string(k.age) + ".\n";
             }
             p += "</ילדים_בבית>\n";
+        }
+
+        if (!data_.custom_topics.empty()) {
+            p += "\n<נושאי_שיחה_מועדפים_מההורים>\n"
+                 "ההורים ביקשו שתשלב בשמחה ובטבעיות את הנושאים הבאים בשיחות, בחידות, במשחקי הידע ובסיפורים:\n";
+            for (const auto& t : data_.custom_topics) {
+                p += "- " + t + "\n";
+            }
+            p += "</נושאי_שיחה_מועדפים_מההורים>\n";
         }
 
         if (!data_.custom_prompt.empty()) {

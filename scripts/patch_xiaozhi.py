@@ -1,4 +1,4 @@
-"""Patch a xiaozhi-esp32 v2.5.2 checkout into standalone OpenRobi firmware.
+"""Patch a xiaozhi-esp32 v2.5.2 checkout into standalone HeyRobi firmware.
 
 Usage:
     python scripts/patch_xiaozhi.py <xiaozhi_dir> <wake: heyrobby|hiesp>
@@ -36,7 +36,7 @@ def must_replace(path: Path, old: str, new: str, count: int = 1):
     print(f"patched {path.relative_to(fw)}")
 
 
-# 0. Copy standalone OpenRobi C++ modules into fw/main/robi/
+# 0. Copy standalone HeyRobi C++ modules into fw/main/robi/
 robi_src_dir = repo_root / "firmware" / "robi"
 robi_dst_dir = fw / "main" / "robi"
 if robi_dst_dir.exists():
@@ -44,7 +44,7 @@ if robi_dst_dir.exists():
 shutil.copytree(robi_src_dir, robi_dst_dir)
 print(f"copied {robi_src_dir} -> {robi_dst_dir.relative_to(fw)}")
 
-# Register OpenRobi sources and headers in main/CMakeLists.txt
+# Register HeyRobi sources and headers in main/CMakeLists.txt
 main_cmake = fw / "main/CMakeLists.txt"
 must_replace(
     main_cmake,
@@ -367,4 +367,4 @@ must_replace(
 version = os.environ.get("ROBI_VERSION", "3.0.0")
 must_replace(fw / "CMakeLists.txt", 'set(PROJECT_VER "2.5.2")', f'set(PROJECT_VER "{version}")')
 
-print("OpenRobi standalone patch completed successfully!")
+print("HeyRobi standalone patch completed successfully!")

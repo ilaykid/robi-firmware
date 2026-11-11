@@ -1,4 +1,4 @@
-import { FACE_THEMES, RobiFaceSimulator } from "./face-preview.js";
+import { FACE_STYLES, FACE_THEMES, RobiFaceSimulator } from "./face-preview.js";
 import { ESPLoader, Transport } from "./vendor/esptool-js.bundle.js";
 
 const VOICES = [
@@ -58,7 +58,7 @@ const DEFAULT_KIDS = [
   },
 ];
 
-const STORAGE_KEY = "open_robi_wizard_draft_v1";
+const STORAGE_KEY = "heyrobi_wizard_draft_v2";
 
 const state = {
   step: 1,
@@ -67,9 +67,11 @@ const state = {
   robot_name: "רובי",
   language: "he-IL",
   voice: "Puck",
+  face_style: "cyber_visor",
   face_theme: "cyber_cyan",
   volume: 80,
   brightness: 85,
+  custom_topics: [],
   custom_prompt: "",
   kids: structuredClone(DEFAULT_KIDS),
   wifi_ssid: "",
@@ -81,6 +83,7 @@ const state = {
 let simulator = null;
 let activeAudioCtx = null;
 let activeAudioSource = null;
+const nextSlotByKid = {};
 
 function loadDraft() {
   try {
@@ -90,9 +93,11 @@ function loadDraft() {
     if (saved.robot_name) state.robot_name = saved.robot_name;
     if (saved.language) state.language = saved.language;
     if (saved.voice) state.voice = saved.voice;
+    if (saved.face_style && FACE_STYLES[saved.face_style]) state.face_style = saved.face_style;
     if (saved.face_theme && FACE_THEMES[saved.face_theme]) state.face_theme = saved.face_theme;
     if (typeof saved.volume === "number") state.volume = saved.volume;
     if (typeof saved.brightness === "number") state.brightness = saved.brightness;
+    if (Array.isArray(saved.custom_topics)) state.custom_topics = saved.custom_topics.slice(0, 16);
     if (typeof saved.custom_prompt === "string") state.custom_prompt = saved.custom_prompt;
     if (Array.isArray(saved.kids)) state.kids = saved.kids.slice(0, 3);
     if (saved.wake_variant) state.wake_variant = saved.wake_variant;
@@ -106,9 +111,11 @@ function saveDraft() {
       robot_name: state.robot_name,
       language: state.language,
       voice: state.voice,
+      face_style: state.face_style,
       face_theme: state.face_theme,
       volume: state.volume,
       brightness: state.brightness,
+      custom_topics: state.custom_topics,
       custom_prompt: state.custom_prompt,
       kids: state.kids,
       wake_variant: state.wake_variant,
@@ -122,6 +129,7 @@ function saveDraft() {
 function syncSimulator() {
   if (!simulator) return;
   simulator.setState({
+    styleId: state.face_style,
     themeId: state.face_theme,
     robotName: state.robot_name,
     kids: state.kids,
@@ -211,9 +219,9 @@ function pcm24kBase64ToWavBuffer(b64) {
   view.setUint32(4, 36 + pcmLen, true);
   writeStr(8, "WAVE");
   writeStr(12, "fmt ");
-  view.setUint32(16, 16, true); // PCM
-  view.setUint16(20, 1, true); // format = 1
-  view.setUint16(22, 1, true); // mono
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
   view.setUint32(24, sampleRate, true);
   view.setUint32(28, sampleRate * 2, true);
   view.setUint16(32, 2, true);
@@ -324,7 +332,29 @@ async function playVoiceSample() {
   }
 }
 
-// ---------- Step 3: Face Design Themes ----------
+// ---------- Step 3: Face Styles & Color Themes ----------
+function renderFaceStyles() {
+  const grid = document.getElementById("styleGrid");
+  grid.innerHTML = "";
+  for (const st of Object.values(FACE_STYLES)) {
+    const card = document.createElement("div");
+    card.className = "style-card" + (state.face_style === st.id ? " selected" : "");
+    card.innerHTML = `
+      <div class="style-icon">${st.icon}</div>
+      <div class="style-info">
+        <strong>${st.title}</strong>
+        <span>${st.subtitle}</span>
+      </div>
+    `;
+    card.addEventListener("click", () => {
+      state.face_style = st.id;
+      saveDraft();
+      renderFaceStyles();
+    });
+    grid.appendChild(card);
+  }
+}
+
 function renderThemes() {
   const grid = document.getElementById("themeGrid");
   grid.innerHTML = "";
@@ -347,7 +377,46 @@ function renderThemes() {
   }
 }
 
-// ---------- Step 4: Kids & Conversation Topics ----------
+// ---------- Step 4: Parent Custom Topics + Kids ----------
+function renderCustomTopics() {
+  const list = document.getElementById("customTopicsList");
+  list.innerHTML = "";
+  if (state.custom_topics.length === 0) {
+    list.innerHTML = `<span style="color:var(--text-muted);font-size:0.82rem;">עדיין לא נוספו נושאים אישיים — הקלידו למעלה כל נושא שתרצו!</span>`;
+    return;
+  }
+  state.custom_topics.forEach((topic, idx) => {
+    const tag = document.createElement("span");
+    tag.className = "topic-tag";
+    tag.innerHTML = `<span>${escapeAttr(topic)}</span><button type="button" title="הסרת נושא" data-rm-topic="${idx}">×</button>`;
+    list.appendChild(tag);
+  });
+  list.querySelectorAll("[data-rm-topic]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.custom_topics.splice(Number(btn.dataset.rmTopic), 1);
+      saveDraft();
+      renderCustomTopics();
+    });
+  });
+}
+
+function addCustomTopicFromInput() {
+  const inp = document.getElementById("inpNewTopic");
+  const val = (inp.value || "").trim();
+  if (!val) return;
+  if (state.custom_topics.length >= 16) {
+    alert("ניתן להוסיף עד 16 נושאי שיחה אישיים.");
+    return;
+  }
+  if (!state.custom_topics.includes(val)) {
+    state.custom_topics.push(val);
+    saveDraft();
+    renderCustomTopics();
+  }
+  inp.value = "";
+  inp.focus();
+}
+
 function ensureFourActivities(kid) {
   if (!Array.isArray(kid.activities)) kid.activities = [];
   while (kid.activities.length < 4) {
@@ -370,8 +439,8 @@ function renderKids() {
       .map(
         (act, aIdx) => `
         <div class="act-row">
-          <input type="text" data-k="${idx}" data-a="${aIdx}" data-f="label" maxlength="16" placeholder="כותרת כפתור" value="${escapeAttr(act.label)}" />
-          <input type="text" data-k="${idx}" data-a="${aIdx}" data-f="prompt" maxlength="200" placeholder="הנחיה לרובי כשלוחצים על הכפתור" value="${escapeAttr(act.prompt)}" />
+          <input type="text" data-k="${idx}" data-a="${aIdx}" data-f="label" maxlength="16" placeholder="כותרת כפתור #${aIdx + 1}" value="${escapeAttr(act.label)}" />
+          <input type="text" data-k="${idx}" data-a="${aIdx}" data-f="prompt" maxlength="200" placeholder="על מה רובי ידבר כשלוחצים על הכפתור?" value="${escapeAttr(act.prompt)}" />
         </div>
       `
       )
@@ -404,11 +473,20 @@ function renderKids() {
         </div>
       </div>
       <div class="field">
-        <label>תחומי עניין ותחביבים (רובי ישלב אותם בשיחה!)</label>
-        <input type="text" data-kid-field="interests" data-k="${idx}" maxlength="180" placeholder="למשל: לגו, כדורגל, חלל, ציור, מיינקראפט..." value="${escapeAttr(kid.interests || "")}" />
+        <label>תחומי עניין ותחביבים (כתיבה חופשית — רובי ישלב אותם בשיחות!)</label>
+        <input type="text" data-kid-field="interests" data-k="${idx}" maxlength="180" placeholder="למשל: לגו, כדורגל, חלל, ציור, שחמט, מיינקראפט..." value="${escapeAttr(kid.interests || "")}" />
       </div>
       <div class="field" style="margin-bottom:0;">
-        <label>4 כפתורי פעילות מהירים במסך הילד/ה (לחצו על תבנית מוכנה או ערכו חופשי):</label>
+        <label>4 כפתורי נושאים על המסך של ${escapeAttr(kid.name || `ילד/ה #${idx + 1}`)} (כתבו כפתור אישי משלכם או בחרו מתבנית):</label>
+        <div class="custom-act-builder">
+          <div style="font-size:0.8rem;color:#a5f3fc;font-weight:600;margin-bottom:6px;">✨ הוספת כפתור נושא אישי משלכם למסך:</div>
+          <div style="display:grid;grid-template-columns:130px 1fr auto;gap:8px;align-items:center;">
+            <input type="text" id="custActLbl_${idx}" maxlength="16" placeholder="שם על הכפתור" />
+            <input type="text" id="custActPrm_${idx}" maxlength="200" placeholder="מה תרצו שרובי יעשה? (למשל: שאל אותי חידון על כדורגל עולמי!)" />
+            <button type="button" class="btn btn-accent" data-add-cust-act="${idx}" style="padding:9px 13px;font-size:0.82rem;">+ הכנס לכפתור</button>
+          </div>
+        </div>
+        <div style="font-size:0.78rem;color:var(--text-muted);margin-bottom:4px;">או מילוי מהיר מתבנית מוכנה (ואפשר לערוך חופשי כל שורה למטה):</div>
         <div class="preset-chips">${presetHtml}</div>
         ${actRowsHtml}
       </div>
@@ -419,7 +497,6 @@ function renderKids() {
   const btnAdd = document.getElementById("btnAddKid");
   btnAdd.disabled = state.kids.length >= 3;
 
-  // Wire events
   wrap.querySelectorAll("[data-remove-kid]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const i = Number(btn.dataset.removeKid);
@@ -450,14 +527,29 @@ function renderKids() {
     });
   });
 
-  let nextPresetSlot = 0;
+  wrap.querySelectorAll("[data-add-cust-act]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const k = Number(btn.dataset.addCustAct);
+      const lblInp = document.getElementById(`custActLbl_${k}`);
+      const prmInp = document.getElementById(`custActPrm_${k}`);
+      const lbl = (lblInp?.value || "").trim();
+      const prm = (prmInp?.value || "").trim() || (lbl ? `בוא נדבר ונשחק בנושא ${lbl}!` : "");
+      if (!lbl || !state.kids[k]) return;
+      const slot = (nextSlotByKid[k] || 0) % 4;
+      nextSlotByKid[k] = slot + 1;
+      state.kids[k].activities[slot] = { label: lbl, prompt: prm };
+      saveDraft();
+      renderKids();
+    });
+  });
+
   wrap.querySelectorAll("[data-preset]").forEach((chip) => {
     chip.addEventListener("click", () => {
       const k = Number(chip.dataset.kid);
       const p = ACTIVITY_PRESETS[Number(chip.dataset.preset)];
       if (!state.kids[k] || !p) return;
-      const slot = nextPresetSlot % 4;
-      nextPresetSlot++;
+      const slot = (nextSlotByKid[k] || 0) % 4;
+      nextSlotByKid[k] = slot + 1;
       state.kids[k].activities[slot] = { ...p };
       saveDraft();
       renderKids();
@@ -475,13 +567,19 @@ function escapeAttr(s) {
 
 // ---------- Step 5: Build ROBICFG1 Binary Sector & WebSerial Flash ----------
 export function buildConfigObject({ includeSecrets = true } = {}) {
+  const rName = (state.robot_name || "רובי").trim();
+  const fTheme = state.face_theme || "cyber_cyan";
   const obj = {
-    robot_name: (state.robot_name || "רובי").trim(),
+    bot_name: rName,
+    robot_name: rName,
     voice: state.voice || "Puck",
     language: state.language || "he-IL",
-    face_theme: state.face_theme || "cyber_cyan",
+    theme: fTheme,
+    face_theme: fTheme,
+    face_style: state.face_style || "cyber_visor",
     volume: Number(state.volume) || 80,
     brightness: Number(state.brightness) || 85,
+    custom_topics: (state.custom_topics || []).slice(0, 16),
     custom_prompt: (state.custom_prompt || "").trim(),
     kids: state.kids.slice(0, 3).map((k) => ({
       name: (k.name || "ילד").trim(),
@@ -504,21 +602,20 @@ export function buildConfigObject({ includeSecrets = true } = {}) {
 
 export function buildRobiCfgSectorBytes(cfgObj) {
   const jsonBytes = new TextEncoder().encode(JSON.stringify(cfgObj));
-  if (jsonBytes.length === 0 || jsonBytes.length > 16384) {
+  if (jsonBytes.length === 0 || jsonBytes.length > 12288) {
     throw new Error(`גודל קובץ ההגדרות חורג מהמותר (${jsonBytes.length} בתים)`);
   }
   const totalLen = Math.ceil((16 + jsonBytes.length) / 4096) * 4096;
   const sector = new Uint8Array(totalLen);
   sector.fill(0xff);
 
-  // Magic "ROBICFG1" (8 bytes)
   const magic = "ROBICFG1";
   for (let i = 0; i < 8; i++) sector[i] = magic.charCodeAt(i);
 
   const dv = new DataView(sector.buffer);
-  dv.setUint32(8, jsonBytes.length, true); // uint32 LE json_len
+  dv.setUint32(8, jsonBytes.length, true);
   const seq = (Date.now() >>> 0) || 1;
-  dv.setUint32(12, seq, true); // uint32 LE flash_seq
+  dv.setUint32(12, seq, true);
 
   sector.set(jsonBytes, 16);
   return sector;
@@ -587,7 +684,7 @@ async function runUsbFlash({ configOnly = false }) {
 
     const fileArray = [];
     if (!configOnly) {
-      setStatus("flashStatus", "מוריד את קובץ המערכת של רובי...", "warn");
+      setStatus("flashStatus", "מוריד את קובץ המערכת של HeyRobi...", "warn");
       setProgress(4);
       const fwBytes = await fetchFirmwareBytes();
       if (fwBytes.length < 200000 || fwBytes[0] !== 0xe9) {
@@ -600,9 +697,8 @@ async function runUsbFlash({ configOnly = false }) {
 
     setStatus("flashStatus", "בחרו את רובי בחלון ה-USB שנפתח (USB JTAG/serial debug unit)...", "warn");
     const port = await navigator.serial.requestPort({
-      filters: [{ usbVendorId: 0x303a }], // Espressif native USB
+      filters: [{ usbVendorId: 0x303a }],
     }).catch(async () => {
-      // Fallback without filter in case user connects via UART bridge
       return await navigator.serial.requestPort();
     });
 
@@ -633,7 +729,7 @@ async function runUsbFlash({ configOnly = false }) {
       "flashStatus",
       configOnly
         ? "מעדכן הגדרות בזיכרון של רובי (שנייה אחת)..."
-        : "צורב את מערכת רובי וההגדרות האישיות שלכם (כ-45–90 שניות, נא לא לנתק את הכבל)...",
+        : "צורב את מערכת HeyRobi וההגדרות האישיות שלכם (כ-45–90 שניות, נא לא לנתק את הכבל)...",
       "warn"
     );
 
@@ -644,7 +740,7 @@ async function runUsbFlash({ configOnly = false }) {
       flashFreq: "keep",
       eraseAll: false,
       compress: true,
-      reportProgress: (fileIndex, written, total) => {
+      reportProgress: (fileIndex, written) => {
         if (written === 0 && fileIndex > 0) {
           completedPrior += fileArray[fileIndex - 1].data.length;
         }
@@ -654,7 +750,7 @@ async function runUsbFlash({ configOnly = false }) {
     });
 
     setProgress(100);
-    appendLog("Flash complete! Resetting Robi...");
+    appendLog("Flash complete! Resetting HeyRobi...");
     await loader.after("hard_reset");
     await transport.disconnect();
     transport = null;
@@ -682,7 +778,7 @@ function exportJsonFile() {
   const blob = new Blob([JSON.stringify(cfg, null, 2)], { type: "application/json" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
-  a.download = "robi-profile.json";
+  a.download = "heyrobi-profile.json";
   a.click();
   URL.revokeObjectURL(a.href);
 }
@@ -692,18 +788,23 @@ function importJsonFile(file) {
   reader.onload = () => {
     try {
       const data = JSON.parse(String(reader.result));
-      if (data.robot_name) state.robot_name = data.robot_name;
+      if (data.robot_name || data.bot_name) state.robot_name = data.robot_name || data.bot_name;
       if (data.language) state.language = data.language;
       if (data.voice) state.voice = data.voice;
-      if (data.face_theme && FACE_THEMES[data.face_theme]) state.face_theme = data.face_theme;
+      if (data.face_style && FACE_STYLES[data.face_style]) state.face_style = data.face_style;
+      const th = data.face_theme || data.theme;
+      if (th && FACE_THEMES[th]) state.face_theme = th;
       if (typeof data.volume === "number") state.volume = data.volume;
       if (typeof data.brightness === "number") state.brightness = data.brightness;
+      if (Array.isArray(data.custom_topics)) state.custom_topics = data.custom_topics.slice(0, 16);
       if (typeof data.custom_prompt === "string") state.custom_prompt = data.custom_prompt;
       if (Array.isArray(data.kids)) state.kids = data.kids.slice(0, 3);
       saveDraft();
       hydrateInputs();
       renderVoices();
+      renderFaceStyles();
       renderThemes();
+      renderCustomTopics();
       renderKids();
       alert("הפרופיל נטען בהצלחה!");
     } catch (e) {
@@ -737,10 +838,11 @@ window.addEventListener("DOMContentLoaded", () => {
 
   hydrateInputs();
   renderVoices();
+  renderFaceStyles();
   renderThemes();
+  renderCustomTopics();
   renderKids();
 
-  // Step tabs & Next/Prev buttons
   document.querySelectorAll(".step-tab").forEach((tab) => {
     tab.addEventListener("click", () => setStep(Number(tab.dataset.step)));
   });
@@ -748,7 +850,6 @@ window.addEventListener("DOMContentLoaded", () => {
     btn.addEventListener("click", () => setStep(Number(btn.dataset.goto)));
   });
 
-  // Emotion preview bar
   document.querySelectorAll(".emo-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       document.querySelectorAll(".emo-btn").forEach((b) => b.classList.remove("active"));
@@ -757,7 +858,6 @@ window.addEventListener("DOMContentLoaded", () => {
     });
   });
 
-  // Inputs binding
   document.getElementById("inpGeminiKey").addEventListener("input", (e) => {
     state.gemini_key = e.target.value;
     state.keyVerified = false;
@@ -783,6 +883,14 @@ window.addEventListener("DOMContentLoaded", () => {
     state.brightness = Number(e.target.value);
     document.getElementById("lblBrightness").textContent = `${state.brightness}%`;
     saveDraft();
+  });
+
+  document.getElementById("btnAddTopic").addEventListener("click", addCustomTopicFromInput);
+  document.getElementById("inpNewTopic").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      addCustomTopicFromInput();
+    }
   });
 
   document.getElementById("btnAddKid").addEventListener("click", () => {

@@ -28,6 +28,10 @@ struct RobiConfigData {
     std::string voice = "Puck";
     std::string language = "he-IL";
     std::string theme = "cyber_cyan";
+    std::string face_style = "cyber_visor";
+    int volume = 80;
+    int brightness = 85;
+    std::vector<std::string> custom_topics;
     std::string custom_prompt;
     std::vector<RobiKid> kids;
 };
