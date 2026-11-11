@@ -1,0 +1,1224 @@
+#include "robi_gemini_live.h"
+#include "robi_config.h"
+
+#include "application.h"
+#include "assets/lang_config.h"
+#include "audio_codec.h"
+#include "backlight.h"
+#include "board.h"
+#include "display.h"
+
+#include <cJSON.h>
+#include <esp_heap_caps.h>
+#include <esp_log.h>
+#include <esp_timer.h>
+#include <mbedtls/base64.h>
+#include <wifi_manager.h>
+
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+
+#define TAG "GeminiLive"
+
+namespace {
+
+constexpr EventBits_t kEvtSetupComplete = (1 << 0);
+constexpr EventBits_t kEvtWsClosed = (1 << 1);
+
+constexpr EventBits_t kDoneRx = (1 << 0);
+constexpr EventBits_t kDoneTx = (1 << 1);
+constexpr EventBits_t kDonePlay = (1 << 2);
+constexpr EventBits_t kDoneAll = kDoneRx | kDoneTx | kDonePlay;
+
+constexpr size_t kPsramRingSamples = 262144;  // 512 KB = 10.92s @ 24kHz
+constexpr size_t kFallbackRingSamples = 48000;
+constexpr size_t kPreBufferSamples = 9600;    // 400ms @ 24kHz cushion before starting speaker
+constexpr size_t kPlaybackFrameSamples = 1440; // 60ms @ 24kHz
+
+int64_t g_model_cooldown_until_us[2] = {0, 0};
+
+struct EmojiMapping {
+    const char* utf8;
+    const char* emotion;
+};
+
+constexpr EmojiMapping kEmojiMap[] = {
+    {"😂", "laughing"}, {"🤣", "laughing"}, {"😆", "laughing"},
+    {"🤩", "surprised"}, {"😮", "surprised"}, {"😯", "surprised"}, {"🌟", "surprised"},
+    {"😱", "shocked"},  {"🤯", "shocked"},  {"⚡", "shocked"},
+    {"🥰", "loving"},   {"😍", "loving"},   {"❤", "loving"},    {"💖", "loving"}, {"🤗", "loving"},
+    {"😘", "kissy"},    {"😗", "kissy"},
+    {"😉", "winking"},  {"😜", "winking"},  {"😝", "winking"},
+    {"😎", "cool"},     {"🤖", "cool"},     {"🚀", "cool"},
+    {"🤔", "thinking"}, {"🧐", "thinking"}, {"💭", "thinking"},
+    {"😕", "confused"}, {"🤨", "confused"},
+    {"🤪", "silly"},    {"😛", "silly"},
+    {"😳", "embarrassed"}, {"🙈", "embarrassed"},
+    {"😌", "relaxed"},  {"😋", "relaxed"},
+    {"😢", "sad"},      {"😔", "sad"},
+    {"😭", "crying"},
+    {"😠", "angry"},    {"😡", "angry"},
+    {"😴", "sleepy"},   {"🥱", "sleepy"},
+    {"😏", "confident"},{"💪", "confident"},
+    {"😄", "happy"},    {"😊", "happy"},    {"🙂", "happy"},    {"😁", "happy"}, {"🎉", "happy"},
+};
+
+const char* MatchLeadingOrInlineEmoji(const std::string& s) {
+    for (const auto& m : kEmojiMap) {
+        if (s.find(m.utf8) != std::string::npos) {
+            return m.emotion;
+        }
+    }
+    return nullptr;
+}
+
+const char* InferHebrewClauseEmotion(const std::string& clause) {
+    if (clause.size() < 12) return nullptr;
+    auto has = [&](const char* kw) { return clause.find(kw) != std::string::npos; };
+
+    if (has("מטורף") || has("לא ייאמן") || has("פיצוץ") || has("טריליון")) return "shocked";
+    if (has("מדהים") || has("וואו") || has("הידעת") || has("מפתיע") || has("סופרנובה") || has("קסם"))
+        return "surprised";
+    if (has("מצחיק") || has("בדיחה") || has("חחח") || has("משוגע")) return "laughing";
+    if (has("רוצה לנחש") || has("טריק") || has("קריצה")) return "winking";
+    if (has("תחשוב") || has("דמיין") || has("מעניין") || has("שאלה מצוינת") || has("חידה"))
+        return "thinking";
+    if (has("כל הכבוד") || has("אלוף") || has("פגעת בול") || has("נכון מאוד") || has("גאה בך"))
+        return "loving";
+    if (has("רובוט") || has("חללית") || has("טכנולוגיה") || has("לייזר") || has("מגניב"))
+        return "cool";
+    if (has("מעולה") || has("נפלא") || has("יאללה") || has("בטח")) return "happy";
+    if (!clause.empty() && clause.back() == '?') return "thinking";
+    return nullptr;
+}
+
+bool IsWakeWordToken(const std::string& text) {
+    std::string low;
+    low.reserve(text.size());
+    for (unsigned char c : text) {
+        if (c >= 'A' && c <= 'Z') {
+            low.push_back(static_cast<char>(c + 32));
+        } else {
+            low.push_back(static_cast<char>(c));
+        }
+    }
+    return low == "hey robby" || low == "hey robi" || low == "hi,esp" ||
+           low == "hi esp" || low == "hiesp";
+}
+
+std::string Base64Encode(const uint8_t* src, size_t len) {
+    if (len == 0) return {};
+    size_t olen = 0;
+    mbedtls_base64_encode(nullptr, 0, &olen, src, len);
+    std::string out(olen, '\0');
+    if (mbedtls_base64_encode(reinterpret_cast<unsigned char*>(out.data()), out.size(), &olen,
+                              src, len) != 0) {
+        return {};
+    }
+    out.resize(olen);
+    return out;
+}
+
+}  // namespace
+
+GeminiLiveProtocol::GeminiLiveProtocol() {
+    server_sample_rate_ = 24000;
+    server_frame_duration_ = 60;
+    event_group_ = xEventGroupCreate();
+    worker_done_group_ = xEventGroupCreate();
+
+    pcm_ring_ = static_cast<int16_t*>(
+        heap_caps_malloc(kPsramRingSamples * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (pcm_ring_ != nullptr) {
+        ring_capacity_ = kPsramRingSamples;
+    } else {
+        pcm_ring_ = static_cast<int16_t*>(malloc(kFallbackRingSamples * sizeof(int16_t)));
+        ring_capacity_ = pcm_ring_ ? kFallbackRingSamples : 0;
+    }
+}
+
+GeminiLiveProtocol::~GeminiLiveProtocol() {
+    StopSessionInternal(false);
+    if (pcm_ring_ != nullptr) {
+        heap_caps_free(pcm_ring_);
+        pcm_ring_ = nullptr;
+    }
+    if (worker_done_group_ != nullptr) {
+        vEventGroupDelete(worker_done_group_);
+    }
+    if (event_group_ != nullptr) {
+        vEventGroupDelete(event_group_);
+    }
+}
+
+bool GeminiLiveProtocol::Start() {
+    return true;
+}
+
+bool GeminiLiveProtocol::IsAudioChannelOpened() const {
+    return channel_opened_.load() && ws_connected_.load() && !error_occurred_;
+}
+
+void GeminiLiveProtocol::CloseAudioChannel(bool send_goodbye) {
+    (void)send_goodbye;
+    bool was_open = channel_opened_.load();
+    StopSessionInternal(was_open);
+}
+
+void GeminiLiveProtocol::StopSessionInternal(bool notify_closed) {
+    stopping_.store(true);
+    channel_opened_.store(false);
+    ws_connected_.store(false);
+    turn_gen_.fetch_add(1);
+
+    {
+        std::lock_guard<std::mutex> lk(rx_mutex_);
+        rx_queue_.clear();
+    }
+    rx_cv_.notify_all();
+
+    {
+        std::lock_guard<std::mutex> lk(tx_mutex_);
+        tx_queue_.clear();
+    }
+    tx_cv_.notify_all();
+
+    ClearRing();
+    ring_cv_.notify_all();
+
+    if (rx_task_ != nullptr || tx_task_ != nullptr || play_task_ != nullptr) {
+        xEventGroupWaitBits(worker_done_group_, kDoneAll, pdFALSE, pdTRUE, pdMS_TO_TICKS(4000));
+        rx_task_ = nullptr;
+        tx_task_ = nullptr;
+        play_task_ = nullptr;
+    }
+
+    if (websocket_ != nullptr) {
+        websocket_.reset();
+    }
+
+    if (notify_closed && on_audio_channel_closed_ != nullptr) {
+        on_audio_channel_closed_();
+    }
+}
+
+std::string GeminiLiveProtocol::BuildSetupJson(const std::string& model_name,
+                                               const std::string& voice_name,
+                                               const std::string& lang_code,
+                                               bool include_lang_code) const {
+    std::string sys_prompt = RobiConfig::GetInstance().BuildSystemPrompt();
+
+    cJSON* root = cJSON_CreateObject();
+    cJSON* setup = cJSON_CreateObject();
+    cJSON_AddItemToObject(root, "setup", setup);
+
+    std::string full_model = "models/" + model_name;
+    cJSON_AddStringToObject(setup, "model", full_model.c_str());
+
+    cJSON* gen_cfg = cJSON_CreateObject();
+    cJSON* modalities = cJSON_CreateArray();
+    cJSON_AddItemToArray(modalities, cJSON_CreateString("AUDIO"));
+    cJSON_AddItemToObject(gen_cfg, "responseModalities", modalities);
+
+    cJSON* speech_cfg = cJSON_CreateObject();
+    if (include_lang_code && !lang_code.empty()) {
+        cJSON_AddStringToObject(speech_cfg, "languageCode", lang_code.c_str());
+    }
+    cJSON* voice_cfg = cJSON_CreateObject();
+    cJSON* prebuilt = cJSON_CreateObject();
+    cJSON_AddStringToObject(prebuilt, "voiceName", voice_name.c_str());
+    cJSON_AddItemToObject(voice_cfg, "prebuiltVoiceConfig", prebuilt);
+    cJSON_AddItemToObject(speech_cfg, "voiceConfig", voice_cfg);
+    cJSON_AddItemToObject(gen_cfg, "speechConfig", speech_cfg);
+    cJSON_AddItemToObject(setup, "generationConfig", gen_cfg);
+
+    cJSON* rt_cfg = cJSON_CreateObject();
+    cJSON* aad = cJSON_CreateObject();
+    cJSON_AddNumberToObject(aad, "silenceDurationMs", 500);
+    cJSON_AddItemToObject(rt_cfg, "automaticActivityDetection", aad);
+    cJSON_AddItemToObject(setup, "realtimeInputConfig", rt_cfg);
+
+    cJSON* sys_inst = cJSON_CreateObject();
+    cJSON* sys_parts = cJSON_CreateArray();
+    cJSON* sys_part0 = cJSON_CreateObject();
+    cJSON_AddStringToObject(sys_part0, "text", sys_prompt.c_str());
+    cJSON_AddItemToArray(sys_parts, sys_part0);
+    cJSON_AddItemToObject(sys_inst, "parts", sys_parts);
+    cJSON_AddItemToObject(setup, "systemInstruction", sys_inst);
+
+    // Tools declarations
+    cJSON* tools_arr = cJSON_CreateArray();
+    cJSON* tools_obj = cJSON_CreateObject();
+    cJSON* fdecls = cJSON_CreateArray();
+
+    auto add_empty_tool = [&](const char* name, const char* desc) {
+        cJSON* fn = cJSON_CreateObject();
+        cJSON_AddStringToObject(fn, "name", name);
+        cJSON_AddStringToObject(fn, "description", desc);
+        cJSON* params = cJSON_CreateObject();
+        cJSON_AddStringToObject(params, "type", "OBJECT");
+        cJSON_AddItemToObject(params, "properties", cJSON_CreateObject());
+        cJSON_AddItemToObject(fn, "parameters", params);
+        cJSON_AddItemToArray(fdecls, fn);
+    };
+
+    auto add_int_tool = [&](const char* name, const char* desc, const char* arg_name,
+                            const char* arg_desc) {
+        cJSON* fn = cJSON_CreateObject();
+        cJSON_AddStringToObject(fn, "name", name);
+        cJSON_AddStringToObject(fn, "description", desc);
+        cJSON* params = cJSON_CreateObject();
+        cJSON_AddStringToObject(params, "type", "OBJECT");
+        cJSON* props = cJSON_CreateObject();
+        cJSON* prop = cJSON_CreateObject();
+        cJSON_AddStringToObject(prop, "type", "INTEGER");
+        cJSON_AddStringToObject(prop, "description", arg_desc);
+        cJSON_AddItemToObject(props, arg_name, prop);
+        cJSON_AddItemToObject(params, "properties", props);
+        cJSON* req = cJSON_CreateArray();
+        cJSON_AddItemToArray(req, cJSON_CreateString(arg_name));
+        cJSON_AddItemToObject(params, "required", req);
+        cJSON_AddItemToObject(fn, "parameters", params);
+        cJSON_AddItemToArray(fdecls, fn);
+    };
+
+    add_empty_tool("handle_exit_intent",
+                   "Call AFTER saying a warm goodbye when the child wants to stop, sleep, or leave.");
+    add_empty_tool("get_device_status",
+                   "Get battery percentage, charging status, speaker volume, brightness, and WiFi info.");
+    add_int_tool("set_volume", "Set speaker volume from 0 to 100.", "volume", "Volume 0-100");
+    add_int_tool("set_brightness", "Set screen brightness from 10 to 100.", "brightness",
+                 "Brightness 10-100");
+
+    // save_memory(note: string)
+    {
+        cJSON* fn = cJSON_CreateObject();
+        cJSON_AddStringToObject(fn, "name", "save_memory");
+        cJSON_AddStringToObject(
+            fn, "description",
+            "Save a short note (up to 180 chars) about an ongoing story, child preference, or milestone so you remember it next time.");
+        cJSON* params = cJSON_CreateObject();
+        cJSON_AddStringToObject(params, "type", "OBJECT");
+        cJSON* props = cJSON_CreateObject();
+        cJSON* prop = cJSON_CreateObject();
+        cJSON_AddStringToObject(prop, "type", "STRING");
+        cJSON_AddStringToObject(prop, "description", "Short memory summary note");
+        cJSON_AddItemToObject(props, "note", prop);
+        cJSON_AddItemToObject(params, "properties", props);
+        cJSON* req = cJSON_CreateArray();
+        cJSON_AddItemToArray(req, cJSON_CreateString("note"));
+        cJSON_AddItemToObject(params, "required", req);
+        cJSON_AddItemToObject(fn, "parameters", params);
+        cJSON_AddItemToArray(fdecls, fn);
+    }
+
+    cJSON_AddItemToObject(tools_obj, "functionDeclarations", fdecls);
+    cJSON_AddItemToArray(tools_arr, tools_obj);
+    cJSON_AddItemToObject(setup, "tools", tools_arr);
+
+    cJSON_AddItemToObject(setup, "inputAudioTranscription", cJSON_CreateObject());
+    cJSON_AddItemToObject(setup, "outputAudioTranscription", cJSON_CreateObject());
+
+    char* printed = cJSON_PrintUnformatted(root);
+    std::string out = printed ? printed : "{}";
+    if (printed) cJSON_free(printed);
+    cJSON_Delete(root);
+    return out;
+}
+
+bool GeminiLiveProtocol::TryConnectModel(const std::string& api_key, const std::string& model_name,
+                                         const std::string& voice_name,
+                                         const std::string& lang_code, bool include_lang_code) {
+    StopSessionInternal(false);
+
+    stopping_.store(false);
+    error_occurred_ = false;
+    drop_turn_.store(false);
+    turn_complete_.store(false);
+    close_after_turn_.store(false);
+    idle_farewell_sent_ = false;
+    last_activity_us_.store(esp_timer_get_time());
+
+    xEventGroupClearBits(event_group_, kEvtSetupComplete | kEvtWsClosed);
+    xEventGroupClearBits(worker_done_group_, kDoneAll);
+
+    auto network = Board::GetInstance().GetNetwork();
+    websocket_ = network->CreateWebSocket(1);
+    if (websocket_ == nullptr) {
+        ESP_LOGE(TAG, "Failed to create WebSocket instance");
+        return false;
+    }
+
+    websocket_->OnData([this](const char* data, size_t len, bool binary) {
+        (void)binary;
+        if (stopping_.load() || len == 0 || data == nullptr) return;
+        {
+            std::lock_guard<std::mutex> lk(rx_mutex_);
+            if (rx_queue_.size() < 64) {
+                rx_queue_.emplace_back(data, len);
+            }
+        }
+        rx_cv_.notify_one();
+        last_incoming_time_ = std::chrono::steady_clock::now();
+    });
+
+    websocket_->OnDisconnected([this]() {
+        ESP_LOGW(TAG, "Gemini Live WebSocket disconnected");
+        ws_connected_.store(false);
+        xEventGroupSetBits(event_group_, kEvtWsClosed);
+        rx_cv_.notify_all();
+        tx_cv_.notify_all();
+        ring_cv_.notify_all();
+        if (channel_opened_.exchange(false) && !stopping_.load()) {
+            if (on_audio_channel_closed_ != nullptr) {
+                on_audio_channel_closed_();
+            }
+        }
+    });
+
+    std::string url =
+        "wss://generativelanguage.googleapis.com/ws/"
+        "google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=" +
+        api_key;
+
+    ESP_LOGI(TAG, "Connecting to Gemini Live (%s / %s)...", model_name.c_str(), voice_name.c_str());
+    auto connected = websocket_->Connect(url.c_str());
+    if (!connected) {
+        ESP_LOGW(TAG, "Connect failed (%s): %s", model_name.c_str(),
+                 connected.error().ToString().c_str());
+        websocket_.reset();
+        return false;
+    }
+
+    ws_connected_.store(true);
+
+    // Launch worker tasks (generous stacks so SSL receive task stays ultra-light)
+    xTaskCreate(
+        [](void* arg) {
+            auto* self = static_cast<GeminiLiveProtocol*>(arg);
+            self->RxWorkerLoop();
+            xEventGroupSetBits(self->worker_done_group_, kDoneRx);
+            vTaskDelete(nullptr);
+        },
+        "gemini_rx", 16384, this, 5, &rx_task_);
+
+    xTaskCreate(
+        [](void* arg) {
+            auto* self = static_cast<GeminiLiveProtocol*>(arg);
+            self->TxWorkerLoop();
+            xEventGroupSetBits(self->worker_done_group_, kDoneTx);
+            vTaskDelete(nullptr);
+        },
+        "gemini_tx", 10240, this, 4, &tx_task_);
+
+    xTaskCreate(
+        [](void* arg) {
+            auto* self = static_cast<GeminiLiveProtocol*>(arg);
+            self->PlaybackFeederLoop();
+            xEventGroupSetBits(self->worker_done_group_, kDonePlay);
+            vTaskDelete(nullptr);
+        },
+        "gemini_play", 8192, this, 5, &play_task_);
+
+    std::string setup_msg = BuildSetupJson(model_name, voice_name, lang_code, include_lang_code);
+    if (!websocket_->Send(setup_msg)) {
+        ESP_LOGW(TAG, "Failed to send Gemini setup message (%s)", model_name.c_str());
+        StopSessionInternal(false);
+        return false;
+    }
+
+    EventBits_t bits = xEventGroupWaitBits(event_group_, kEvtSetupComplete | kEvtWsClosed, pdTRUE,
+                                           pdFALSE, pdMS_TO_TICKS(8000));
+    if (bits & kEvtSetupComplete) {
+        ESP_LOGI(TAG, "Gemini Live ready! (%s / %s)", model_name.c_str(), voice_name.c_str());
+        channel_opened_.store(true);
+        if (on_connected_) on_connected_();
+        if (on_audio_channel_opened_) on_audio_channel_opened_();
+        return true;
+    }
+
+    ESP_LOGW(TAG, "Gemini setup did not complete for %s (bits=0x%x)", model_name.c_str(),
+             static_cast<unsigned>(bits));
+    StopSessionInternal(false);
+    return false;
+}
+
+bool GeminiLiveProtocol::OpenAudioChannel() {
+    auto cfg = RobiConfig::GetInstance().Get();
+    if (cfg.gemini_key.empty()) {
+        std::string ip = WifiManager::GetInstance().GetIpAddress();
+        std::string msg = "הגדר מפתח ג'מיני בכתובת http://robi.local";
+        if (!ip.empty()) {
+            msg += " או http://" + ip;
+        }
+        SetError(msg);
+        return false;
+    }
+
+    struct Candidate {
+        const char* model;
+        bool with_lang;
+        int idx;
+    };
+    const Candidate candidates[2] = {
+        {"gemini-3.8-live", true, 0},
+        {"gemini-2.5-flash-native-audio-preview-12-2025", false, 1},
+    };
+
+    int64_t now_us = esp_timer_get_time();
+    for (const auto& c : candidates) {
+        if (now_us < g_model_cooldown_until_us[c.idx]) {
+            continue;
+        }
+        if (TryConnectModel(cfg.gemini_key, c.model, cfg.voice, cfg.language, c.with_lang)) {
+            return true;
+        }
+        // Cooldown failed primary briefly (90s) so consecutive taps don't wait twice
+        if (c.idx == 0) {
+            g_model_cooldown_until_us[0] = esp_timer_get_time() + 90LL * 1000000LL;
+        }
+    }
+
+    // Retry cooled-down candidate once in case cooldown was stale
+    for (const auto& c : candidates) {
+        if (now_us >= g_model_cooldown_until_us[c.idx]) continue;
+        g_model_cooldown_until_us[c.idx] = 0;
+        if (TryConnectModel(cfg.gemini_key, c.model, cfg.voice, cfg.language, c.with_lang)) {
+            return true;
+        }
+    }
+
+    SetError(Lang::Strings::SERVER_NOT_CONNECTED);
+    return false;
+}
+
+bool GeminiLiveProtocol::SendText(const std::string& text) {
+    if (!ws_connected_.load()) return false;
+    EnqueueTxJson(std::string(text));
+    return true;
+}
+
+void GeminiLiveProtocol::EnqueueTxJson(std::string&& json_str) {
+    if (stopping_.load() || !ws_connected_.load()) return;
+    {
+        std::lock_guard<std::mutex> lk(tx_mutex_);
+        if (tx_queue_.size() >= 120) {
+            tx_queue_.pop_front();
+        }
+        tx_queue_.push_back(std::move(json_str));
+    }
+    tx_cv_.notify_one();
+}
+
+void GeminiLiveProtocol::EnqueuePcm16k(const uint8_t* pcm_bytes, size_t byte_len) {
+    if (pcm_bytes == nullptr || byte_len == 0 || stopping_.load() || !ws_connected_.load()) return;
+    constexpr size_t kChunkBytes = 3840;  // 120ms @ 16kHz int16
+    for (size_t off = 0; off < byte_len; off += kChunkBytes) {
+        size_t n = std::min(kChunkBytes, byte_len - off);
+        std::string b64 = Base64Encode(pcm_bytes + off, n);
+        if (b64.empty()) continue;
+        std::string msg;
+        msg.reserve(b64.size() + 80);
+        msg += "{\"realtimeInput\":{\"audio\":{\"mimeType\":\"audio/pcm;rate=16000\",\"data\":\"";
+        msg += b64;
+        msg += "\"}}}";
+        EnqueueTxJson(std::move(msg));
+    }
+}
+
+void GeminiLiveProtocol::EnqueueSilence16k(size_t duration_ms) {
+    size_t total_bytes = (duration_ms * 16000 / 1000) * sizeof(int16_t);
+    std::vector<uint8_t> zeros(std::min<size_t>(total_bytes, 3840), 0);
+    size_t rem = total_bytes;
+    while (rem > 0) {
+        size_t chunk = std::min(rem, zeros.size());
+        EnqueuePcm16k(zeros.data(), chunk);
+        rem -= chunk;
+    }
+}
+
+void GeminiLiveProtocol::FinishSpeechUtterance() {
+    streaming_speech_ = false;
+    silence_frames_ = 0;
+    if (!tx_pcm_batch_.empty()) {
+        EnqueuePcm16k(tx_pcm_batch_.data(), tx_pcm_batch_.size());
+        tx_pcm_batch_.clear();
+    }
+    drop_turn_.store(false);
+    EnqueueSilence16k(650);
+    EmitEmotion("thinking");
+}
+
+bool GeminiLiveProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
+    if (!IsAudioChannelOpened() || !packet || packet->payload.empty()) {
+        return false;
+    }
+    if (Application::GetInstance().GetDeviceState() != kDeviceStateListening) {
+        return true;
+    }
+
+    int64_t now_us = esp_timer_get_time();
+    std::lock_guard<std::mutex> lk(uplink_mutex_);
+
+    // Ignore mic input for 160ms right after entering Listening so OGG_POPUP doesn't echo
+    if (listen_started_us_ > 0 && (now_us - listen_started_us_) < 160000) {
+        return true;
+    }
+
+    const auto* samples = reinterpret_cast<const int16_t*>(packet->payload.data());
+    size_t sample_count = packet->payload.size() / sizeof(int16_t);
+    if (sample_count == 0) return true;
+
+    if (listening_mode_ == kListeningModeManualStop) {
+        if (!streaming_speech_) {
+            streaming_speech_ = true;
+            drop_turn_.store(false);
+            EnqueueSilence16k(180);
+            EmitEmotion("listening");
+        }
+        last_activity_us_.store(now_us);
+        tx_pcm_batch_.insert(tx_pcm_batch_.end(), packet->payload.begin(), packet->payload.end());
+        if (tx_pcm_batch_.size() >= 3840) {
+            EnqueuePcm16k(tx_pcm_batch_.data(), tx_pcm_batch_.size());
+            tx_pcm_batch_.clear();
+        }
+        return true;
+    }
+
+    // Auto-stop turn-based mode: combine AfeAudioEngine VAD with energy check
+    double sum_sq = 0.0;
+    for (size_t i = 0; i < sample_count; ++i) {
+        double v = static_cast<double>(samples[i]);
+        sum_sq += v * v;
+    }
+    double rms = std::sqrt(sum_sq / static_cast<double>(sample_count));
+    bool vad = Application::GetInstance().IsVoiceDetected();
+
+    if (!streaming_speech_) {
+        if (!vad && rms < 420.0) {
+            if (pre_roll_.size() >= 10) {
+                pre_roll_.pop_front();
+            }
+            pre_roll_.push_back(std::move(packet->payload));
+            return true;
+        }
+        // Speech onset!
+        streaming_speech_ = true;
+        silence_frames_ = 0;
+        idle_farewell_sent_ = false;
+        drop_turn_.store(false);
+        last_activity_us_.store(now_us);
+        EmitEmotion("listening");
+
+        EnqueueSilence16k(180);
+        tx_pcm_batch_.clear();
+        for (const auto& old_frame : pre_roll_) {
+            tx_pcm_batch_.insert(tx_pcm_batch_.end(), old_frame.begin(), old_frame.end());
+            if (tx_pcm_batch_.size() >= 3840) {
+                EnqueuePcm16k(tx_pcm_batch_.data(), tx_pcm_batch_.size());
+                tx_pcm_batch_.clear();
+            }
+        }
+        pre_roll_.clear();
+    }
+
+    last_activity_us_.store(now_us);
+    tx_pcm_batch_.insert(tx_pcm_batch_.end(), packet->payload.begin(), packet->payload.end());
+    if (tx_pcm_batch_.size() >= 3840) {
+        EnqueuePcm16k(tx_pcm_batch_.data(), tx_pcm_batch_.size());
+        tx_pcm_batch_.clear();
+    }
+
+    if (!vad && rms < 260.0) {
+        ++silence_frames_;
+        if (silence_frames_ >= 11) {  // ~660ms of post-speech silence
+            FinishSpeechUtterance();
+        }
+    } else {
+        silence_frames_ = 0;
+    }
+
+    return true;
+}
+
+void GeminiLiveProtocol::SendWakeWordDetected(const std::string& wake_word) {
+    if (wake_word.empty() || IsWakeWordToken(wake_word)) {
+        return;  // Standard wake words go straight to OGG_POPUP + Listening
+    }
+
+    // Activity / Child profile button prompt! Send immediate text turn to Gemini Live.
+    ESP_LOGI(TAG, "Activity prompt turn: %s", wake_word.c_str());
+    drop_turn_.store(false);
+    last_activity_us_.store(esp_timer_get_time());
+    RobiConfig::GetInstance().AddDialogueTurn("user", wake_word);
+    EmitEmotion("thinking");
+
+    cJSON* root = cJSON_CreateObject();
+    cJSON* cc = cJSON_CreateObject();
+    cJSON* turns = cJSON_CreateArray();
+    cJSON* turn0 = cJSON_CreateObject();
+    cJSON_AddStringToObject(turn0, "role", "user");
+    cJSON* parts = cJSON_CreateArray();
+    cJSON* p0 = cJSON_CreateObject();
+    cJSON_AddStringToObject(p0, "text", wake_word.c_str());
+    cJSON_AddItemToArray(parts, p0);
+    cJSON_AddItemToObject(turn0, "parts", parts);
+    cJSON_AddItemToArray(turns, turn0);
+    cJSON_AddItemToObject(cc, "turns", turns);
+    cJSON_AddBoolToObject(cc, "turnComplete", true);
+    cJSON_AddItemToObject(root, "clientContent", cc);
+
+    char* s = cJSON_PrintUnformatted(root);
+    if (s != nullptr) {
+        EnqueueTxJson(std::string(s));
+        cJSON_free(s);
+    }
+    cJSON_Delete(root);
+}
+
+void GeminiLiveProtocol::SendStartListening(ListeningMode mode) {
+    std::lock_guard<std::mutex> lk(uplink_mutex_);
+    listening_mode_ = mode;
+    pre_roll_.clear();
+    tx_pcm_batch_.clear();
+    streaming_speech_ = false;
+    silence_frames_ = 0;
+    listen_started_us_ = esp_timer_get_time();
+    last_activity_us_.store(listen_started_us_);
+}
+
+void GeminiLiveProtocol::SendStopListening() {
+    std::lock_guard<std::mutex> lk(uplink_mutex_);
+    if (streaming_speech_) {
+        FinishSpeechUtterance();
+    } else if (listening_mode_ == kListeningModeManualStop && !pre_roll_.empty()) {
+        EnqueueSilence16k(180);
+        for (const auto& f : pre_roll_) {
+            EnqueuePcm16k(f.data(), f.size());
+        }
+        pre_roll_.clear();
+        EnqueueSilence16k(650);
+        EmitEmotion("thinking");
+    }
+}
+
+void GeminiLiveProtocol::SendAbortSpeaking(AbortReason reason) {
+    (void)reason;
+    turn_gen_.fetch_add(1);
+    drop_turn_.store(true);
+    turn_complete_.store(false);
+    ClearRing();
+    ring_cv_.notify_all();
+    Application::GetInstance().GetAudioService().ResetDecoder();
+    EmitEmotion("v:0");
+    EmitTtsState("stop");
+}
+
+void GeminiLiveProtocol::PushPcm24kToRing(const int16_t* samples, size_t count) {
+    if (pcm_ring_ == nullptr || ring_capacity_ == 0 || count == 0) return;
+    std::unique_lock<std::mutex> lk(ring_mutex_);
+    for (size_t i = 0; i < count; ++i) {
+        if (ring_count_ == ring_capacity_) {
+            // Ring full: wait briefly for speaker to drain so we never drop audio!
+            ring_cv_.wait_for(lk, std::chrono::milliseconds(60), [this]() {
+                return stopping_.load() || drop_turn_.load() || ring_count_ < ring_capacity_;
+            });
+            if (stopping_.load() || drop_turn_.load()) return;
+            if (ring_count_ == ring_capacity_) {
+                // Drop oldest sample only as extreme last resort
+                ring_head_ = (ring_head_ + 1) % ring_capacity_;
+                --ring_count_;
+            }
+        }
+        pcm_ring_[ring_tail_] = samples[i];
+        ring_tail_ = (ring_tail_ + 1) % ring_capacity_;
+        ++ring_count_;
+    }
+    lk.unlock();
+    ring_cv_.notify_one();
+}
+
+size_t GeminiLiveProtocol::PopPcm24kFromRing(int16_t* out_samples, size_t max_count) {
+    std::lock_guard<std::mutex> lk(ring_mutex_);
+    size_t n = std::min(max_count, ring_count_);
+    for (size_t i = 0; i < n; ++i) {
+        out_samples[i] = pcm_ring_[ring_head_];
+        ring_head_ = (ring_head_ + 1) % ring_capacity_;
+    }
+    ring_count_ -= n;
+    return n;
+}
+
+size_t GeminiLiveProtocol::RingAvailable() const {
+    std::lock_guard<std::mutex> lk(ring_mutex_);
+    return ring_count_;
+}
+
+void GeminiLiveProtocol::ClearRing() {
+    std::lock_guard<std::mutex> lk(ring_mutex_);
+    ring_head_ = 0;
+    ring_tail_ = 0;
+    ring_count_ = 0;
+    pending_emotions_.clear();
+}
+
+void GeminiLiveProtocol::EmitLocalJson(const std::string& json_str) {
+    if (on_incoming_json_ == nullptr) return;
+    cJSON* root = cJSON_ParseWithLength(json_str.data(), json_str.size());
+    if (root != nullptr) {
+        on_incoming_json_(root);
+        cJSON_Delete(root);
+    }
+}
+
+void GeminiLiveProtocol::EmitEmotion(const std::string& emotion) {
+    std::string j = "{\"type\":\"llm\",\"emotion\":\"" + emotion + "\"}";
+    EmitLocalJson(j);
+}
+
+void GeminiLiveProtocol::EmitTtsState(const char* state) {
+    std::string j = std::string("{\"type\":\"tts\",\"state\":\"") + state + "\"}";
+    EmitLocalJson(j);
+}
+
+int GeminiLiveProtocol::ComputeVoiceLevel(const int16_t* samples, size_t count) {
+    if (samples == nullptr || count == 0) return 0;
+    double sum = 0.0;
+    for (size_t i = 0; i < count; ++i) {
+        double v = static_cast<double>(samples[i]);
+        sum += v * v;
+    }
+    double rms = std::sqrt(sum / static_cast<double>(count));
+    if (rms < 110.0) return 0;
+    double norm = std::min(1.0, (rms - 100.0) / 4200.0);
+    int lvl = static_cast<int>(std::lround(std::pow(norm, 0.72) * 100.0));
+    return std::clamp(lvl, 0, 100);
+}
+
+void GeminiLiveProtocol::TxWorkerLoop() {
+    while (!stopping_.load() && ws_connected_.load()) {
+        std::string msg;
+        {
+            std::unique_lock<std::mutex> lk(tx_mutex_);
+            tx_cv_.wait_for(lk, std::chrono::seconds(5), [this]() {
+                return stopping_.load() || !ws_connected_.load() || !tx_queue_.empty();
+            });
+            if (stopping_.load() || !ws_connected_.load()) break;
+            if (!tx_queue_.empty()) {
+                msg = std::move(tx_queue_.front());
+                tx_queue_.pop_front();
+            }
+        }
+
+        if (!msg.empty()) {
+            if (websocket_ && !websocket_->Send(msg)) {
+                ESP_LOGW(TAG, "WebSocket send failed");
+                break;
+            }
+            continue;
+        }
+
+        // Periodic 90s idle check while channel is sitting quiet in Listening
+        int64_t idle_us = esp_timer_get_time() - last_activity_us_.load();
+        if (!idle_farewell_sent_ && channel_opened_.load() &&
+            Application::GetInstance().GetDeviceState() == kDeviceStateListening &&
+            idle_us > 90LL * 1000000LL) {
+            idle_farewell_sent_ = true;
+            close_after_turn_.store(true);
+            auto lang = RobiConfig::GetInstance().Get().language;
+            std::string prompt =
+                (lang == "en-US")
+                    ? "[The child has been quiet for a while: say a warm 1-sentence goodbye and invite them to chat again soon.]"
+                    : "[הילד שקט כבר זמן מה: היפרד ממנו בחום במשפט קצר אחד והזמן אותו לדבר שוב בקרוב.]";
+
+            cJSON* root = cJSON_CreateObject();
+            cJSON* cc = cJSON_CreateObject();
+            cJSON* turns = cJSON_CreateArray();
+            cJSON* t0 = cJSON_CreateObject();
+            cJSON_AddStringToObject(t0, "role", "user");
+            cJSON* parts = cJSON_CreateArray();
+            cJSON* p0 = cJSON_CreateObject();
+            cJSON_AddStringToObject(p0, "text", prompt.c_str());
+            cJSON_AddItemToArray(parts, p0);
+            cJSON_AddItemToObject(t0, "parts", parts);
+            cJSON_AddItemToArray(turns, t0);
+            cJSON_AddItemToObject(cc, "turns", turns);
+            cJSON_AddBoolToObject(cc, "turnComplete", true);
+            cJSON_AddItemToObject(root, "clientContent", cc);
+            char* s = cJSON_PrintUnformatted(root);
+            if (s != nullptr) {
+                if (websocket_) websocket_->Send(std::string(s));
+                cJSON_free(s);
+            }
+            cJSON_Delete(root);
+        }
+    }
+}
+
+void GeminiLiveProtocol::RxWorkerLoop() {
+    std::string user_transcript;
+    std::string bot_transcript;
+    std::string clause_buf;
+    bool clause_had_emoji = false;
+    std::string last_emo;
+
+    while (!stopping_.load()) {
+        std::string raw;
+        {
+            std::unique_lock<std::mutex> lk(rx_mutex_);
+            rx_cv_.wait(lk, [this]() {
+                return stopping_.load() || !ws_connected_.load() || !rx_queue_.empty();
+            });
+            if (stopping_.load()) break;
+            if (rx_queue_.empty() && !ws_connected_.load()) break;
+            if (rx_queue_.empty()) continue;
+            raw = std::move(rx_queue_.front());
+            rx_queue_.pop_front();
+        }
+
+        cJSON* msg = cJSON_ParseWithLength(raw.data(), raw.size());
+        if (msg == nullptr) {
+            continue;
+        }
+
+        if (cJSON_HasObjectItem(msg, "setupComplete")) {
+            xEventGroupSetBits(event_group_, kEvtSetupComplete);
+            cJSON_Delete(msg);
+            continue;
+        }
+
+        const cJSON* tool_call = cJSON_GetObjectItemCaseSensitive(msg, "toolCall");
+        if (cJSON_IsObject(tool_call)) {
+            HandleToolCalls(tool_call);
+        }
+
+        const cJSON* sc = cJSON_GetObjectItemCaseSensitive(msg, "serverContent");
+        if (!cJSON_IsObject(sc)) {
+            cJSON_Delete(msg);
+            continue;
+        }
+
+        if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(sc, "interrupted"))) {
+            turn_gen_.fetch_add(1);
+            drop_turn_.store(false);
+            turn_complete_.store(false);
+            ClearRing();
+            ring_cv_.notify_all();
+            user_transcript.clear();
+            bot_transcript.clear();
+            clause_buf.clear();
+            clause_had_emoji = false;
+            last_emo.clear();
+            cJSON_Delete(msg);
+            continue;
+        }
+
+        const cJSON* in_tr = cJSON_GetObjectItemCaseSensitive(sc, "inputTranscription");
+        if (cJSON_IsObject(in_tr)) {
+            const cJSON* t = cJSON_GetObjectItemCaseSensitive(in_tr, "text");
+            if (cJSON_IsString(t) && t->valuestring != nullptr) {
+                user_transcript += t->valuestring;
+            }
+        }
+
+        const cJSON* out_tr = cJSON_GetObjectItemCaseSensitive(sc, "outputTranscription");
+        if (cJSON_IsObject(out_tr) && !drop_turn_.load()) {
+            const cJSON* t = cJSON_GetObjectItemCaseSensitive(out_tr, "text");
+            if (cJSON_IsString(t) && t->valuestring != nullptr) {
+                std::string chunk(t->valuestring);
+                bot_transcript += chunk;
+                const char* emo = MatchLeadingOrInlineEmoji(chunk);
+                if (emo != nullptr) {
+                    clause_had_emoji = true;
+                    if (last_emo != emo) {
+                        last_emo = emo;
+                        std::lock_guard<std::mutex> lk(ring_mutex_);
+                        pending_emotions_.emplace_back(emo);
+                    }
+                }
+                clause_buf += chunk;
+                if (chunk.find('.') != std::string::npos || chunk.find('!') != std::string::npos ||
+                    chunk.find('?') != std::string::npos || chunk.find('\n') != std::string::npos) {
+                    if (!clause_had_emoji) {
+                        const char* inf = InferHebrewClauseEmotion(clause_buf);
+                        if (inf != nullptr && last_emo != inf) {
+                            last_emo = inf;
+                            std::lock_guard<std::mutex> lk(ring_mutex_);
+                            pending_emotions_.emplace_back(inf);
+                        }
+                    }
+                    clause_buf.clear();
+                    clause_had_emoji = false;
+                }
+            }
+        }
+
+        const cJSON* model_turn = cJSON_GetObjectItemCaseSensitive(sc, "modelTurn");
+        if (cJSON_IsObject(model_turn) && !drop_turn_.load()) {
+            const cJSON* parts = cJSON_GetObjectItemCaseSensitive(model_turn, "parts");
+            if (cJSON_IsArray(parts)) {
+                const cJSON* part = nullptr;
+                cJSON_ArrayForEach(part, parts) {
+                    const cJSON* inline_data = cJSON_GetObjectItemCaseSensitive(part, "inlineData");
+                    if (!cJSON_IsObject(inline_data)) continue;
+                    const cJSON* b64_item = cJSON_GetObjectItemCaseSensitive(inline_data, "data");
+                    if (!cJSON_IsString(b64_item) || b64_item->valuestring == nullptr) continue;
+
+                    size_t b64_len = std::strlen(b64_item->valuestring);
+                    if (b64_len == 0) continue;
+
+                    size_t max_decoded = (b64_len * 3) / 4 + 4;
+                    std::vector<uint8_t> pcm_bytes(max_decoded);
+                    size_t decoded_len = 0;
+                    if (mbedtls_base64_decode(
+                            pcm_bytes.data(), pcm_bytes.size(), &decoded_len,
+                            reinterpret_cast<const unsigned char*>(b64_item->valuestring),
+                            b64_len) == 0 &&
+                        decoded_len >= 2) {
+                        last_activity_us_.store(esp_timer_get_time());
+                        turn_complete_.store(false);
+                        PushPcm24kToRing(reinterpret_cast<const int16_t*>(pcm_bytes.data()),
+                                         decoded_len / sizeof(int16_t));
+                    }
+                }
+            }
+        }
+
+        if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(sc, "turnComplete"))) {
+            if (!user_transcript.empty()) {
+                ESP_LOGI(TAG, "USER: %s", user_transcript.c_str());
+                RobiConfig::GetInstance().AddDialogueTurn("user", user_transcript);
+                user_transcript.clear();
+            }
+            if (!bot_transcript.empty()) {
+                ESP_LOGI(TAG, "ROBI: %s", bot_transcript.c_str());
+                RobiConfig::GetInstance().AddDialogueTurn("assistant", bot_transcript);
+                bot_transcript.clear();
+            }
+            clause_buf.clear();
+            clause_had_emoji = false;
+            last_emo.clear();
+
+            if (drop_turn_.exchange(false)) {
+                ClearRing();
+                turn_complete_.store(false);
+            } else {
+                turn_complete_.store(true);
+                ring_cv_.notify_all();
+            }
+        }
+
+        cJSON_Delete(msg);
+    }
+}
+
+void GeminiLiveProtocol::PlaybackFeederLoop() {
+    std::vector<int16_t> frame_buf(kPlaybackFrameSamples);
+    bool speaking_active = false;
+    uint32_t active_gen = 0;
+    int frames_since_env = 0;
+    int last_env_lvl = -1;
+
+    while (!stopping_.load()) {
+        {
+            std::unique_lock<std::mutex> lk(ring_mutex_);
+            ring_cv_.wait_for(lk, std::chrono::milliseconds(40), [this, speaking_active]() {
+                if (stopping_.load() || !ws_connected_.load()) return true;
+                if (speaking_active) {
+                    return ring_count_ > 0 || turn_complete_.load() || drop_turn_.load();
+                }
+                return ring_count_ >= kPreBufferSamples ||
+                       (turn_complete_.load() && ring_count_ > 0);
+            });
+        }
+
+        if (stopping_.load() || !ws_connected_.load()) break;
+
+        if (drop_turn_.load()) {
+            speaking_active = false;
+            continue;
+        }
+
+        size_t avail = RingAvailable();
+        if (!speaking_active) {
+            if (avail >= kPreBufferSamples || (turn_complete_.load() && avail > 0)) {
+                speaking_active = true;
+                active_gen = turn_gen_.load();
+                frames_since_env = 0;
+                last_env_lvl = -1;
+                EmitTtsState("start");
+                // Allow Application main loop 85ms to enter kDeviceStateSpeaking
+                vTaskDelay(pdMS_TO_TICKS(85));
+            } else {
+                continue;
+            }
+        }
+
+        if (active_gen != turn_gen_.load() || drop_turn_.load()) {
+            speaking_active = false;
+            continue;
+        }
+
+        // Fire any queued emotion synced with audio playback
+        {
+            std::string emo;
+            {
+                std::lock_guard<std::mutex> lk(ring_mutex_);
+                if (!pending_emotions_.empty()) {
+                    emo = std::move(pending_emotions_.front());
+                    pending_emotions_.pop_front();
+                }
+            }
+            if (!emo.empty()) {
+                EmitEmotion(emo);
+            }
+        }
+
+        avail = RingAvailable();
+        if (avail >= kPlaybackFrameSamples || (turn_complete_.load() && avail > 0)) {
+            size_t to_pop = std::min(kPlaybackFrameSamples, avail);
+            size_t got = PopPcm24kFromRing(frame_buf.data(), to_pop);
+            ring_cv_.notify_one();
+
+            if (got > 0) {
+                ++frames_since_env;
+                if (frames_since_env >= 3) {
+                    frames_since_env = 0;
+                    int lvl = ComputeVoiceLevel(frame_buf.data(), got);
+                    if (std::abs(lvl - last_env_lvl) >= 6 || (lvl == 0 && last_env_lvl != 0)) {
+                        last_env_lvl = lvl;
+                        EmitEmotion("v:" + std::to_string(lvl));
+                    }
+                }
+
+                auto pkt = std::make_unique<AudioStreamPacket>();
+                pkt->sample_rate = 24000;
+                pkt->frame_duration = 0;  // 0 = raw 24kHz int16 PCM bypass in AudioService!
+                pkt->payload.resize(got * sizeof(int16_t));
+                std::memcpy(pkt->payload.data(), frame_buf.data(), pkt->payload.size());
+
+                auto& as = Application::GetInstance().GetAudioService();
+                while (!stopping_.load() && active_gen == turn_gen_.load() && !drop_turn_.load()) {
+                    if (Application::GetInstance().GetDeviceState() != kDeviceStateSpeaking) {
+                        break;
+                    }
+                    if (as.PushPacketToDecodeQueue(std::move(pkt), false)) {
+                        break;
+                    }
+                    // AudioService queue already has ~1.2s buffered; pace gently
+                    pkt = std::make_unique<AudioStreamPacket>();
+                    pkt->sample_rate = 24000;
+                    pkt->frame_duration = 0;
+                    pkt->payload.resize(got * sizeof(int16_t));
+                    std::memcpy(pkt->payload.data(), frame_buf.data(), pkt->payload.size());
+                    vTaskDelay(pdMS_TO_TICKS(20));
+                }
+                vTaskDelay(pdMS_TO_TICKS(52));
+            }
+            continue;
+        }
+
+        // Ring is currently empty
+        if (turn_complete_.load()) {
+            turn_complete_.store(false);
+            speaking_active = false;
+
+            // Wait for hardware I2S DMA playback queue to finish draining cleanly
+            auto& as = Application::GetInstance().GetAudioService();
+            int wait_loops = 0;
+            while (!stopping_.load() && active_gen == turn_gen_.load() &&
+                   !as.IsPlaybackIdle() && wait_loops < 100) {
+                vTaskDelay(pdMS_TO_TICKS(25));
+                ++wait_loops;
+            }
+            if (!stopping_.load() && active_gen == turn_gen_.load()) {
+                EmitEmotion("v:0");
+                last_activity_us_.store(esp_timer_get_time());
+                EmitTtsState("stop");
+
+                if (close_after_turn_.exchange(false)) {
+                    vTaskDelay(pdMS_TO_TICKS(250));
+                    Application::GetInstance().Schedule([this]() {
+                        if (IsAudioChannelOpened()) {
+                            CloseAudioChannel(false);
+                        }
+                    });
+                }
+            }
+        }
+    }
+}
+
+void GeminiLiveProtocol::HandleToolCalls(const cJSON* tool_call) {
+    const cJSON* fcalls = cJSON_GetObjectItemCaseSensitive(tool_call, "functionCalls");
+    if (!cJSON_IsArray(fcalls)) return;
+
+    cJSON* root = cJSON_CreateObject();
+    cJSON* tr = cJSON_CreateObject();
+    cJSON* f_resps = cJSON_CreateArray();
+
+    const cJSON* fc = nullptr;
+    cJSON_ArrayForEach(fc, fcalls) {
+        const cJSON* id_it = cJSON_GetObjectItemCaseSensitive(fc, "id");
+        const cJSON* name_it = cJSON_GetObjectItemCaseSensitive(fc, "name");
+        const cJSON* args = cJSON_GetObjectItemCaseSensitive(fc, "args");
+        if (!cJSON_IsString(name_it) || name_it->valuestring == nullptr) continue;
+
+        std::string fc_id = (cJSON_IsString(id_it) && id_it->valuestring) ? id_it->valuestring : "";
+        std::string name = name_it->valuestring;
+        ESP_LOGI(TAG, "Gemini tool call: %s", name.c_str());
+
+        cJSON* res_obj = cJSON_CreateObject();
+        if (name == "handle_exit_intent") {
+            close_after_turn_.store(true);
+            cJSON_AddStringToObject(res_obj, "result", "session_will_close_after_turn");
+        } else if (name == "set_volume") {
+            int vol = 70;
+            const cJSON* v = args ? cJSON_GetObjectItemCaseSensitive(args, "volume") : nullptr;
+            if (cJSON_IsNumber(v)) vol = std::clamp(v->valueint, 0, 100);
+            if (auto* codec = Board::GetInstance().GetAudioCodec()) {
+                codec->SetOutputVolume(vol);
+            }
+            cJSON_AddNumberToObject(res_obj, "volume", vol);
+            cJSON_AddStringToObject(res_obj, "result", "ok");
+        } else if (name == "set_brightness") {
+            int bri = 80;
+            const cJSON* b = args ? cJSON_GetObjectItemCaseSensitive(args, "brightness") : nullptr;
+            if (cJSON_IsNumber(b)) bri = std::clamp(b->valueint, 10, 100);
+            if (auto* bl = Board::GetInstance().GetBacklight()) {
+                bl->SetBrightness(static_cast<uint8_t>(bri), true);
+            }
+            cJSON_AddNumberToObject(res_obj, "brightness", bri);
+            cJSON_AddStringToObject(res_obj, "result", "ok");
+        } else if (name == "get_device_status") {
+            std::string st = Board::GetInstance().GetDeviceStatusJson();
+            cJSON_AddStringToObject(res_obj, "status", st.c_str());
+        } else if (name == "save_memory") {
+            const cJSON* n = args ? cJSON_GetObjectItemCaseSensitive(args, "note") : nullptr;
+            if (cJSON_IsString(n) && n->valuestring != nullptr) {
+                RobiConfig::GetInstance().AddMemoryNote(n->valuestring);
+                cJSON_AddStringToObject(res_obj, "result", "saved");
+            } else {
+                cJSON_AddStringToObject(res_obj, "result", "ignored");
+            }
+        } else {
+            cJSON_AddStringToObject(res_obj, "result", "unknown_tool");
+        }
+
+        cJSON* item = cJSON_CreateObject();
+        cJSON_AddStringToObject(item, "id", fc_id.c_str());
+        cJSON_AddStringToObject(item, "name", name.c_str());
+        cJSON_AddItemToObject(item, "response", res_obj);
+        cJSON_AddItemToArray(f_resps, item);
+    }
+
+    cJSON_AddItemToObject(tr, "functionResponses", f_resps);
+    cJSON_AddItemToObject(root, "toolResponse", tr);
+    char* printed = cJSON_PrintUnformatted(root);
+    if (printed != nullptr) {
+        EnqueueTxJson(std::string(printed));
+        cJSON_free(printed);
+    }
+    cJSON_Delete(root);
+}

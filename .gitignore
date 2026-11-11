@@ -1,0 +1,12 @@
+fw/
+out/
+_site/
+artifacts/
+__pycache__/
+*.pyc
+.env
+.env.*
+.DS_Store
+Thumbs.db
+docs/firmware/*.bin
+docs/firmware/SHA256SUMS.txt

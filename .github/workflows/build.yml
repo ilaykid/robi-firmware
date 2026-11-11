@@ -1,0 +1,101 @@
+name: Build OpenRobi Firmware & Deploy Setup Wizard
+
+on:
+  push:
+    branches: [main, "feat/**"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  XIAOZHI_TAG: v2.5.2
+  ROBI_VERSION: 3.0.0
+
+jobs:
+  build:
+    name: OpenRobi Standalone (${{ matrix.wake }})
+    runs-on: ubuntu-latest
+    container:
+      image: espressif/idf:v6.1
+    strategy:
+      fail-fast: false
+      matrix:
+        wake: [heyrobby, hiesp]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clone xiaozhi-esp32 ${{ env.XIAOZHI_TAG }}
+        shell: bash
+        run: git clone --depth 1 --branch "$XIAOZHI_TAG" https://github.com/78/xiaozhi-esp32 fw
+
+      - name: Apply OpenRobi Standalone Patches (${{ matrix.wake }})
+        shell: bash
+        run: python3 scripts/patch_xiaozhi.py fw ${{ matrix.wake }}
+
+      - name: Compile Firmware & Assets
+        shell: bash
+        env:
+          ROBI_TEXT_FONT: ${{ github.workspace }}/assets/font_noto_sans_common_30_4.bin
+          ROBI_EMOJI_DIR: ${{ github.workspace }}/assets/faces
+        run: |
+          source "$IDF_PATH/export.sh"
+          cd fw
+          WAKE_ARGS=()
+          if [[ "${{ matrix.wake }}" == "hiesp" ]]; then WAKE_ARGS=(--wake-word wn9_hiesp); fi
+          python scripts/build.py waveshare/esp32-s3-touch-amoled-1.75 \
+            --name esp32-s3-touch-amoled-1.75 --language he-IL "${WAKE_ARGS[@]}"
+          echo "--- Verification Checks ---"
+          grep -E "CONFIG_USE_DEVICE_AEC|CONFIG_LANGUAGE_HE_IL|CONFIG_LV_USE_BIDI|CONFIG_USE_CUSTOM_WAKE_WORD|CONFIG_CUSTOM_WAKE_WORD=|CONFIG_SR_WN_WN9_HIESP|CONFIG_SR_MN_EN" sdkconfig || true
+          ls -lh build/merged-binary.bin build/xiaozhi.bin build/generated_assets.bin
+          # Ensure app fits OTA slot (0x3f0000 = 4,128,768 B) and assets fit 8 MB partition
+          test $(stat -c %s build/xiaozhi.bin) -lt $((0x3f0000))
+          test $(stat -c %s build/generated_assets.bin) -lt $((8*1024*1024))
+          ! grep -q "^CONFIG_USE_DEVICE_AEC=y" sdkconfig
+          mkdir -p ../out
+          cp build/merged-binary.bin ../out/robi-full-${{ matrix.wake }}.bin
+          cp build/xiaozhi.bin ../out/robi-app-${{ matrix.wake }}_${ROBI_VERSION}.bin
+          sha256sum ../out/*.bin > ../out/SHA256SUMS-${{ matrix.wake }}.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: open-robi-firmware-${{ matrix.wake }}
+          path: out/
+          if-no-files-found: error
+
+  deploy-wizard-pages:
+    name: Deploy WebSerial Wizard + Binaries to GitHub Pages
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: false
+
+      - name: Stage Wizard & Pre-Built Binaries
+        shell: bash
+        run: |
+          mkdir -p _site/firmware
+          cp -r docs/* _site/
+          cp artifacts/open-robi-firmware-heyrobby/robi-full-heyrobby.bin _site/firmware/
+          cp artifacts/open-robi-firmware-hiesp/robi-full-hiesp.bin _site/firmware/
+          cat artifacts/open-robi-firmware-*/SHA256SUMS-*.txt > _site/firmware/SHA256SUMS.txt
+          touch _site/.nojekyll
+          ls -lh _site/firmware/
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4

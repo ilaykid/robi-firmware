@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OpenRobi — אשף התקנה ועיצוב אישי בדפדפן</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-orb" aria-hidden="true"></div>
+      <div>
+        <h1>OpenRobi — אשף התקנה ועיצוב אישי</h1>
+        <p>רובוט AI קולי לילדים בחיבור ישיר ל-Gemini Live • ללא שרת • ללא התקנת תוכנה</p>
+      </div>
+    </div>
+    <div class="top-actions">
+      <span class="badge">⚡ 100% מקומי בדפדפן</span>
+      <button type="button" id="btnExportJson" class="btn btn-secondary" style="padding:7px 13px;font-size:0.82rem;">ייצוא פרופיל</button>
+      <label class="btn btn-secondary" style="padding:7px 13px;font-size:0.82rem;margin:0;">
+        טעינת פרופיל
+        <input type="file" id="inpImportJson" accept=".json,application/json" style="display:none;" />
+      </label>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- Right Column: 5-Step Wizard -->
+    <section class="wizard-col">
+      <nav class="stepper" aria-label="שלבי התקנה">
+        <button type="button" class="step-tab active" data-step="1">
+          <span class="step-num">1</span>
+          <span class="step-label">מפתח Gemini</span>
+        </button>
+        <button type="button" class="step-tab" data-step="2">
+          <span class="step-num">2</span>
+          <span class="step-label">שם וקול</span>
+        </button>
+        <button type="button" class="step-tab" data-step="3">
+          <span class="step-num">3</span>
+          <span class="step-label">עיצוב פנים</span>
+        </button>
+        <button type="button" class="step-tab" data-step="4">
+          <span class="step-num">4</span>
+          <span class="step-label">ילדים ונושאים</span>
+        </button>
+        <button type="button" class="step-tab" data-step="5">
+          <span class="step-num">5</span>
+          <span class="step-label">WiFi וצריבה</span>
+        </button>
+      </nav>
+
+      <div class="card">
+        <!-- STEP 1 -->
+        <div class="step-pane active" data-pane="1">
+          <h2 class="pane-title">שלב 1 — חיבור ישיר ל-Google Gemini</h2>
+          <p class="pane-sub">
+            רובי מתחבר בעצמו דרך ה-WiFi הביתי ישירות ל-Google Gemini Live — בלי שום שרת באמצע! המפתח נשמר אך ורק בזיכרון הפנימי של רובי אצלכם בבית.
+          </p>
+
+          <div class="info-box">
+            <strong>איך משיגים מפתח API תוך 30 שניות?</strong>
+            <ol>
+              <li>נכנסים אל <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio — API Keys</a> ומתחברים עם חשבון Google.</li>
+              <li>לוחצים על <strong>Create API key</strong> ומעתיקים את המפתח שמתחיל ב-<code>AIza...</code>.</li>
+              <li>מדביקים כאן למטה ולוחצים על <strong>בדוק מפתח</strong> כדי לוודא שהוא פעיל.</li>
+            </ol>
+          </div>
+
+          <div class="field">
+            <label for="inpGeminiKey">מפתח Google Gemini API</label>
+            <div class="input-action-row">
+              <input
+                type="password"
+                id="inpGeminiKey"
+                class="ltr-input"
+                placeholder="AIzaSy..."
+                autocomplete="off"
+              />
+              <button type="button" id="btnVerifyKey" class="btn btn-accent">בדוק מפתח</button>
+            </div>
+            <small>פרטיות מלאה: המפתח נבדק ישירות מול Google ולא נשלח לשום שרת צד-שלישי.</small>
+            <div id="keyStatus" class="status-msg"></div>
+          </div>
+
+          <div class="pane-nav">
+            <span></span>
+            <button type="button" class="btn btn-primary" data-goto="2">המשך לבחירת קול ←</button>
+          </div>
+        </div>
+
+        <!-- STEP 2 -->
+        <div class="step-pane" data-pane="2">
+          <h2 class="pane-title">שלב 2 — שם הרובוט, שפה ובחירת קול</h2>
+          <p class="pane-sub">
+            בחרו איך יקראו לחבר החדש שלכם, באיזו שפה הוא ידבר, ואיזה קול הכי מתאים לו — אפשר לשמוע דגימת קול חיה ממש כאן!
+          </p>
+
+          <div class="row-2">
+            <div class="field">
+              <label for="inpRobotName">שם הרובוט</label>
+              <input type="text" id="inpRobotName" maxlength="20" value="רובי" />
+            </div>
+            <div class="field">
+              <label for="selLanguage">שפת שיחה קבועה (נעילת שפה)</label>
+              <select id="selLanguage">
+                <option value="he-IL">עברית בלבד (he-IL)</option>
+                <option value="en-US">English Only (en-US)</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="field">
+            <label>בחרו את הקול של רובי</label>
+            <div id="voiceGrid" class="voice-grid"></div>
+            <button type="button" id="btnPlayVoice" class="btn btn-accent">
+              🔊 השמע דגימת קול חיה (עם סינכרון שפתיים!)
+            </button>
+            <div id="voiceStatus" class="status-msg"></div>
+          </div>
+
+          <div class="pane-nav">
+            <button type="button" class="btn btn-secondary" data-goto="1">→ הקודם</button>
+            <button type="button" class="btn btn-primary" data-goto="3">המשך לעיצוב פנים ←</button>
+          </div>
+        </div>
+
+        <!-- STEP 3 -->
+        <div class="step-pane" data-pane="3">
+          <h2 class="pane-title">שלב 3 — עיצוב הפנים והתצוגה</h2>
+          <p class="pane-sub">
+            בחרו ערכת צבעים לעיני הניאון של רובי! השינוי מוצג מיד בסימולטור המסך העגול משמאל.
+          </p>
+
+          <div id="themeGrid" class="theme-grid"></div>
+
+          <div class="row-2">
+            <div class="field">
+              <label for="rngVolume">עוצמת שמע התחלתית: <strong id="lblVolume">80%</strong></label>
+              <input type="range" id="rngVolume" min="15" max="100" value="80" style="width:100%;accent-color:var(--accent-bright);" />
+            </div>
+            <div class="field">
+              <label for="rngBrightness">בהירות מסך AMOLED: <strong id="lblBrightness">85%</strong></label>
+              <input type="range" id="rngBrightness" min="15" max="100" value="85" style="width:100%;accent-color:var(--accent-bright);" />
+            </div>
+          </div>
+
+          <div class="pane-nav">
+            <button type="button" class="btn btn-secondary" data-goto="2">→ הקודם</button>
+            <button type="button" class="btn btn-primary" data-goto="4">המשך להגדרת ילדים ←</button>
+          </div>
+        </div>
+
+        <!-- STEP 4 -->
+        <div class="step-pane" data-pane="4">
+          <h2 class="pane-title">שלב 4 — פרופילי ילדים ונושאי שיחה</h2>
+          <p class="pane-sub">
+            אפשר להגדיר עד 3 ילדים (או להסיר הכל למצב כללי ללא כפתורים). לכל ילד/ה מופיע כפתור על המסך העגול שנפתח ל-4 פעילויות מותאמות לגיל!
+          </p>
+
+          <div id="kidsContainer"></div>
+
+          <div style="margin-bottom:18px;">
+            <button type="button" id="btnAddKid" class="btn btn-accent">+ הוספת ילד/ה (עד 3)</button>
+          </div>
+
+          <div class="field">
+            <label for="txtCustomPrompt">הנחיות מיוחדות מההורים לרובי (אופציונלי)</label>
+            <textarea
+              id="txtCustomPrompt"
+              rows="3"
+              maxlength="450"
+              placeholder="למשל: לעודד סקרנות במדע וטבע, לדבר במשפטים קצרים וברורים, לשלב הומור עדין..."
+            ></textarea>
+          </div>
+
+          <div class="pane-nav">
+            <button type="button" class="btn btn-secondary" data-goto="3">→ הקודם</button>
+            <button type="button" class="btn btn-primary" data-goto="5">המשך ל-WiFi וצריבה ←</button>
+          </div>
+        </div>
+
+        <!-- STEP 5 -->
+        <div class="step-pane" data-pane="5">
+          <h2 class="pane-title">שלב 5 — חיבור ל-WiFi הביתי וצריבה בלחיצה אחת!</h2>
+          <p class="pane-sub">
+            חברו את רובי למחשב עם כבל USB-C. בלחיצה אחת הדפדפן יצרוב גם את התוכנה וגם את כל ההגדרות שלכם!
+          </p>
+
+          <div class="row-2">
+            <div class="field">
+              <label for="inpWifiSsid">שם רשת ה-WiFi הביתית (תדר 2.4GHz)</label>
+              <input
+                type="text"
+                id="inpWifiSsid"
+                class="ltr-input"
+                placeholder="Home_WiFi_2.4G"
+                autocomplete="off"
+              />
+              <small>שימו לב: בקר ESP32-S3 מתחבר לרשתות 2.4GHz (אם תשאירו ריק, רובי יפתח נקודת WiFi בשם <code>Robi-XXXX</code> להגדרה מהטלפון).</small>
+            </div>
+            <div class="field">
+              <label for="inpWifiPass">סיסמת WiFi</label>
+              <input
+                type="password"
+                id="inpWifiPass"
+                class="ltr-input"
+                placeholder="••••••••"
+                autocomplete="off"
+              />
+            </div>
+          </div>
+
+          <div class="field">
+            <label for="selWakeVariant">מילת הקריאה הקולית שמעירה את רובי</label>
+            <select id="selWakeVariant">
+              <option value="heyrobby">"Hey Robby" — מילת הקריאה הייעודית של רובי (מומלץ)</option>
+              <option value="hiesp">"Hi ESP" — מודל קריאה חלופי מובנה</option>
+            </select>
+          </div>
+
+          <button type="button" id="btnFlashFull" class="btn btn-flash">
+            🚀 צריבה מלאה לרובי חדש (מערכת + הגדרות אישיות ב-USB)
+          </button>
+
+          <div style="margin-top:10px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
+            <button type="button" id="btnFlashConfigOnly" class="btn btn-secondary" style="flex:1;">
+              ⚡ עדכון הגדרות בלבד ב-USB (לרובי שכבר מותקן — שנייה אחת!)
+            </button>
+          </div>
+
+          <div id="progressWrap" class="progress-wrap">
+            <div id="progressBar" class="progress-bar"></div>
+          </div>
+          <div id="flashStatus" class="status-msg"></div>
+          <pre id="flashConsole" class="console-log"></pre>
+
+          <details style="margin-top:16px;color:var(--text-muted);font-size:0.84rem;">
+            <summary style="cursor:pointer;">אפשרויות מתקדמות / שינוי הגדרות אלחוטי מהבית</summary>
+            <div style="padding-top:10px;">
+              <p style="margin:0 0 8px;">
+                💡 <strong>ידעתם?</strong> אחרי ההתקנה הראשונית לא צריך יותר לחבר כבל USB! בכל רגע אפשר לפתוח בדפדפן בבית את הכתובת
+                <code>http://robi.local</code> (או <code>http://robi</code>) ולשנות קול, עיצוב פנים, ילדים או מפתח אלחוטית מהטלפון!
+              </p>
+              <p style="margin:0 0 8px;">
+                <strong>טיפ אם המחשב לא מזהה את רובי:</strong> החזיקו את כפתור ה-<code>BOOT</code> הקטן על הלוח לחוץ בזמן חיבור כבל ה-USB-C, ושחררו אחרי שנייה.
+              </p>
+              <label style="display:block;margin-top:8px;">
+                בחירת קובץ קושחה (<code>.bin</code>) מקומי מהמחשב (אופציונלי למפתחים):
+                <input type="file" id="inpCustomBin" accept=".bin" style="margin-top:5px;" />
+              </label>
+            </div>
+          </details>
+
+          <div class="pane-nav">
+            <button type="button" class="btn btn-secondary" data-goto="4">→ הקודם</button>
+            <span></span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Left Column: Live 466x466 Circular AMOLED Simulator -->
+    <aside class="preview-col">
+      <div class="sim-card">
+        <div class="sim-bezel">
+          <canvas id="robiCanvas" width="466" height="466"></canvas>
+        </div>
+        <div class="emo-bar">
+          <button type="button" class="emo-btn active" data-emo="happy">שמח</button>
+          <button type="button" class="emo-btn" data-emo="laughing">צוחק</button>
+          <button type="button" class="emo-btn" data-emo="surprised">מופתע</button>
+          <button type="button" class="emo-btn" data-emo="winking">קורץ</button>
+          <button type="button" class="emo-btn" data-emo="cool">מגניב</button>
+          <button type="button" class="emo-btn" data-emo="thinking">חושב</button>
+          <button type="button" class="emo-btn" data-emo="speaking">מדבר</button>
+        </div>
+        <div class="sim-caption">
+          תצוגה חיה של מסך ה-AMOLED העגול (466×466) • לחצו על כפתורי הילדים בתוך המסך כדי לבדוק את תפריט הפעילויות!
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <script type="module" src="./wizard.js"></script>
+</body>
+</html>
