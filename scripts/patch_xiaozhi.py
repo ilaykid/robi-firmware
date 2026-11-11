@@ -235,6 +235,13 @@ must_replace(
     "    RobiHttpPortal::GetInstance().Stop();\n"
     "    in_config_mode_ = true;\n",
 )
+must_replace(
+    wifi_cc,
+    "    WifiManager::GetInstance().SetPowerSaveLevel(wifi_level);\n",
+    "    (void)wifi_level;\n"
+    "    // Keep WiFi radio responsive in Standby so http://robi.local & LAN HTTP never drop packets\n"
+    "    WifiManager::GetInstance().SetPowerSaveLevel(WifiPowerSaveLevel::PERFORMANCE);\n",
+)
 
 # 5. AudioService raw PCM fast-path (16kHz mic -> Gemini Live, 24kHz Gemini Live -> speaker)
 audio_cc = fw / "main/audio/audio_service.cc"

@@ -192,6 +192,8 @@ private:
     RobiFaceStyle robi_face_style_ = ROBI_STYLE_CYBER_VISOR;
     int last_applied_vol_ = -1;
     int last_applied_bri_ = -1;
+    std::string last_hint_txt_;
+    int hint_poll_div_ = 0;
     char robi_last_emotion_[24] = "neutral";
     lv_timer_t* robi_face_timer_ = nullptr;
     int64_t robi_last_tick_us_ = 0;
@@ -299,54 +301,54 @@ private:
 
     FaceParams RobiDefaultParams() const {
         FaceParams p = {};
-        p.eye_w = 106.0f;
-        p.eye_h = 96.0f;
-        p.eye_radius = 34.0f;
-        p.pupil_scale = 0.25f;
-        p.brow_opa = 0.52f;
-        p.mouth_w = 40.0f;
-        p.mouth_curve = 11.0f;
+        p.eye_w = 92.0f;
+        p.eye_h = 98.0f;
+        p.eye_radius = 32.0f;
+        p.pupil_scale = 0.34f;
+        p.brow_opa = 0.78f;
+        p.mouth_w = 58.0f;
+        p.mouth_curve = 12.0f;
 
         if (robi_face_style_ == ROBI_STYLE_ROUND_KAWAII) {
-            p.eye_w = 114.0f;
-            p.eye_h = 114.0f;
-            p.eye_radius = 57.0f;
+            p.eye_w = 106.0f;
+            p.eye_h = 106.0f;
+            p.eye_radius = 53.0f;
             p.pupil_scale = 0.54f;
-            p.brow_opa = 0.42f;
+            p.brow_opa = 0.58f;
             p.brow_y_l = -5.0f;
             p.brow_y_r = -5.0f;
-            p.mouth_w = 34.0f;
-            p.mouth_curve = 20.0f;
+            p.mouth_w = 50.0f;
+            p.mouth_curve = 18.0f;
             p.cheek_opa = 0.72f;
         } else if (robi_face_style_ == ROBI_STYLE_RETRO_PIXEL) {
-            p.eye_w = 104.0f;
-            p.eye_h = 90.0f;
+            p.eye_w = 98.0f;
+            p.eye_h = 86.0f;
             p.eye_radius = 6.0f;
-            p.pupil_scale = 0.34f;
-            p.brow_opa = 0.88f;
-            p.mouth_w = 48.0f;
-            p.mouth_curve = 4.0f;
+            p.pupil_scale = 0.36f;
+            p.brow_opa = 0.90f;
+            p.mouth_w = 58.0f;
+            p.mouth_curve = 5.0f;
         } else if (robi_face_style_ == ROBI_STYLE_VISOR_CYCLOPS) {
-            p.eye_w = 122.0f;
-            p.eye_h = 54.0f;
-            p.eye_radius = 18.0f;
-            p.pupil_scale = 0.28f;
-            p.brow_opa = 0.35f;
+            p.eye_w = 104.0f;
+            p.eye_h = 48.0f;
+            p.eye_radius = 16.0f;
+            p.pupil_scale = 0.40f;
+            p.brow_opa = 0.80f;
             p.brow_y_l = -4.0f;
             p.brow_y_r = -4.0f;
-            p.mouth_w = 56.0f;
-            p.mouth_curve = 3.0f;
-            p.visor_opa = 0.88f;
+            p.mouth_w = 64.0f;
+            p.mouth_curve = 5.0f;
+            p.visor_opa = 0.92f;
         } else if (robi_face_style_ == ROBI_STYLE_OWL_MECH) {
-            p.eye_w = 108.0f;
-            p.eye_h = 108.0f;
-            p.eye_radius = 54.0f;
-            p.pupil_scale = 0.21f;
+            p.eye_w = 102.0f;
+            p.eye_h = 102.0f;
+            p.eye_radius = 51.0f;
+            p.pupil_scale = 0.28f;
             p.brow_opa = 0.92f;
             p.brow_ang_l = -3.0f;
             p.brow_ang_r = -3.0f;
-            p.mouth_w = 32.0f;
-            p.mouth_curve = 6.0f;
+            p.mouth_w = 54.0f;
+            p.mouth_curve = 8.0f;
         }
 
         uint32_t hex = RobiThemeBaseHex();
@@ -640,11 +642,9 @@ private:
         lv_obj_set_style_radius(e.iris, LV_RADIUS_CIRCLE, 0);
 
         e.pupil = RobiPlainObj(e.core);
-        lv_obj_set_style_bg_color(e.pupil, lv_color_hex(0x021324), 0);
-        lv_obj_set_style_bg_opa(e.pupil, LV_OPA_60, 0);
-        lv_obj_set_style_border_width(e.pupil, 2, 0);
-        lv_obj_set_style_border_color(e.pupil, lv_color_white(), 0);
-        lv_obj_set_style_border_opa(e.pupil, LV_OPA_40, 0);
+        lv_obj_set_style_bg_color(e.pupil, lv_color_hex(0x030B1A), 0);
+        lv_obj_set_style_bg_opa(e.pupil, LV_OPA_90, 0);
+        lv_obj_set_style_border_width(e.pupil, 0, 0);
         lv_obj_set_style_radius(e.pupil, LV_RADIUS_CIRCLE, 0);
 
         e.scanline = RobiPlainObj(e.core);
@@ -685,117 +685,104 @@ private:
     void RobiRenderEye(CyberEyeWidgets& e, float cx, float cy, float ew, float eh, float rad,
                        float pupil_sc, float gx, float gy, float sq_top, float sq_bot,
                        float scan_norm, lv_color_t c_hi, lv_color_t c_mid, bool color_dirty) {
-        float blink_atten = 1.0f - RobiClamp(sq_top, 0.0f, 1.0f) * 0.75f;
+        // Compute effective eye openness from top/bottom squint so blinking & winking squash cleanly
+        // inside the visor (matching face-preview.js 1:1 without black masks covering the visor frame)
+        float open_ratio = 1.0f - RobiClamp(sq_top * 0.88f + sq_bot * 0.72f, 0.0f, 0.90f);
+        float eff_eh = std::max(10.0f, eh * open_ratio);
         int i_ew = static_cast<int>(ew + 0.5f);
-        int i_eh = static_cast<int>(eh + 0.5f);
-        int i_rad = static_cast<int>(RobiClamp(rad, 4.0f, std::min(ew, eh) * 0.5f) + 0.5f);
+        int i_eh = static_cast<int>(eff_eh + 0.5f);
+        int i_rad = static_cast<int>(RobiClamp(rad, 4.0f, std::min(ew, eff_eh) * 0.5f) + 0.5f);
         int core_x = static_cast<int>(cx - ew * 0.5f + 0.5f);
-        int core_y = static_cast<int>(cy - eh * 0.5f + 0.5f);
+        int core_y = static_cast<int>(cy - eff_eh * 0.5f + 0.5f);
         bool is_pixel = (robi_face_style_ == ROBI_STYLE_RETRO_PIXEL);
         bool is_kawaii = (robi_face_style_ == ROBI_STYLE_ROUND_KAWAII);
         bool is_mech = (robi_face_style_ == ROBI_STYLE_OWL_MECH);
 
-        int go_w = i_ew + 24;
-        int go_h = static_cast<int>((eh + 24.0f) * blink_atten + 0.5f);
+        int go_w = i_ew + 18;
+        int go_h = i_eh + 18;
         RobiSetRect(e.glow_outer, static_cast<int>(cx - go_w * 0.5f), static_cast<int>(cy - go_h * 0.5f), go_w, go_h);
-        lv_obj_set_style_radius(e.glow_outer, is_pixel ? 10 : (i_rad + 12), 0);
+        lv_obj_set_style_radius(e.glow_outer, is_pixel ? 9 : (i_rad + 10), 0);
 
-        int gi_w = i_ew + 10;
-        int gi_h = static_cast<int>((eh + 10.0f) * blink_atten + 0.5f);
+        int gi_w = i_ew + 8;
+        int gi_h = i_eh + 8;
         RobiSetRect(e.glow_inner, static_cast<int>(cx - gi_w * 0.5f), static_cast<int>(cy - gi_h * 0.5f), gi_w, gi_h);
-        lv_obj_set_style_radius(e.glow_inner, is_pixel ? 8 : (i_rad + 5), 0);
+        lv_obj_set_style_radius(e.glow_inner, is_pixel ? 7 : (i_rad + 4), 0);
 
         RobiSetRect(e.core, core_x, core_y, i_ew, i_eh);
         lv_obj_set_style_radius(e.core, i_rad, 0);
-        lv_obj_set_style_border_width(e.core, is_mech ? 5 : 2, 0);
+        lv_obj_set_style_border_width(e.core, is_mech ? 4 : 2, 0);
 
         if (color_dirty) {
             lv_obj_set_style_bg_color(e.glow_outer, c_mid, 0);
             lv_obj_set_style_bg_color(e.glow_inner, c_mid, 0);
-            lv_obj_set_style_bg_color(e.core, c_hi, 0);
+            lv_obj_set_style_bg_color(e.core, c_mid, 0);
             lv_obj_set_style_bg_grad_color(e.core, c_mid, 0);
             lv_obj_set_style_border_color(e.core, c_hi, 0);
             lv_obj_set_style_border_color(e.iris, c_hi, 0);
             lv_obj_set_style_bg_color(e.closed_slit, c_hi, 0);
         }
 
-        float iris_ratio = is_mech ? 0.72f : 0.56f;
-        int iris_d = static_cast<int>(std::min(ew, eh) * iris_ratio);
+        lv_obj_add_flag(e.lid_top, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(e.lid_bot, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(e.closed_slit, LV_OBJ_FLAG_HIDDEN);
+
+        if (eff_eh <= 20.0f) {
+            // Winking / closed eye line (matches face-preview.js rightH = 11 * scale)
+            lv_obj_add_flag(e.iris, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(e.pupil, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(e.scanline, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(e.spec_main, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(e.spec_sub, LV_OBJ_FLAG_HIDDEN);
+            return;
+        }
+
+        lv_obj_remove_flag(e.iris, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(e.pupil, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(e.spec_main, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(e.spec_sub, LV_OBJ_FLAG_HIDDEN);
+
+        float iris_ratio = is_mech ? 0.72f : 0.58f;
+        int iris_d = static_cast<int>(std::min(ew, eff_eh) * iris_ratio);
         if (iris_d < 16) iris_d = 16;
-        float max_ix = std::max(2.0f, (ew - iris_d) * 0.5f - 6.0f);
-        float max_iy = std::max(2.0f, (eh - iris_d) * 0.5f - 6.0f);
-        int iris_x = static_cast<int>((ew - iris_d) * 0.5f + RobiClamp(gx * 0.30f, -max_ix, max_ix));
-        int iris_y = static_cast<int>((eh - iris_d) * 0.5f + RobiClamp(gy * 0.30f, -max_iy, max_iy));
+        float max_ix = std::max(2.0f, (ew - iris_d) * 0.5f - 5.0f);
+        float max_iy = std::max(2.0f, (eff_eh - iris_d) * 0.5f - 4.0f);
+        int iris_x = static_cast<int>((ew - iris_d) * 0.5f + RobiClamp(gx * 0.25f, -max_ix, max_ix));
+        int iris_y = static_cast<int>((eff_eh - iris_d) * 0.5f + RobiClamp(gy * 0.25f, -max_iy, max_iy));
         RobiSetRect(e.iris, iris_x, iris_y, iris_d, iris_d);
         lv_obj_set_style_radius(e.iris, is_pixel ? 4 : LV_RADIUS_CIRCLE, 0);
-        lv_obj_set_style_border_width(e.iris, is_mech ? 5 : 3, 0);
-        lv_obj_set_style_border_opa(e.iris, is_kawaii ? LV_OPA_20 : (is_mech ? LV_OPA_90 : LV_OPA_50), 0);
+        lv_obj_set_style_border_width(e.iris, is_mech ? 4 : 2, 0);
+        lv_obj_set_style_border_opa(e.iris, is_kawaii ? LV_OPA_30 : (is_mech ? LV_OPA_90 : LV_OPA_60), 0);
 
-        int pup_d = static_cast<int>(std::min(ew, eh) * pupil_sc);
-        if (pup_d < 12) pup_d = 12;
-        float max_px = std::max(2.0f, (ew - pup_d) * 0.5f - 8.0f);
-        float max_py = std::max(2.0f, (eh - pup_d) * 0.5f - 8.0f);
-        int pup_x = static_cast<int>((ew - pup_d) * 0.5f + RobiClamp(gx * 0.42f, -max_px, max_px));
-        int pup_y = static_cast<int>((eh - pup_d) * 0.5f + RobiClamp(gy * 0.42f, -max_py, max_py));
+        int pup_d = std::max(14, static_cast<int>(std::min(ew, eff_eh) * pupil_sc));
+        float max_px = std::max(2.0f, (ew - pup_d) * 0.5f - 6.0f);
+        float max_py = std::max(2.0f, (eff_eh - pup_d) * 0.5f - 5.0f);
+        int pup_x = static_cast<int>((ew - pup_d) * 0.5f + RobiClamp(gx * 0.35f, -max_px, max_px));
+        int pup_y = static_cast<int>((eff_eh - pup_d) * 0.5f + RobiClamp(gy * 0.35f, -max_py, max_py));
         RobiSetRect(e.pupil, pup_x, pup_y, pup_d, pup_d);
         lv_obj_set_style_radius(e.pupil, is_pixel ? 3 : LV_RADIUS_CIRCLE, 0);
-        lv_obj_set_style_bg_opa(e.pupil, is_kawaii ? LV_OPA_80 : (is_mech ? LV_OPA_90 : LV_OPA_60), 0);
+        lv_obj_set_style_bg_opa(e.pupil, LV_OPA_90, 0);
 
         if (is_kawaii) {
             lv_obj_add_flag(e.scanline, LV_OBJ_FLAG_HIDDEN);
         } else {
             lv_obj_remove_flag(e.scanline, LV_OBJ_FLAG_HIDDEN);
-            float sy_f = 8.0f + scan_norm * std::max(4.0f, eh - 19.0f);
-            float r_cap = static_cast<float>(i_rad);
-            float chord_inset = 6.0f;
-            if (sy_f < r_cap) {
-                float dy = r_cap - sy_f;
-                chord_inset = 6.0f + r_cap - std::sqrt(std::max(0.0f, r_cap * r_cap - dy * dy));
-            } else if (sy_f + 3.0f > eh - r_cap) {
-                float dy = (sy_f + 3.0f) - (eh - r_cap);
-                chord_inset = 6.0f + r_cap - std::sqrt(std::max(0.0f, r_cap * r_cap - dy * dy));
-            }
-            int scan_x = static_cast<int>(chord_inset + 0.5f);
-            int scan_w = std::max(8, i_ew - scan_x * 2);
-            RobiSetRect(e.scanline, scan_x, static_cast<int>(sy_f), scan_w, is_pixel ? 5 : 3);
+            float sy_f = eff_eh * 0.18f + scan_norm * (eff_eh * 0.64f);
+            int scan_w = static_cast<int>(ew * 0.72f);
+            int scan_x = (i_ew - scan_w) / 2;
+            RobiSetRect(e.scanline, scan_x, static_cast<int>(sy_f), scan_w, is_pixel ? 4 : 3);
         }
 
-        int sp_sz = is_kawaii ? 26 : 20;
-        int sp1_x = static_cast<int>(RobiClamp(ew * 0.20f + gx * 0.42f, i_rad * 0.32f + 3.0f, ew - (sp_sz + 4.0f) - i_rad * 0.25f));
-        int sp1_y = static_cast<int>(RobiClamp(eh * 0.16f + gy * 0.42f, i_rad * 0.32f + 3.0f, eh - (sp_sz + 4.0f) - i_rad * 0.25f));
+        int sp_sz = std::clamp(static_cast<int>(std::min(ew, eff_eh) * (is_kawaii ? 0.23f : 0.18f)), 8, 22);
+        int sp1_x = static_cast<int>(RobiClamp(ew * 0.28f - sp_sz * 0.5f + gx * 0.22f, 5.0f, ew - sp_sz - 5.0f));
+        int sp1_y = static_cast<int>(RobiClamp(eff_eh * 0.26f - sp_sz * 0.5f + gy * 0.22f, 4.0f, eff_eh - sp_sz - 4.0f));
         RobiSetRect(e.spec_main, sp1_x, sp1_y, sp_sz, sp_sz);
         lv_obj_set_style_radius(e.spec_main, is_pixel ? 2 : LV_RADIUS_CIRCLE, 0);
 
-        int sp2_sz = is_kawaii ? 12 : 9;
-        int sp2_x = static_cast<int>(RobiClamp(ew * 0.68f + gx * 0.24f, i_rad * 0.25f + 4.0f, ew - (sp2_sz + 4.0f) - i_rad * 0.32f));
-        int sp2_y = static_cast<int>(RobiClamp(eh * 0.68f + gy * 0.24f, i_rad * 0.25f + 4.0f, eh - (sp2_sz + 4.0f) - i_rad * 0.32f));
+        int sp2_sz = std::clamp(sp_sz / 2, 5, 11);
+        int sp2_x = static_cast<int>(RobiClamp(ew * 0.70f - sp2_sz * 0.5f + gx * 0.16f, 5.0f, ew - sp2_sz - 5.0f));
+        int sp2_y = static_cast<int>(RobiClamp(eff_eh * 0.72f - sp2_sz * 0.5f + gy * 0.16f, 4.0f, eff_eh - sp2_sz - 4.0f));
         RobiSetRect(e.spec_sub, sp2_x, sp2_y, sp2_sz, sp2_sz);
         lv_obj_set_style_radius(e.spec_sub, is_pixel ? 2 : LV_RADIUS_CIRCLE, 0);
-
-        int top_cov = static_cast<int>(RobiClamp(sq_top, 0.0f, 1.0f) * (eh + 24.0f));
-        if (top_cov >= 3) {
-            lv_obj_remove_flag(e.lid_top, LV_OBJ_FLAG_HIDDEN);
-            RobiSetRect(e.lid_top, core_x - 14, core_y - 12, i_ew + 28, top_cov);
-        } else {
-            lv_obj_add_flag(e.lid_top, LV_OBJ_FLAG_HIDDEN);
-        }
-
-        int bot_cov = static_cast<int>(RobiClamp(sq_bot, 0.0f, 1.0f) * (eh + 10.0f));
-        if (bot_cov >= 3) {
-            int dome_w = i_ew + 42;
-            int dome_h = i_eh + 34;
-            lv_obj_remove_flag(e.lid_bot, LV_OBJ_FLAG_HIDDEN);
-            RobiSetRect(e.lid_bot, static_cast<int>(cx - dome_w * 0.5f), core_y + i_eh + 8 - bot_cov, dome_w, dome_h);
-        } else {
-            lv_obj_add_flag(e.lid_bot, LV_OBJ_FLAG_HIDDEN);
-        }
-
-        if (sq_top > 0.88f) {
-            lv_obj_remove_flag(e.closed_slit, LV_OBJ_FLAG_HIDDEN);
-            RobiSetRect(e.closed_slit, core_x + 4, static_cast<int>(cy + eh * 0.12f), i_ew - 8, 5);
-        } else {
-            lv_obj_add_flag(e.closed_slit, LV_OBJ_FLAG_HIDDEN);
-        }
     }
 
     void RobiRenderBrow(lv_obj_t** segs, float cx, float cy, float half_w, float tilt_px,
@@ -806,18 +793,20 @@ private:
             }
             return;
         }
-        float left_dy = is_left ? -tilt_px * 0.6f : tilt_px;
-        float right_dy = is_left ? tilt_px : -tilt_px * 0.6f;
-        float arch_dy = -5.0f - std::fabs(tilt_px) * 0.15f;
-        int seg_w = std::max(14, static_cast<int>(half_w * 0.66f));
-        int seg_h = 7;
+        bool is_pixel = (robi_face_style_ == ROBI_STYLE_RETRO_PIXEL);
+        bool is_kawaii = (robi_face_style_ == ROBI_STYLE_ROUND_KAWAII);
+        bool is_mech = (robi_face_style_ == ROBI_STYLE_OWL_MECH);
+        int seg_w = is_mech ? 18 : 15;
+        int seg_h = is_mech ? 9 : 7;
+        float span_hw = std::min(half_w, 32.0f * face_scale_);
+        float slope = is_left ? tilt_px : -tilt_px;
 
         for (int i = 0; i < kBrowSegs; i++) {
             lv_obj_remove_flag(segs[i], LV_OBJ_FLAG_HIDDEN);
-            float u = (static_cast<float>(i) / static_cast<float>(kBrowSegs - 1)) * 2.0f - 1.0f;
-            float t01 = (u + 1.0f) * 0.5f;
-            float px = cx + u * half_w;
-            float py = cy + left_dy * (1.0f - t01) + right_dy * t01 + arch_dy * (1.0f - u * u);
+            float u = (static_cast<float>(i) - 2.0f) / 2.0f;  // -1 .. +1
+            float px = cx + u * span_hw;
+            float arch = is_pixel ? 0.0f : (-std::cos(u * 1.2f) * (is_kawaii ? 9.0f : 6.0f) * face_scale_);
+            float py = cy + arch + u * slope;
             RobiSetRect(segs[i], static_cast<int>(px - seg_w * 0.5f), static_cast<int>(py - seg_h * 0.5f), seg_w, seg_h);
             lv_obj_set_style_bg_opa(segs[i], opa, 0);
             if (color_dirty) {
@@ -845,13 +834,18 @@ private:
         dt = RobiClamp(dt, 0.010f, 0.090f);
         phase_t_ += dt;
 
-        bool voice_in = (robi_face_mode_ == ROBI_MODE_LISTENING) && Application::GetInstance().IsVoiceDetected();
-        bool has_buttons = (robi_profiles_ != nullptr) || (robi_setup_hint_ && !lv_obj_has_flag(robi_setup_hint_, LV_OBJ_FLAG_HIDDEN));
+        if (++hint_poll_div_ >= 50) {
+            hint_poll_div_ = 0;
+            RobiUpdateSetupHintVisibility(robi_face_mode_ == ROBI_MODE_IDLE);
+        }
 
-        float idle_scale = has_buttons ? 0.90f : 1.00f;
-        float idle_fy = has_buttons ? 208.0f : 224.0f;
-        float tgt_scale = (robi_face_mode_ == ROBI_MODE_IDLE) ? idle_scale : (voice_in ? 1.07f : 1.03f);
-        float tgt_fy = (robi_face_mode_ == ROBI_MODE_IDLE) ? idle_fy : 226.0f;
+        bool voice_in = (robi_face_mode_ == ROBI_MODE_LISTENING) && Application::GetInstance().IsVoiceDetected();
+        bool has_buttons = (robi_profiles_ != nullptr);
+
+        float idle_scale = has_buttons ? 0.94f : 1.04f;
+        float idle_fy = has_buttons ? 206.0f : 230.0f;
+        float tgt_scale = (robi_face_mode_ == ROBI_MODE_IDLE) ? idle_scale : (voice_in ? 1.05f : 1.02f);
+        float tgt_fy = (robi_face_mode_ == ROBI_MODE_IDLE) ? idle_fy : 232.0f;
         float tgt_talk = (robi_face_mode_ == ROBI_MODE_SPEAKING) ? 1.0f : 0.0f;
 
         float k_fast = RobiClamp(dt * 14.0f, 0.0f, 1.0f);
@@ -993,8 +987,9 @@ private:
         float jitter_x = tremor_shock_ ? std::sin(phase_t_ * 42.0f) * 2.2f : 0.0f;
 
         float cx_mid = LV_HOR_RES * 0.5f + (cur_.gaze_x + saccade_x_) * 0.32f + jitter_x;
-        float cy_eyes = face_y_ - 26.0f * face_scale_ + breathe_y + (cur_.gaze_y + saccade_y_) * 0.24f;
-        float sep = 74.0f * face_scale_;
+        float cy_eyes = face_y_ - 22.0f * face_scale_ + breathe_y + (cur_.gaze_y + saccade_y_) * 0.24f;
+        bool full_visor = (robi_face_style_ == ROBI_STYLE_VISOR_CYCLOPS);
+        float sep = (full_visor ? 80.0f : 78.0f) * face_scale_;
         float ew = cur_.eye_w * face_scale_;
         float eh = cur_.eye_h * face_scale_ * (1.0f + robi_voice_smooth_ * 0.05f);
         float rad = cur_.eye_radius * face_scale_;
@@ -1010,7 +1005,8 @@ private:
         RobiRenderEye(eye_r_, cx_mid + sep, cy_eyes, ew, eh, rad, cur_.pupil_scale,
                       gx, gy, sq_top_r, cur_.squint_bot_r, scan_norm, c_hi, c_mid, color_dirty);
 
-        float brow_base_y = cy_eyes - eh * 0.5f - 16.0f * face_scale_ - robi_voice_smooth_ * 4.0f;
+        float brow_offset = full_visor ? (48.0f * face_scale_) : (eh * 0.5f + 18.0f * face_scale_);
+        float brow_base_y = cy_eyes - brow_offset - robi_voice_smooth_ * 4.0f;
         lv_opa_t b_opa = static_cast<lv_opa_t>(RobiClamp(cur_.brow_opa * 255.0f, 0.0f, 255.0f));
         RobiRenderBrow(brow_l_, cx_mid - sep, brow_base_y + cur_.brow_y_l * face_scale_,
                        ew * 0.42f, cur_.brow_ang_l * face_scale_, true, b_opa, c_hi, color_dirty);
@@ -1035,31 +1031,31 @@ private:
 
         if (cur_.visor_opa > 0.04f) {
             lv_obj_remove_flag(visor_bar_, LV_OBJ_FLAG_HIDDEN);
-            bool full_visor = (robi_face_style_ == ROBI_STYLE_VISOR_CYCLOPS);
-            int vw = static_cast<int>(sep * 2.0f + ew + (full_visor ? 46.0f : 30.0f));
-            int vh = static_cast<int>(full_visor ? (eh + 24.0f) : (eh * 0.56f));
+            int vw = static_cast<int>(sep * 2.0f + ew + (full_visor ? 44.0f * face_scale_ : 30.0f));
+            int vh = static_cast<int>(full_visor ? (eh + 26.0f * face_scale_) : (eh * 0.56f));
             RobiSetRect(visor_bar_, static_cast<int>(cx_mid - vw * 0.5f),
                         static_cast<int>(cy_eyes - (full_visor ? vh * 0.50f : vh * 0.56f)), vw, vh);
-            lv_obj_set_style_bg_opa(visor_bar_, static_cast<lv_opa_t>(cur_.visor_opa * (full_visor ? 95.0f : 185.0f)), 0);
+            lv_obj_set_style_bg_opa(visor_bar_, static_cast<lv_opa_t>(cur_.visor_opa * (full_visor ? 210.0f : 185.0f)), 0);
             lv_obj_set_style_border_opa(visor_bar_, static_cast<lv_opa_t>(cur_.visor_opa * 245.0f), 0);
             if (color_dirty) {
-                lv_obj_set_style_border_color(visor_bar_, c_hi, 0);
-                lv_obj_set_style_bg_grad_color(visor_bar_, c_mid, 0);
+                lv_obj_set_style_border_color(visor_bar_, c_mid, 0);
+                lv_obj_set_style_bg_color(visor_bar_, lv_color_hex(0x061022), 0);
+                lv_obj_set_style_bg_grad_color(visor_bar_, lv_color_hex(0x0A1931), 0);
             }
         } else {
             lv_obj_add_flag(visor_bar_, LV_OBJ_FLAG_HIDDEN);
         }
 
         float mouth_cx = LV_HOR_RES * 0.5f + (cur_.gaze_x + saccade_x_) * 0.16f;
-        float mouth_cy = face_y_ + 66.0f * face_scale_ + breathe_y * 0.7f;
+        float mouth_cy = cy_eyes + 94.0f * face_scale_ + breathe_y * 0.7f;
 
         float o_vis = cur_.mouth_o * (1.0f - talk_mix_ * 0.85f);
         float seg_vis = 1.0f - o_vis * 0.92f;
 
         if (o_vis > 0.06f) {
             lv_obj_remove_flag(mouth_ring_, LV_OBJ_FLAG_HIDDEN);
-            int rw = static_cast<int>(cur_.mouth_w * 1.45f * face_scale_);
-            int rh = static_cast<int>((cur_.mouth_w * 1.35f + 6.0f) * face_scale_);
+            int rw = static_cast<int>(44.0f * face_scale_);
+            int rh = static_cast<int>(42.0f * face_scale_);
             RobiSetRect(mouth_ring_, static_cast<int>(mouth_cx - rw * 0.5f), static_cast<int>(mouth_cy - rh * 0.5f), rw, rh);
             lv_obj_set_style_border_opa(mouth_ring_, static_cast<lv_opa_t>(RobiClamp(o_vis * 255.0f, 0.0f, 255.0f)), 0);
             if (color_dirty) {
@@ -1078,10 +1074,9 @@ private:
             float tlt = cur_.mouth_tilt * face_scale_ * (1.0f - talk_mix_ * 0.6f);
             float wav = cur_.mouth_wave * face_scale_ * (1.0f - talk_mix_ * 0.7f);
 
-            float rest_w = std::max(11.0f, (rest_hw * 2.0f) / 6.2f);
-            int seg_w = static_cast<int>(RobiLerp(rest_w, 9.0f, talk_mix_) + 0.5f);
+            int seg_w = (robi_face_style_ == ROBI_STYLE_RETRO_PIXEL) ? 10 : 9;
             lv_opa_t core_opa = static_cast<lv_opa_t>(RobiClamp(seg_vis * 255.0f, 0.0f, 255.0f));
-            lv_opa_t glow_opa = static_cast<lv_opa_t>(RobiClamp(seg_vis * 68.0f, 0.0f, 95.0f));
+            lv_opa_t glow_opa = static_cast<lv_opa_t>(RobiClamp(seg_vis * 55.0f, 0.0f, 80.0f));
 
             for (int i = 0; i < kMouthSegs; i++) {
                 lv_obj_remove_flag(mouth_seg_[i], LV_OBJ_FLAG_HIDDEN);
@@ -1095,14 +1090,14 @@ private:
                 }
 
                 float ripple = 0.72f + 0.28f * std::sin(phase_t_ * 15.0f + static_cast<float>(i) * 0.88f);
-                float voice_h = (8.0f + robi_voice_smooth_ * kBarWeight[i] * ripple * 58.0f);
-                float taper_rest = 7.0f - 2.0f * (u * u);
+                float voice_h = (8.0f + robi_voice_smooth_ * kBarWeight[i] * ripple * 48.0f);
+                float taper_rest = 9.0f + (1.0f - std::fabs(u)) * 3.0f;
                 int seg_h = static_cast<int>(RobiLerp(taper_rest, voice_h, talk_mix_) + 0.5f);
 
                 RobiSetRect(mouth_glow_seg_[i],
-                            static_cast<int>(px - (seg_w + 6) * 0.5f),
-                            static_cast<int>(py - (seg_h + 6) * 0.5f),
-                            seg_w + 6, seg_h + 6);
+                            static_cast<int>(px - (seg_w + 4) * 0.5f),
+                            static_cast<int>(py - (seg_h + 4) * 0.5f),
+                            seg_w + 4, seg_h + 4);
                 RobiSetRect(mouth_seg_[i],
                             static_cast<int>(px - seg_w * 0.5f),
                             static_cast<int>(py - seg_h * 0.5f),
@@ -1112,8 +1107,8 @@ private:
                 lv_obj_set_style_bg_opa(mouth_seg_[i], core_opa, 0);
                 if (color_dirty) {
                     lv_obj_set_style_bg_color(mouth_glow_seg_[i], c_mid, 0);
-                    lv_obj_set_style_bg_color(mouth_seg_[i], c_hi, 0);
-                    lv_obj_set_style_bg_grad_color(mouth_seg_[i], c_mid, 0);
+                    lv_obj_set_style_bg_color(mouth_seg_[i], c_mid, 0);
+                    lv_obj_set_style_bg_grad_color(mouth_seg_[i], c_hi, 0);
                 }
             }
         } else {
@@ -1180,17 +1175,17 @@ private:
         lv_obj_set_style_radius(cheek_r_, LV_RADIUS_CIRCLE, 0);
         lv_obj_add_flag(cheek_r_, LV_OBJ_FLAG_HIDDEN);
 
-        RobiCreateEye(emoji_box_, eye_l_);
-        RobiCreateEye(emoji_box_, eye_r_);
-
         visor_bar_ = RobiPlainObj(emoji_box_);
-        lv_obj_set_style_bg_color(visor_bar_, lv_color_hex(0x061A2E), 0);
-        lv_obj_set_style_bg_grad_color(visor_bar_, lv_color_hex(0x00B4D8), 0);
+        lv_obj_set_style_bg_color(visor_bar_, lv_color_hex(0x061022), 0);
+        lv_obj_set_style_bg_grad_color(visor_bar_, lv_color_hex(0x0A1931), 0);
         lv_obj_set_style_bg_grad_dir(visor_bar_, LV_GRAD_DIR_VER, 0);
         lv_obj_set_style_border_width(visor_bar_, 3, 0);
-        lv_obj_set_style_border_color(visor_bar_, lv_color_hex(0xFFD166), 0);
+        lv_obj_set_style_border_color(visor_bar_, lv_color_hex(0xA855F7), 0);
         lv_obj_set_style_radius(visor_bar_, 22, 0);
         lv_obj_add_flag(visor_bar_, LV_OBJ_FLAG_HIDDEN);
+
+        RobiCreateEye(emoji_box_, eye_l_);
+        RobiCreateEye(emoji_box_, eye_r_);
 
         for (int i = 0; i < kBrowSegs; i++) {
             brow_l_[i] = RobiPlainObj(emoji_box_);
@@ -1242,13 +1237,17 @@ private:
 
     void RobiUpdateSetupHintVisibility(bool idle) {
         if (robi_setup_hint_ == nullptr || robi_setup_lbl_ == nullptr) return;
-        if (!idle || RobiConfig::GetInstance().HasApiKey()) {
+        if (!idle) {
             lv_obj_add_flag(robi_setup_hint_, LV_OBJ_FLAG_HIDDEN);
             return;
         }
         std::string ip = WifiManager::GetInstance().GetIpAddress();
-        std::string txt = ip.empty() ? "הגדרות: robi.local" : ("robi.local | " + ip);
-        lv_label_set_text(robi_setup_lbl_, txt.c_str());
+        std::string txt = ip.empty() ? "robi.local" : ip;
+        if (txt != last_hint_txt_) {
+            last_hint_txt_ = txt;
+            lv_label_set_text(robi_setup_lbl_, txt.c_str());
+        }
+        lv_obj_align(robi_setup_hint_, LV_ALIGN_BOTTOM_MID, 0, -10);
         lv_obj_remove_flag(robi_setup_hint_, LV_OBJ_FLAG_HIDDEN);
     }
 
@@ -1267,6 +1266,7 @@ private:
             lv_obj_add_flag(self->robi_profiles_, LV_OBJ_FLAG_HIDDEN);
         }
         lv_obj_remove_flag(menu, LV_OBJ_FLAG_HIDDEN);
+        self->RobiUpdateSetupHintVisibility(true);
         self->RobiStopMenuTimer();
         self->robi_menu_timer_ = lv_timer_create(OnMenuTimeout, 20000, nullptr);
         lv_timer_set_repeat_count(self->robi_menu_timer_, 1);
@@ -1278,9 +1278,11 @@ private:
         if (self == nullptr) return;
         self->robi_menu_timer_ = nullptr;
         self->RobiHideAllMenus();
-        if (Application::GetInstance().GetDeviceState() == kDeviceStateIdle && self->robi_profiles_ != nullptr) {
+        bool is_idle = (Application::GetInstance().GetDeviceState() == kDeviceStateIdle);
+        if (is_idle && self->robi_profiles_ != nullptr) {
             lv_obj_remove_flag(self->robi_profiles_, LV_OBJ_FLAG_HIDDEN);
         }
+        self->RobiUpdateSetupHintVisibility(is_idle);
     }
 
     void RobiStopMenuTimer() {
@@ -1315,6 +1317,7 @@ private:
             if (self->robi_profiles_ != nullptr) {
                 lv_obj_remove_flag(self->robi_profiles_, LV_OBJ_FLAG_HIDDEN);
             }
+            self->RobiUpdateSetupHintVisibility(true);
             return;
         }
         ESP_LOGI(TAG, "Robi face tap: start listening");
@@ -1355,19 +1358,20 @@ private:
         lv_obj_t* b = lv_button_create(parent);
         lv_obj_set_size(b, LV_HOR_RES * w_pct / 100, LV_VER_RES * h_pct / 100);
         lv_obj_set_style_radius(b, LV_RADIUS_CIRCLE, 0);
-        lv_obj_set_style_bg_color(b, lv_color_hex(color), 0);
-        lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
-        lv_obj_set_style_bg_opa(b, LV_OPA_80, LV_STATE_PRESSED);
+        lv_obj_set_style_bg_color(b, lv_color_hex(0x0B1528), 0);
+        lv_obj_set_style_bg_opa(b, LV_OPA_90, 0);
+        lv_obj_set_style_bg_color(b, lv_color_hex(color), LV_STATE_PRESSED);
+        lv_obj_set_style_bg_opa(b, LV_OPA_50, LV_STATE_PRESSED);
         lv_obj_set_style_transform_width(b, 0, LV_STATE_PRESSED);
         lv_obj_set_style_transform_height(b, 0, LV_STATE_PRESSED);
         lv_obj_set_style_shadow_width(b, 0, 0);
         lv_obj_set_style_shadow_width(b, 0, LV_STATE_PRESSED);
-        lv_obj_set_style_border_width(b, 1, 0);
-        lv_obj_set_style_border_color(b, lv_color_white(), 0);
-        lv_obj_set_style_border_opa(b, LV_OPA_30, 0);
+        lv_obj_set_style_border_width(b, 2, 0);
+        lv_obj_set_style_border_color(b, lv_color_hex(color), 0);
+        lv_obj_set_style_border_opa(b, LV_OPA_COVER, 0);
         lv_obj_t* l = lv_label_create(b);
         lv_label_set_text(l, text);
-        lv_obj_set_style_text_color(l, lv_color_white(), 0);
+        lv_obj_set_style_text_color(l, lv_color_hex(0xF8FAFC), 0);
         lv_obj_center(l);
         lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, data);
         return b;

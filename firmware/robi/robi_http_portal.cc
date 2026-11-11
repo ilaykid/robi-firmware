@@ -11,6 +11,7 @@
 #include <arpa/inet.h>
 #include <cJSON.h>
 #include <esp_log.h>
+#include <esp_timer.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -498,35 +499,76 @@ esp_err_t HandleControlPost(httpd_req_t* req) {
     return httpd_resp_send(req, ok, std::strlen(ok));
 }
 
-// Case-insensitive check whether DNS QNAME at offset 12 equals "robi.local."
-bool ParseMdnsRobiLocalQuery(const uint8_t* pkt, size_t len, size_t& qname_end_out) {
-    if (len < 29) return false;
+// Case-insensitive check whether any DNS question in pkt asks for "robi.local" or "robi"
+bool ParseMdnsRobiLocalQuery(const uint8_t* pkt, size_t len, uint16_t& qtype_out) {
+    if (len < 22) return false;
     uint16_t flags = (static_cast<uint16_t>(pkt[2]) << 8) | pkt[3];
     if (flags & 0x8000) return false;  // Ignore responses
     uint16_t qdcount = (static_cast<uint16_t>(pkt[4]) << 8) | pkt[5];
     if (qdcount == 0) return false;
 
-    // Expect label 1: length 4 ("robi"), label 2: length 5 ("local"), terminator 0
+    // Scan packet questions for label "robi" followed by either "local" or end-of-name (LLMNR/mDNS)
     size_t pos = 12;
-    if (pos + 11 >= len) return false;
-    if (pkt[pos] != 4) return false;
-    for (int i = 0; i < 4; ++i) {
-        if (std::tolower(pkt[pos + 1 + i]) != "robi"[i]) return false;
-    }
-    pos += 5;
-    if (pkt[pos] != 5) return false;
-    for (int i = 0; i < 5; ++i) {
-        if (std::tolower(pkt[pos + 1 + i]) != "local"[i]) return false;
-    }
-    pos += 6;
-    if (pkt[pos] != 0) return false;
-    ++pos;
-    if (pos + 4 > len) return false;
+    qtype_out = 1;
+    bool matched = false;
+    for (uint16_t q = 0; q < qdcount && pos < len; ++q) {
+        size_t name_start = pos;
+        bool first_is_robi = false;
+        bool second_is_local_or_end = false;
+        int label_idx = 0;
+        bool jumped = false;
+        size_t cur = pos;
+        int hops = 0;
 
-    uint16_t qtype = (static_cast<uint16_t>(pkt[pos]) << 8) | pkt[pos + 1];
-    if (qtype != 1 && qtype != 255) return false;  // A (1) or ANY (255)
-    qname_end_out = pos;
-    return true;
+        while (cur < len && hops < 16) {
+            uint8_t llen = pkt[cur];
+            if (llen == 0) {
+                if (label_idx == 1 && first_is_robi) {
+                    second_is_local_or_end = true;
+                }
+                if (!jumped) pos = cur + 1;
+                break;
+            }
+            if ((llen & 0xC0) == 0xC0) {
+                if (cur + 1 >= len) return matched;
+                uint16_t ptr = ((static_cast<uint16_t>(llen & 0x3F) << 8) | pkt[cur + 1]);
+                if (!jumped) pos = cur + 2;
+                jumped = true;
+                cur = ptr;
+                ++hops;
+                continue;
+            }
+            if (cur + 1 + llen > len) return matched;
+            if (label_idx == 0 && llen == 4) {
+                first_is_robi = (std::tolower(pkt[cur + 1]) == 'r' &&
+                                 std::tolower(pkt[cur + 2]) == 'o' &&
+                                 std::tolower(pkt[cur + 3]) == 'b' &&
+                                 std::tolower(pkt[cur + 4]) == 'i');
+            } else if (label_idx == 1 && first_is_robi && llen == 5) {
+                second_is_local_or_end = (std::tolower(pkt[cur + 1]) == 'l' &&
+                                          std::tolower(pkt[cur + 2]) == 'o' &&
+                                          std::tolower(pkt[cur + 3]) == 'c' &&
+                                          std::tolower(pkt[cur + 4]) == 'a' &&
+                                          std::tolower(pkt[cur + 5]) == 'l');
+            }
+            cur += 1 + llen;
+            ++label_idx;
+        }
+        (void)name_start;
+        if (pos + 4 > len) break;
+        uint16_t qtype = (static_cast<uint16_t>(pkt[pos]) << 8) | pkt[pos + 1];
+        pos += 4;  // skip QTYPE + QCLASS
+
+        if (first_is_robi && second_is_local_or_end) {
+            matched = true;
+            if (qtype == 1 || qtype == 255) {
+                qtype_out = 1;
+                return true;
+            }
+            qtype_out = qtype;
+        }
+    }
+    return matched;
 }
 
 }  // namespace
@@ -631,27 +673,13 @@ void RobiHttpPortal::MdnsResponderLoop() {
     mcast_dst.sin_port = htons(5353);
     mcast_dst.sin_addr.s_addr = inet_addr("224.0.0.251");
 
-    uint8_t buf[256];
-    while (mdns_running_.load()) {
-        sockaddr_in src = {};
-        socklen_t slen = sizeof(src);
-        int n = recvfrom(sock, buf, sizeof(buf), 0, reinterpret_cast<sockaddr*>(&src), &slen);
-        if (n <= 0) continue;
+    uint32_t joined_ip = 0;
+    int64_t last_announce_us = 0;
 
-        size_t qend = 0;
-        if (!ParseMdnsRobiLocalQuery(buf, static_cast<size_t>(n), qend)) {
-            continue;
-        }
-
-        std::string ip_str = WifiManager::GetInstance().GetIpAddress();
-        in_addr ip_bin = {};
-        if (ip_str.empty() || inet_aton(ip_str.c_str(), &ip_bin) == 0) {
-            continue;
-        }
-
-        uint8_t resp[64] = {};
-        resp[0] = buf[0];
-        resp[1] = buf[1];
+    auto build_mdns_a_packet = [](uint8_t* resp, uint16_t txid, const in_addr& ip_bin) -> size_t {
+        std::memset(resp, 0, 64);
+        resp[0] = static_cast<uint8_t>((txid >> 8) & 0xFF);
+        resp[1] = static_cast<uint8_t>(txid & 0xFF);
         resp[2] = 0x84;  // QR=1, AA=1
         resp[3] = 0x00;
         resp[6] = 0x00;
@@ -673,6 +701,52 @@ void RobiHttpPortal::MdnsResponderLoop() {
         resp[off++] = 0x04;  // RDLENGTH 4
         std::memcpy(resp + off, &ip_bin.s_addr, 4);
         off += 4;
+        return off;
+    };
+
+    uint8_t buf[256];
+    while (mdns_running_.load()) {
+        std::string ip_str = WifiManager::GetInstance().GetIpAddress();
+        in_addr ip_bin = {};
+        bool have_ip = (!ip_str.empty() && inet_aton(ip_str.c_str(), &ip_bin) != 0 && ip_bin.s_addr != 0);
+
+        if (have_ip && ip_bin.s_addr != joined_ip) {
+            joined_ip = ip_bin.s_addr;
+            ip_mreq mreq_if = {};
+            mreq_if.imr_multiaddr.s_addr = inet_addr("224.0.0.251");
+            mreq_if.imr_interface.s_addr = ip_bin.s_addr;
+            setsockopt(sock, IPPROTO_IP, IP_DROP_MEMBERSHIP, &mreq_if, sizeof(mreq_if));
+            setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq_if, sizeof(mreq_if));
+            setsockopt(sock, IPPROTO_IP, IP_MULTICAST_IF, &ip_bin, sizeof(ip_bin));
+
+            // Broadcast immediate gratuitous mDNS announcement when IP is acquired
+            uint8_t ann[64];
+            size_t alen = build_mdns_a_packet(ann, 0, ip_bin);
+            sendto(sock, ann, alen, 0, reinterpret_cast<sockaddr*>(&mcast_dst), sizeof(mcast_dst));
+            last_announce_us = esp_timer_get_time();
+        }
+
+        int64_t now_us = esp_timer_get_time();
+        if (have_ip && (now_us - last_announce_us) > 12LL * 1000000LL) {
+            uint8_t ann[64];
+            size_t alen = build_mdns_a_packet(ann, 0, ip_bin);
+            sendto(sock, ann, alen, 0, reinterpret_cast<sockaddr*>(&mcast_dst), sizeof(mcast_dst));
+            last_announce_us = now_us;
+        }
+
+        sockaddr_in src = {};
+        socklen_t slen = sizeof(src);
+        int n = recvfrom(sock, buf, sizeof(buf), 0, reinterpret_cast<sockaddr*>(&src), &slen);
+        if (n <= 0 || !have_ip) continue;
+
+        uint16_t qtype = 1;
+        if (!ParseMdnsRobiLocalQuery(buf, static_cast<size_t>(n), qtype)) {
+            continue;
+        }
+
+        uint16_t txid = (static_cast<uint16_t>(buf[0]) << 8) | buf[1];
+        uint8_t resp[64];
+        size_t off = build_mdns_a_packet(resp, txid, ip_bin);
 
         sendto(sock, resp, off, 0, reinterpret_cast<sockaddr*>(&mcast_dst), sizeof(mcast_dst));
         sendto(sock, resp, off, 0, reinterpret_cast<sockaddr*>(&src), slen);
