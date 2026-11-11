@@ -1,13 +1,18 @@
 #include "robi_config.h"
 
 #include <cJSON.h>
+#include <esp_event.h>
 #include <esp_flash.h>
 #include <esp_log.h>
+#include <esp_netif.h>
+#include <esp_timer.h>
+#include <esp_wifi.h>
 #include <nvs.h>
 #include <nvs_flash.h>
 #include <ssid_manager.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <cstring>
 
@@ -18,9 +23,121 @@ namespace {
 constexpr const char* kNvsNsCfg = "robi_cfg";
 constexpr const char* kNvsKeyJson = "json";
 constexpr const char* kNvsKeyFlashSig = "flash_sig";
+constexpr const char* kNvsKeyGoodBssid = "good_bssid";
 constexpr const char* kNvsNsMem = "robi_mem";
 constexpr const char* kNvsKeyMemJson = "notes";
 constexpr const char* kFlashMagic = "ROBICFG1";
+
+// Smart Multi-AP DHCP Failover Guard:
+// If a mesh extender/repeater associates at 802.11 L2 (WIFI_EVENT_STA_CONNECTED) but fails to
+// hand out a DHCP IP within 4.5s, blacklist that BSSID and immediately advance WifiStation's
+// connect_queue_ to the working router BSSID, and remember the working BSSID in NVS.
+bool s_wifi_guard_installed = false;
+esp_timer_handle_t s_dhcp_watchdog_timer = nullptr;
+std::array<uint8_t, 6> s_cur_bssid = {};
+std::array<uint8_t, 6> s_good_bssid = {};
+bool s_good_bssid_valid = false;
+int s_fast_skip_count = 0;
+std::vector<std::array<uint8_t, 6>> s_dead_dhcp_bssids;
+
+bool IsDeadDhcpBssid(const std::array<uint8_t, 6>& b) {
+    for (const auto& d : s_dead_dhcp_bssids) {
+        if (d == b) return true;
+    }
+    return false;
+}
+
+void InstallSmartWifiDhcpGuard() {
+    if (s_wifi_guard_installed) return;
+    s_wifi_guard_installed = true;
+
+    // Load last known DHCP-working BSSID from NVS
+    nvs_handle_t h = 0;
+    if (nvs_open(kNvsNsCfg, NVS_READONLY, &h) == ESP_OK) {
+        size_t len = 6;
+        if (nvs_get_blob(h, kNvsKeyGoodBssid, s_good_bssid.data(), &len) == ESP_OK && len == 6) {
+            s_good_bssid_valid = true;
+            ESP_LOGI(TAG, "Loaded last good DHCP BSSID: %02x:%02x:%02x:%02x:%02x:%02x",
+                     s_good_bssid[0], s_good_bssid[1], s_good_bssid[2],
+                     s_good_bssid[3], s_good_bssid[4], s_good_bssid[5]);
+        }
+        nvs_close(h);
+    }
+
+    esp_event_loop_create_default();  // Safe no-op if already created
+
+    esp_timer_create_args_t targs = {};
+    targs.callback = [](void*) {
+        if (!IsDeadDhcpBssid(s_cur_bssid)) {
+            ESP_LOGW(TAG, "DHCP timeout (4.5s) on BSSID %02x:%02x:%02x:%02x:%02x:%02x — blacklisting extender & advancing AP queue!",
+                     s_cur_bssid[0], s_cur_bssid[1], s_cur_bssid[2],
+                     s_cur_bssid[3], s_cur_bssid[4], s_cur_bssid[5]);
+            s_dead_dhcp_bssids.push_back(s_cur_bssid);
+        }
+        esp_wifi_disconnect();
+    };
+    targs.dispatch_method = ESP_TIMER_TASK;
+    targs.name = "robi_dhcp_wd";
+    esp_timer_create(&targs, &s_dhcp_watchdog_timer);
+
+    esp_event_handler_instance_register(
+        WIFI_EVENT, ESP_EVENT_ANY_ID,
+        [](void*, esp_event_base_t, int32_t event_id, void* event_data) {
+            if (event_id == WIFI_EVENT_STA_CONNECTED && event_data != nullptr) {
+                auto* ev = static_cast<wifi_event_sta_connected_t*>(event_data);
+                std::memcpy(s_cur_bssid.data(), ev->bssid, 6);
+                if (s_dhcp_watchdog_timer == nullptr) return;
+                esp_timer_stop(s_dhcp_watchdog_timer);
+
+                if (IsDeadDhcpBssid(s_cur_bssid)) {
+                    ESP_LOGW(TAG, "Fast-skipping dead DHCP BSSID %02x:%02x:%02x:%02x:%02x:%02x",
+                             s_cur_bssid[0], s_cur_bssid[1], s_cur_bssid[2],
+                             s_cur_bssid[3], s_cur_bssid[4], s_cur_bssid[5]);
+                    esp_timer_start_once(s_dhcp_watchdog_timer, 25000ULL);  // 25ms
+                    return;
+                }
+                if (s_good_bssid_valid && s_cur_bssid != s_good_bssid && s_fast_skip_count < 6) {
+                    ++s_fast_skip_count;
+                    if (s_fast_skip_count >= 6 && !IsDeadDhcpBssid(s_cur_bssid)) {
+                        s_dead_dhcp_bssids.push_back(s_cur_bssid);
+                    }
+                    ESP_LOGI(TAG, "Fast-skipping non-preferred BSSID %02x:%02x:%02x:%02x:%02x:%02x (%d/6) to reach good router",
+                             s_cur_bssid[0], s_cur_bssid[1], s_cur_bssid[2],
+                             s_cur_bssid[3], s_cur_bssid[4], s_cur_bssid[5], s_fast_skip_count);
+                    esp_timer_start_once(s_dhcp_watchdog_timer, 25000ULL);  // 25ms
+                    return;
+                }
+                esp_timer_start_once(s_dhcp_watchdog_timer, 4500000ULL);  // 4.5s for DHCP
+            } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
+                if (s_dhcp_watchdog_timer != nullptr) {
+                    esp_timer_stop(s_dhcp_watchdog_timer);
+                }
+            }
+        },
+        nullptr, nullptr);
+
+    esp_event_handler_instance_register(
+        IP_EVENT, IP_EVENT_STA_GOT_IP,
+        [](void*, esp_event_base_t, int32_t, void*) {
+            if (s_dhcp_watchdog_timer != nullptr) {
+                esp_timer_stop(s_dhcp_watchdog_timer);
+            }
+            if (!s_good_bssid_valid || s_good_bssid != s_cur_bssid) {
+                s_good_bssid = s_cur_bssid;
+                s_good_bssid_valid = true;
+                nvs_handle_t nh = 0;
+                if (nvs_open(kNvsNsCfg, NVS_READWRITE, &nh) == ESP_OK) {
+                    nvs_set_blob(nh, kNvsKeyGoodBssid, s_good_bssid.data(), 6);
+                    nvs_commit(nh);
+                    nvs_close(nh);
+                }
+                ESP_LOGI(TAG, "Saved verified DHCP BSSID: %02x:%02x:%02x:%02x:%02x:%02x",
+                         s_good_bssid[0], s_good_bssid[1], s_good_bssid[2],
+                         s_good_bssid[3], s_good_bssid[4], s_good_bssid[5]);
+            }
+        },
+        nullptr, nullptr);
+}
 
 uint32_t Fnv1aHash(const uint8_t* data, size_t len) {
     uint32_t h = 2166136261u;
@@ -126,7 +243,7 @@ void RobiConfig::EnsureLoaded() {
     // 2. Check raw flash 0x010000 ("ROBICFG1") provisioned by WebSerial Wizard
     TryImportFlashSectorLocked();
 
-    // 2b. Ensure WifiStation pins to the strongest BSSID from scan results instead of WIFI_FAST_SCAN picking a weak repeater
+    // 2b. Ensure WifiStation pins to each scanned BSSID in connect_queue_ and install DHCP failover guard
     nvs_handle_t wifi_h = 0;
     if (nvs_open("wifi", NVS_READWRITE, &wifi_h) == ESP_OK) {
         uint8_t rem = 0;
@@ -136,6 +253,7 @@ void RobiConfig::EnsureLoaded() {
         }
         nvs_close(wifi_h);
     }
+    InstallSmartWifiDhcpGuard();
 
     // 3. Load persistent memories
     LoadMemoriesFromNvsLocked();
