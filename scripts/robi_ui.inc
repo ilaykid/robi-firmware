@@ -1,5 +1,5 @@
 
-    // ===================== Robi Cyber-Optic UI v2.8.1 (inserted by scripts/patch_xiaozhi.py) =====================
+    // ===================== Robi Cyber-Optic UI v2.8.3 (inserted by scripts/patch_xiaozhi.py) =====================
     // Pure zero-sublayer lv_obj procedural sci-fi cyber-optic face + 16-node holographic bezel HUD +
     // liquid-morphing 9-capsule mouth / real-time syllable voice waveform (zero clip_corner, zero lv_arc/lv_line).
 
@@ -29,24 +29,37 @@
         SpiLcdDisplay::SetStatus(status);
         DisplayLockGuard lock(this);
         if (!robi_face_ready_ || robi_tap_ == nullptr) return;
-        bool idle = status != nullptr && strcmp(status, Lang::Strings::STANDBY) == 0;
-        bool listening = status != nullptr && strcmp(status, Lang::Strings::LISTENING) == 0;
-        bool speaking = status != nullptr && strcmp(status, Lang::Strings::SPEAKING) == 0;
+
+        auto dev_state = Application::GetInstance().GetDeviceState();
+        bool explicit_standby = status != nullptr && strcmp(status, Lang::Strings::STANDBY) == 0;
+        bool explicit_listening = status != nullptr && strcmp(status, Lang::Strings::LISTENING) == 0;
+        bool explicit_speaking = status != nullptr && strcmp(status, Lang::Strings::SPEAKING) == 0;
+
+        bool listening = explicit_listening ||
+                         (!explicit_standby && !explicit_speaking && dev_state == kDeviceStateListening);
+        bool speaking = explicit_speaking ||
+                        (!explicit_standby && !explicit_listening && dev_state == kDeviceStateSpeaking);
+        bool idle = explicit_standby ||
+                    (!listening && !speaking && dev_state == kDeviceStateIdle);
 
         if (idle) {
-            robi_face_mode_ = ROBI_MODE_IDLE;
-            robi_voice_env_ = 0.0f;
-            RobiApplyPreset("neutral", false);
+            if (robi_face_mode_ != ROBI_MODE_IDLE) {
+                robi_face_mode_ = ROBI_MODE_IDLE;
+                robi_voice_env_ = 0.0f;
+                RobiApplyPreset("neutral", false);
+            }
             bool menu_open = (robi_menu_lavi_ && !lv_obj_has_flag(robi_menu_lavi_, LV_OBJ_FLAG_HIDDEN)) ||
                              (robi_menu_ori_ && !lv_obj_has_flag(robi_menu_ori_, LV_OBJ_FLAG_HIDDEN));
-            if (!menu_open) lv_obj_remove_flag(robi_profiles_, LV_OBJ_FLAG_HIDDEN);
-            if (robi_pet_ok_) lv_obj_remove_flag(robi_pet_, LV_OBJ_FLAG_HIDDEN);
-            RobiRequestPet();
+            if (!menu_open) {
+                lv_obj_remove_flag(robi_profiles_, LV_OBJ_FLAG_HIDDEN);
+            }
         } else {
             if (listening) {
-                robi_face_mode_ = ROBI_MODE_LISTENING;
-                robi_voice_env_ = 0.0f;
-                RobiApplyPreset("listening", false);
+                if (robi_face_mode_ != ROBI_MODE_LISTENING) {
+                    robi_face_mode_ = ROBI_MODE_LISTENING;
+                    robi_voice_env_ = 0.0f;
+                    RobiApplyPreset("listening", false);
+                }
             } else if (speaking) {
                 robi_face_mode_ = ROBI_MODE_SPEAKING;
             } else {
@@ -55,10 +68,9 @@
             lv_obj_add_flag(robi_profiles_, LV_OBJ_FLAG_HIDDEN);
             lv_obj_add_flag(robi_menu_lavi_, LV_OBJ_FLAG_HIDDEN);
             lv_obj_add_flag(robi_menu_ori_, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_add_flag(robi_pet_, LV_OBJ_FLAG_HIDDEN);
             RobiStopMenuTimer();
         }
-        if (listening || speaking) {
+        if (speaking) {
             lv_obj_remove_flag(robi_tap_, LV_OBJ_FLAG_HIDDEN);
         } else {
             lv_obj_add_flag(robi_tap_, LV_OBJ_FLAG_HIDDEN);
@@ -153,13 +165,7 @@ private:
     lv_obj_t* robi_menu_lavi_ = nullptr;
     lv_obj_t* robi_menu_ori_ = nullptr;
     lv_obj_t* robi_tap_ = nullptr;
-    lv_obj_t* robi_pet_ = nullptr;
-    lv_obj_t* robi_bar_energy_ = nullptr;
-    lv_obj_t* robi_bar_joy_ = nullptr;
     lv_timer_t* robi_menu_timer_ = nullptr;
-    volatile bool robi_pet_busy_ = false;
-    bool robi_pet_ok_ = false;
-    int64_t robi_pet_last_ = 0;
 
     // Cyber-Optic Face widgets & state (100% pure lv_obj primitives — zero sublayers!)
     bool robi_face_ready_ = false;
@@ -187,8 +193,8 @@ private:
     FaceParams cur_ = {};
     FaceParams tgt_ = {};
 
-    float face_scale_ = 0.85f;
-    float face_y_ = 220.0f;
+    float face_scale_ = 0.90f;
+    float face_y_ = 208.0f;
     float talk_mix_ = 0.0f;
     float robi_voice_env_ = 0.0f;
     float robi_voice_smooth_ = 0.0f;
@@ -753,8 +759,8 @@ private:
         bool voice_in = (robi_face_mode_ == ROBI_MODE_LISTENING) && Application::GetInstance().IsVoiceDetected();
 
         // 1. Whole-face posture & speaking blend
-        float tgt_scale = (robi_face_mode_ == ROBI_MODE_IDLE) ? 0.85f : (voice_in ? 1.07f : 1.03f);
-        float tgt_fy = (robi_face_mode_ == ROBI_MODE_IDLE) ? 220.0f : 226.0f;
+        float tgt_scale = (robi_face_mode_ == ROBI_MODE_IDLE) ? 0.90f : (voice_in ? 1.07f : 1.03f);
+        float tgt_fy = (robi_face_mode_ == ROBI_MODE_IDLE) ? 208.0f : 226.0f;
         float tgt_talk = (robi_face_mode_ == ROBI_MODE_SPEAKING) ? 1.0f : 0.0f;
 
         float k_fast = RobiClamp(dt * 14.0f, 0.0f, 1.0f);
@@ -1041,6 +1047,10 @@ private:
         }
         if (top_bar_ != nullptr) {
             lv_obj_set_style_bg_opa(top_bar_, LV_OPA_TRANSP, 0);
+            lv_obj_remove_flag(top_bar_, LV_OBJ_FLAG_CLICKABLE);
+        }
+        if (status_bar_ != nullptr) {
+            lv_obj_remove_flag(status_bar_, LV_OBJ_FLAG_CLICKABLE);
         }
         if (emoji_label_ != nullptr) {
             lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
@@ -1052,7 +1062,7 @@ private:
             return;
         }
 
-        // Expand emoji_box_ into the full 466x466 procedural sci-fi face stage
+        // Expand emoji_box_ into the full 466x466 procedural sci-fi face stage (tap face in Idle to talk!)
         lv_obj_set_size(emoji_box_, LV_HOR_RES, LV_VER_RES);
         lv_obj_center(emoji_box_);
         lv_obj_set_style_bg_opa(emoji_box_, LV_OPA_TRANSP, 0);
@@ -1060,7 +1070,8 @@ private:
         lv_obj_set_style_border_width(emoji_box_, 0, 0);
         lv_obj_set_scrollbar_mode(emoji_box_, LV_SCROLLBAR_MODE_OFF);
         lv_obj_remove_flag(emoji_box_, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_remove_flag(emoji_box_, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_flag(emoji_box_, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(emoji_box_, OnFaceTap, LV_EVENT_CLICKED, nullptr);
 
         // Subtle outer optical instrument ring + 16 orbiting neon HUD nodes
         hud_track_ = RobiPlainObj(emoji_box_);
@@ -1135,7 +1146,14 @@ private:
     }
 
     // ---- callbacks (run inside the LVGL task, which already holds the display lock) ----
+    static void RobiWakePowerSave() {
+        Application::GetInstance().Schedule([]() {
+            Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+        });
+    }
+
     static void OnProfile(lv_event_t* e) {
+        RobiWakePowerSave();
         lv_obj_t* menu = static_cast<lv_obj_t*>(lv_event_get_user_data(e));
         auto* self = robi_self_;
         lv_obj_add_flag(self->robi_profiles_, LV_OBJ_FLAG_HIDDEN);
@@ -1164,6 +1182,7 @@ private:
     }
 
     static void OnActivity(lv_event_t* e) {
+        RobiWakePowerSave();
         const char* says = static_cast<const char*>(lv_event_get_user_data(e));
         auto* self = robi_self_;
         self->RobiStopMenuTimer();
@@ -1173,16 +1192,34 @@ private:
         Application::GetInstance().WakeWordInvoke(says);
     }
 
+    static void OnFaceTap(lv_event_t* e) {
+        (void)e;
+        RobiWakePowerSave();
+        auto* self = robi_self_;
+        if (self == nullptr) return;
+        auto& app = Application::GetInstance();
+        if (app.GetDeviceState() != kDeviceStateIdle) return;
+
+        bool menu_open = (self->robi_menu_lavi_ && !lv_obj_has_flag(self->robi_menu_lavi_, LV_OBJ_FLAG_HIDDEN)) ||
+                         (self->robi_menu_ori_ && !lv_obj_has_flag(self->robi_menu_ori_, LV_OBJ_FLAG_HIDDEN));
+        if (menu_open) {
+            self->RobiStopMenuTimer();
+            lv_obj_add_flag(self->robi_menu_lavi_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(self->robi_menu_ori_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_remove_flag(self->robi_profiles_, LV_OBJ_FLAG_HIDDEN);
+            return;
+        }
+        ESP_LOGI(TAG, "Robi face tap: start listening");
+        app.ToggleChatState();
+    }
+
     static void OnTap(lv_event_t* e) {
         (void)e;
         auto& app = Application::GetInstance();
         app.Schedule([]() {
+            Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
             auto& app = Application::GetInstance();
-            auto state = app.GetDeviceState();
-            if (state == kDeviceStateListening) {
-                ESP_LOGI(TAG, "Robi tap: done talking");
-                app.StopListening();
-            } else if (state == kDeviceStateSpeaking) {
+            if (app.GetDeviceState() == kDeviceStateSpeaking) {
                 ESP_LOGI(TAG, "Robi tap: stop speaking");
                 app.AbortSpeaking(kAbortReasonNone);
             }
@@ -1200,6 +1237,7 @@ private:
         lv_obj_set_style_pad_column(o, LV_HOR_RES * 3 / 100, 0);
         lv_obj_set_scrollbar_mode(o, LV_SCROLLBAR_MODE_OFF);
         lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_remove_flag(o, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_set_flex_flow(o, flow);
         lv_obj_set_flex_align(o, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
         return o;
@@ -1212,7 +1250,11 @@ private:
         lv_obj_set_style_radius(b, LV_RADIUS_CIRCLE, 0);
         lv_obj_set_style_bg_color(b, lv_color_hex(color), 0);
         lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_opa(b, LV_OPA_80, LV_STATE_PRESSED);
+        lv_obj_set_style_transform_width(b, 0, LV_STATE_PRESSED);
+        lv_obj_set_style_transform_height(b, 0, LV_STATE_PRESSED);
         lv_obj_set_style_shadow_width(b, 0, 0);
+        lv_obj_set_style_shadow_width(b, 0, LV_STATE_PRESSED);
         lv_obj_set_style_border_width(b, 1, 0);
         lv_obj_set_style_border_color(b, lv_color_white(), 0);
         lv_obj_set_style_border_opa(b, LV_OPA_30, 0);
@@ -1236,82 +1278,10 @@ private:
         return menu;
     }
 
-    lv_obj_t* RobiPetRow(lv_obj_t* parent, const char* name, uint32_t color) {
-        lv_obj_t* row = RobiBox(parent, 60, LV_FLEX_FLOW_ROW);
-        lv_obj_t* bar = lv_bar_create(row);
-        lv_obj_set_size(bar, LV_HOR_RES * 28 / 100, LV_VER_RES * 2 / 100 + 2);
-        lv_bar_set_range(bar, 0, 100);
-        lv_bar_set_value(bar, 50, LV_ANIM_OFF);
-        lv_obj_set_style_bg_color(bar, lv_color_hex(0x1E293B), LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_set_style_bg_color(bar, lv_color_hex(color), LV_PART_INDICATOR);
-        lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_PART_INDICATOR);
-        lv_obj_t* l = lv_label_create(row);
-        lv_label_set_text(l, name);
-        lv_obj_set_style_text_color(l, lv_color_hex(color), 0);
-        return bar;
-    }
-
-    // ---- Robi's energy / joy from the home server: <ota host>/robi/pet ----
-    void RobiRequestPet() {
-        int64_t now = esp_timer_get_time() / 1000000;
-        if (robi_pet_busy_ || (robi_pet_last_ != 0 && now - robi_pet_last_ < 30)) return;
-        robi_pet_busy_ = true;
-        robi_pet_last_ = now;
-        if (xTaskCreate([](void* arg) {
-                static_cast<CustomLcdDisplay*>(arg)->RobiFetchPet();
-                static_cast<CustomLcdDisplay*>(arg)->robi_pet_busy_ = false;
-                vTaskDelete(NULL);
-            }, "robi_pet", 8192, this, 2, nullptr) != pdPASS) {
-            robi_pet_busy_ = false;
-        }
-    }
-
-    void RobiFetchPet() {
-        std::string url = Settings("wifi", false).GetString("ota_url");
-        if (url.empty()) url = CONFIG_OTA_URL;
-        auto pos = url.find("/xiaozhi/ota");
-        if (pos == std::string::npos) return;
-        url = url.substr(0, pos) + "/robi/pet";
-        auto http = Board::GetInstance().GetNetwork()->CreateHttp(0);
-        if (!http) return;
-        http->SetTimeout(5000);
-        if (!http->Open("GET", url)) return;
-        auto code = http->GetStatusCode();
-        if (!code || *code != 200) {
-            http->Close();
-            return;
-        }
-        std::string body = http->ReadAll();
-        http->Close();
-        cJSON* j = cJSON_Parse(body.c_str());
-        if (j == nullptr) return;
-        cJSON* energy = cJSON_GetObjectItem(j, "energy");
-        cJSON* joy = cJSON_GetObjectItem(j, "joy");
-        if (cJSON_IsNumber(energy) && cJSON_IsNumber(joy)) {
-            DisplayLockGuard lock(this);
-            lv_bar_set_value(robi_bar_energy_, energy->valueint, LV_ANIM_ON);
-            lv_bar_set_value(robi_bar_joy_, joy->valueint, LV_ANIM_ON);
-            robi_pet_ok_ = true;
-            if (Application::GetInstance().GetDeviceState() == kDeviceStateIdle) {
-                lv_obj_remove_flag(robi_pet_, LV_OBJ_FLAG_HIDDEN);
-            }
-        }
-        cJSON_Delete(j);
-    }
-
     void RobiSetupUI() {
         robi_self_ = this;
         // no subtitles: the live cyber-face + voice waveform fills the circular display
         SetHideSubtitle(true);
-
-        // Robi's needs, under the status line
-        robi_pet_ = RobiBox(lv_screen_active(), 60, LV_FLEX_FLOW_COLUMN);
-        lv_obj_set_style_pad_row(robi_pet_, LV_VER_RES * 1 / 100, 0);
-        lv_obj_align(robi_pet_, LV_ALIGN_TOP_MID, 0, LV_VER_RES * 14 / 100);
-        robi_bar_energy_ = RobiPetRow(robi_pet_, "אנרגיה", 0x00F5D4);
-        robi_bar_joy_ = RobiPetRow(robi_pet_, "שמחה", 0xFF5DA2);
-        lv_obj_add_flag(robi_pet_, LV_OBJ_FLAG_HIDDEN);
 
         // activity menus (text on the button, then what Robi hears)
         static const char* const lavi[] = {
@@ -1331,15 +1301,16 @@ private:
         robi_menu_lavi_ = RobiMenu(lavi, 0x0284C7);
         robi_menu_ori_ = RobiMenu(ori, 0xEA580C);
 
-        // who is talking
+        // who is talking (fixed height container so buttons never jump or reflow)
         robi_profiles_ = RobiBox(lv_screen_active(), 80, LV_FLEX_FLOW_ROW);
+        lv_obj_set_height(robi_profiles_, LV_VER_RES * 15 / 100);
         lv_obj_set_flex_align(robi_profiles_, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
         lv_obj_align(robi_profiles_, LV_ALIGN_BOTTOM_MID, 0, -(LV_VER_RES * 10 / 100));
         RobiButton(robi_profiles_, "לביא", 0x0284C7, 30, 14, OnProfile, robi_menu_lavi_);
         RobiButton(robi_profiles_, "אורי", 0xEA580C, 30, 14, OnProfile, robi_menu_ori_);
         lv_obj_add_flag(robi_profiles_, LV_OBJ_FLAG_HIDDEN);
 
-        // invisible full-screen layer: tap = "I finished" (listening) / "stop" (speaking)
+        // invisible full-screen layer active only while Robi is speaking: tap = interrupt / stop speaking
         robi_tap_ = lv_obj_create(lv_screen_active());
         lv_obj_set_size(robi_tap_, LV_HOR_RES, LV_VER_RES);
         lv_obj_center(robi_tap_);

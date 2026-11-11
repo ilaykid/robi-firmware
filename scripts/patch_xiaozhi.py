@@ -77,11 +77,11 @@ must_replace(
     "    if not default_emoji_collection:\n        return None\n",
 )
 
-# 2b. Robi's round-screen UI: pet bars, child buttons, activity menus, tap to stop
+# 2b. Robi's round-screen UI: child buttons, activity menus, tap face to talk, tap to stop speaking
 #     (C++ lives in scripts/robi_ui.inc and goes into the board's CustomLcdDisplay class)
 board_cc = fw / "main/boards/waveshare/esp32-s3-touch-amoled-1.75/esp32-s3-touch-amoled-1.75.cc"
 must_replace(board_cc, '#include <lvgl.h>\n',
-             '#include <lvgl.h>\n#include <algorithm>\n#include <cmath>\n#include <cstdint>\n#include <cstdlib>\n#include <cstring>\n#include <esp_timer.h>\n#include <cJSON.h>\n'
+             '#include <lvgl.h>\n#include <algorithm>\n#include <cmath>\n#include <cstdint>\n#include <cstdlib>\n#include <cstring>\n#include <esp_timer.h>\n'
              '#include "assets/lang_config.h"\n')
 robi_ui = (Path(__file__).resolve().parent / "robi_ui.inc").read_text(encoding="utf-8")
 must_replace(
@@ -91,7 +91,37 @@ must_replace(
     '        RobiSetupUI();\n'
     '    }\n' + robi_ui + '};\n',
 )
-# 2c. Touch I2C resilience: 100kHz clock + swallow transient I2C 0x108 glitches during WiFi RF TX bursts
+# 2c. PowerSaveTimer fix: keep disabled while USB-powered (upstream initialized SetEnabled(true) with
+#     last_discharging=false, so on USB it never disabled and shut off PMIC after 300s!); on battery,
+#     dim after 180s and auto-power-off only after 1800s (30 min) of idle.
+must_replace(
+    board_cc,
+    '    void InitializePowerSaveTimer() {\n'
+    '        power_save_timer_ = new PowerSaveTimer(-1, 60, 300);\n'
+    '        power_save_timer_->OnEnterSleepMode([this]() {\n'
+    '            GetDisplay()->SetPowerSaveMode(true);\n'
+    '            GetBacklight()->SetBrightness(20); });\n'
+    '        power_save_timer_->OnExitSleepMode([this]() {\n'
+    '            GetDisplay()->SetPowerSaveMode(false);\n'
+    '            GetBacklight()->RestoreBrightness(); });\n'
+    '        power_save_timer_->OnShutdownRequest([this](){ \n'
+    '            pmic_->PowerOff(); });\n'
+    '        power_save_timer_->SetEnabled(true);\n'
+    '    }\n',
+    '    void InitializePowerSaveTimer() {\n'
+    '        power_save_timer_ = new PowerSaveTimer(-1, 180, 1800);\n'
+    '        power_save_timer_->OnEnterSleepMode([this]() {\n'
+    '            GetDisplay()->SetPowerSaveMode(true);\n'
+    '            GetBacklight()->SetBrightness(20); });\n'
+    '        power_save_timer_->OnExitSleepMode([this]() {\n'
+    '            GetDisplay()->SetPowerSaveMode(false);\n'
+    '            GetBacklight()->RestoreBrightness(); });\n'
+    '        power_save_timer_->OnShutdownRequest([this](){\n'
+    '            pmic_->PowerOff(); });\n'
+    '        power_save_timer_->SetEnabled(false);\n'
+    '    }\n',
+)
+# 2d. Touch I2C resilience: 100kHz clock + swallow transient I2C 0x108 glitches during WiFi RF TX bursts
 #     so esp_lvgl_port_touch.c's ESP_ERROR_CHECK(esp_lcd_touch_read_data(...)) never aborts/rolls back OTA
 must_replace(
     board_cc,
