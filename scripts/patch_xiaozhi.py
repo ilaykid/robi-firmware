@@ -91,6 +91,31 @@ must_replace(
     '        RobiSetupUI();\n'
     '    }\n' + robi_ui + '};\n',
 )
+# 2c. Touch I2C resilience: 100kHz clock + swallow transient I2C 0x108 glitches during WiFi RF TX bursts
+#     so esp_lvgl_port_touch.c's ESP_ERROR_CHECK(esp_lcd_touch_read_data(...)) never aborts/rolls back OTA
+must_replace(
+    board_cc,
+    '        tp_io_config.scl_speed_hz = 400*  1000;\n'
+    '        ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c(i2c_bus_, &tp_io_config, &tp_io_handle));\n'
+    '        ESP_LOGI(TAG, "Initialize touch controller");\n'
+    '        ESP_ERROR_CHECK(esp_lcd_touch_new_i2c_cst9217(tp_io_handle, &tp_cfg, &tp));\n',
+    '        tp_io_config.scl_speed_hz = 100 * 1000;\n'
+    '        ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c(i2c_bus_, &tp_io_config, &tp_io_handle));\n'
+    '        ESP_LOGI(TAG, "Initialize touch controller");\n'
+    '        ESP_ERROR_CHECK(esp_lcd_touch_new_i2c_cst9217(tp_io_handle, &tp_cfg, &tp));\n'
+    '        static esp_err_t (*s_orig_tp_read_data)(esp_lcd_touch_handle_t) = nullptr;\n'
+    '        s_orig_tp_read_data = tp->read_data;\n'
+    '        tp->read_data = [](esp_lcd_touch_handle_t h) -> esp_err_t {\n'
+    '            esp_err_t err = s_orig_tp_read_data ? s_orig_tp_read_data(h) : ESP_OK;\n'
+    '            if (err != ESP_OK) {\n'
+    '                portENTER_CRITICAL(&h->data.lock);\n'
+    '                h->data.points = 0;\n'
+    '                portEXIT_CRITICAL(&h->data.lock);\n'
+    '                return ESP_OK;\n'
+    '            }\n'
+    '            return ESP_OK;\n'
+    '        };\n',
+)
 
 # 3. dark theme by default + black boot fill + 24KB LVGL task stack for 30-FPS cyber-face
 lcd_cc = fw / "main/display/lcd_display.cc"

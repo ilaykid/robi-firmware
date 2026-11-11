@@ -10,7 +10,7 @@ on:
 
 env:
   XIAOZHI_TAG: v2.5.2
-  ROBI_VERSION: 2.8.1
+  ROBI_VERSION: 2.8.2
 
 jobs:
   build:
@@ -66,6 +66,7 @@ jobs:
 
   publish:
     name: Publish binaries to the 'builds' branch
+    if: github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
     permissions:
