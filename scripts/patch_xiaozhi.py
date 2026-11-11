@@ -81,7 +81,7 @@ must_replace(
 #     (C++ lives in scripts/robi_ui.inc and goes into the board's CustomLcdDisplay class)
 board_cc = fw / "main/boards/waveshare/esp32-s3-touch-amoled-1.75/esp32-s3-touch-amoled-1.75.cc"
 must_replace(board_cc, '#include <lvgl.h>\n',
-             '#include <lvgl.h>\n#include <cstring>\n#include <esp_timer.h>\n#include <cJSON.h>\n'
+             '#include <lvgl.h>\n#include <algorithm>\n#include <cmath>\n#include <cstdint>\n#include <cstdlib>\n#include <cstring>\n#include <esp_timer.h>\n#include <cJSON.h>\n'
              '#include "assets/lang_config.h"\n')
 robi_ui = (Path(__file__).resolve().parent / "robi_ui.inc").read_text(encoding="utf-8")
 must_replace(
