@@ -33,6 +33,16 @@ public:
     void SendStopListening() override;
     void SendAbortSpeaking(AbortReason reason) override;
 
+    // Live diagnostics & hardware stress-test control hooks
+    static GeminiLiveProtocol* GetActiveInstance();
+    uint32_t GetTurnsCompleted() const { return turns_completed_.load(); }
+    uint32_t GetAudioFramesPlayed() const { return audio_frames_played_.load(); }
+    size_t GetRingAvailableSamples() const { return RingAvailable(); }
+    bool IsAwaitingResponse() const { return awaiting_response_.load(); }
+    bool IsStreamingSpeech() const { return streaming_speech_; }
+    bool InjectUserPromptTurn(const std::string& text);
+    bool SimulateMicUtterance(int duration_ms);
+
 protected:
     bool SendText(const std::string& text) override;
 
@@ -45,6 +55,7 @@ private:
     void StopSessionInternal(bool notify_closed);
 
     void EnqueueTxJson(std::string&& json_str);
+    void EnqueueClientTextTurn(const std::string& text);
     void EnqueuePcm16k(const uint8_t* pcm_bytes, size_t byte_len);
     void EnqueueSilence16k(size_t duration_ms);
     void FinishSpeechUtterance();
@@ -77,7 +88,12 @@ private:
     std::atomic<bool> drop_turn_{false};
     std::atomic<bool> turn_complete_{false};
     std::atomic<bool> close_after_turn_{false};
+    std::atomic<bool> awaiting_response_{false};
+    std::atomic<int64_t> awaiting_since_us_{0};
+    std::atomic<int64_t> tool_hold_until_us_{0};
     std::atomic<uint32_t> turn_gen_{0};
+    std::atomic<uint32_t> turns_completed_{0};
+    std::atomic<uint32_t> audio_frames_played_{0};
 
     ListeningMode listening_mode_ = kListeningModeAutoStop;
 
@@ -86,7 +102,10 @@ private:
     std::deque<std::vector<uint8_t>> pre_roll_;
     std::vector<uint8_t> tx_pcm_batch_;
     bool streaming_speech_ = false;
+    int onset_frames_ = 0;
+    int speech_frames_ = 0;
     int silence_frames_ = 0;
+    int awaiting_nudges_ = 0;
     int64_t listen_started_us_ = 0;
     std::atomic<int64_t> last_activity_us_{0};
     bool idle_farewell_sent_ = false;

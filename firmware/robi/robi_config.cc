@@ -548,6 +548,11 @@ void RobiConfig::AddDialogueTurn(const std::string& role, const std::string& tex
     dialogue_.emplace_back(role, text.substr(0, 280));
 }
 
+std::vector<std::pair<std::string, std::string>> RobiConfig::GetDialogue() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return dialogue_;
+}
+
 void RobiConfig::ClearDialogue() {
     std::lock_guard<std::mutex> lock(mutex_);
     dialogue_.clear();

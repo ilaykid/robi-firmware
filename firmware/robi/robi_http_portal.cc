@@ -1,5 +1,6 @@
 #include "robi_http_portal.h"
 #include "robi_config.h"
+#include "robi_gemini_live.h"
 
 #include "application.h"
 #include "audio_codec.h"
@@ -10,6 +11,7 @@
 
 #include <arpa/inet.h>
 #include <cJSON.h>
+#include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <netinet/in.h>
@@ -412,11 +414,40 @@ esp_err_t HandleConfigPost(httpd_req_t* req) {
 esp_err_t HandleStatusGet(httpd_req_t* req) {
     auto& board = Board::GetInstance();
     auto& wifi = WifiManager::GetInstance();
+    auto& app = Application::GetInstance();
 
     cJSON* root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "ssid", wifi.GetSsid().c_str());
     cJSON_AddStringToObject(root, "ip", wifi.GetIpAddress().c_str());
     cJSON_AddNumberToObject(root, "rssi", wifi.GetRssi());
+
+    const char* st_str = "unknown";
+    switch (app.GetDeviceState()) {
+        case kDeviceStateIdle: st_str = "idle"; break;
+        case kDeviceStateConnecting: st_str = "connecting"; break;
+        case kDeviceStateListening: st_str = "listening"; break;
+        case kDeviceStateSpeaking: st_str = "speaking"; break;
+        case kDeviceStateWifiConfiguring: st_str = "wifi_config"; break;
+        case kDeviceStateUpgrading: st_str = "upgrading"; break;
+        case kDeviceStateActivating: st_str = "activating"; break;
+        default: break;
+    }
+    cJSON_AddStringToObject(root, "state", st_str);
+    cJSON_AddNumberToObject(root, "free_sram",
+                            static_cast<double>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)));
+    cJSON_AddNumberToObject(root, "min_sram",
+                            static_cast<double>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)));
+    cJSON_AddNumberToObject(root, "free_psram",
+                            static_cast<double>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
+
+    if (auto* proto = GeminiLiveProtocol::GetActiveInstance()) {
+        cJSON_AddBoolToObject(root, "channel_open", proto->IsAudioChannelOpened());
+        cJSON_AddNumberToObject(root, "turns_completed", proto->GetTurnsCompleted());
+        cJSON_AddNumberToObject(root, "audio_frames_played", proto->GetAudioFramesPlayed());
+        cJSON_AddNumberToObject(root, "ring_avail", static_cast<double>(proto->GetRingAvailableSamples()));
+        cJSON_AddBoolToObject(root, "awaiting_response", proto->IsAwaitingResponse());
+        cJSON_AddBoolToObject(root, "streaming_speech", proto->IsStreamingSpeech());
+    }
 
     int bat = 100;
     bool chg = false, dis = false;
@@ -436,6 +467,15 @@ esp_err_t HandleStatusGet(httpd_req_t* req) {
         cJSON_AddItemToArray(mems, cJSON_CreateString(m.c_str()));
     }
     cJSON_AddItemToObject(root, "memories", mems);
+
+    cJSON* dlg = cJSON_CreateArray();
+    for (const auto& d : RobiConfig::GetInstance().GetDialogue()) {
+        cJSON* item = cJSON_CreateObject();
+        cJSON_AddStringToObject(item, "role", d.first.c_str());
+        cJSON_AddStringToObject(item, "text", d.second.c_str());
+        cJSON_AddItemToArray(dlg, item);
+    }
+    cJSON_AddItemToObject(root, "dialogue", dlg);
 
     char* s = cJSON_PrintUnformatted(root);
     std::string out = s ? s : "{}";
@@ -486,6 +526,32 @@ esp_err_t HandleControlPost(httpd_req_t* req) {
         Application::GetInstance().Schedule([e_str]() {
             if (auto* disp = Board::GetInstance().GetDisplay()) {
                 disp->SetEmotion(e_str.c_str());
+            }
+        });
+    }
+    const cJSON* say = cJSON_GetObjectItemCaseSensitive(root, "say");
+    if (cJSON_IsString(say) && say->valuestring != nullptr && say->valuestring[0] != '\0') {
+        std::string s_str = say->valuestring;
+        if (auto* proto = GeminiLiveProtocol::GetActiveInstance()) {
+            proto->InjectUserPromptTurn(s_str);
+        } else {
+            Application::GetInstance().Schedule([s_str]() {
+                Application::GetInstance().WakeWordInvoke(s_str);
+            });
+        }
+    }
+    const cJSON* sim_mic = cJSON_GetObjectItemCaseSensitive(root, "sim_mic_ms");
+    if (cJSON_IsNumber(sim_mic)) {
+        if (auto* proto = GeminiLiveProtocol::GetActiveInstance()) {
+            proto->SimulateMicUtterance(sim_mic->valueint);
+        }
+    }
+    if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "close_channel"))) {
+        Application::GetInstance().Schedule([]() {
+            if (auto* proto = GeminiLiveProtocol::GetActiveInstance()) {
+                if (proto->IsAudioChannelOpened()) {
+                    proto->CloseAudioChannel(false);
+                }
             }
         });
     }

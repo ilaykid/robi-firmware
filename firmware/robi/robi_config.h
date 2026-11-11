@@ -60,6 +60,7 @@ public:
 
     // Rolling in-RAM conversation history across reconnects
     void AddDialogueTurn(const std::string& role, const std::string& text);
+    std::vector<std::pair<std::string, std::string>> GetDialogue() const;
     void ClearDialogue();
 
     // Builds full system instruction for Gemini Live
