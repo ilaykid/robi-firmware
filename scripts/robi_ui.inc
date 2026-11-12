@@ -861,9 +861,10 @@ private:
 
         bool voice_in = (robi_face_mode_ == ROBI_MODE_LISTENING) && Application::GetInstance().IsVoiceDetected();
         bool has_buttons = (robi_profiles_ != nullptr);
+        bool menu_open = RobiIsAnyMenuOpen();
 
-        float idle_scale = has_buttons ? 0.96f : 1.06f;
-        float idle_fy = has_buttons ? 198.0f : 228.0f;
+        float idle_scale = menu_open ? 0.84f : (has_buttons ? 0.96f : 1.06f);
+        float idle_fy = menu_open ? 148.0f : (has_buttons ? 196.0f : 228.0f);
         float tgt_scale = (robi_face_mode_ == ROBI_MODE_IDLE) ? idle_scale : (voice_in ? 1.05f : 1.02f);
         float tgt_fy = (robi_face_mode_ == ROBI_MODE_IDLE) ? idle_fy : 228.0f;
         float tgt_talk = (robi_face_mode_ == ROBI_MODE_SPEAKING) ? 1.0f : 0.0f;
@@ -1257,18 +1258,25 @@ private:
 
     void RobiUpdateSetupHintVisibility(bool idle) {
         if (robi_setup_hint_ == nullptr || robi_setup_lbl_ == nullptr) return;
+        bool has_kids = !RobiConfig::GetInstance().Get().kids.empty();
         if (!idle || RobiIsAnyMenuOpen()) {
             lv_obj_add_flag(robi_setup_hint_, LV_OBJ_FLAG_HIDDEN);
             return;
         }
         std::string ip = WifiManager::GetInstance().GetIpAddress();
+        // When kid buttons are present at the bottom, only show the setup pill if WiFi IP is not connected yet
+        // or Gemini API key has not been configured yet, so the bottom bezel stays 100% clean like the Wizard preview!
+        if (has_kids && !ip.empty() && RobiConfig::GetInstance().HasApiKey()) {
+            lv_obj_add_flag(robi_setup_hint_, LV_OBJ_FLAG_HIDDEN);
+            return;
+        }
         std::string txt = ip.empty() ? "robi.local" : ip;
         if (txt != last_hint_txt_) {
             last_hint_txt_ = txt;
             lv_obj_set_style_base_dir(robi_setup_lbl_, LV_BASE_DIR_LTR, 0);
             lv_label_set_text(robi_setup_lbl_, txt.c_str());
         }
-        lv_obj_align(robi_setup_hint_, LV_ALIGN_BOTTOM_MID, 0, -14);
+        lv_obj_align(robi_setup_hint_, LV_ALIGN_BOTTOM_MID, 0, -10);
         lv_obj_remove_flag(robi_setup_hint_, LV_OBJ_FLAG_HIDDEN);
     }
 
@@ -1459,12 +1467,12 @@ private:
             lv_obj_set_height(robi_profiles_, 54);
             lv_obj_set_flex_align(robi_profiles_, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
             lv_obj_set_style_pad_column(robi_profiles_, (n_kids == 3) ? 8 : 16, 0);
-            lv_obj_align(robi_profiles_, LV_ALIGN_BOTTOM_MID, 0, -56);
+            lv_obj_align(robi_profiles_, LV_ALIGN_BOTTOM_MID, 0, -62);
 
             for (size_t i = 0; i < n_kids; ++i) {
                 const auto& kid = cfg.kids[i];
-                lv_obj_t* menu = RobiBox(lv_screen_active(), 74, LV_FLEX_FLOW_ROW_WRAP);
-                lv_obj_align(menu, LV_ALIGN_BOTTOM_MID, 0, -48);
+                lv_obj_t* menu = RobiBox(lv_screen_active(), 76, LV_FLEX_FLOW_ROW_WRAP);
+                lv_obj_align(menu, LV_ALIGN_BOTTOM_MID, 0, -44);
 
                 for (size_t a = 0; a < 4 && a < kid.activities.size(); ++a) {
                     std::string full_p =
@@ -1473,8 +1481,9 @@ private:
                             : ("זה " + kid.name + ". " + kid.activities[a].prompt);
                     robi_prompt_pool_.push_back(std::move(full_p));
                     const char* p_ptr = robi_prompt_pool_.back().c_str();
-                    RobiButton(menu, kid.activities[a].label.c_str(), kid.color_hex, 31, 11, OnActivity,
-                               const_cast<char*>(p_ptr));
+                    lv_obj_t* ab = RobiButton(menu, kid.activities[a].label.c_str(), kid.color_hex, 34, 11, OnActivity,
+                                              const_cast<char*>(p_ptr));
+                    lv_obj_set_size(ab, 156, 48);
                 }
 
                 std::string talk_lbl = (cfg.language == "en-US") ? "Just Chat" : "סתם לדבר";
@@ -1482,7 +1491,8 @@ private:
                     (cfg.language == "en-US") ? ("Hi, it's " + kid.name + "!") : ("זה " + kid.name);
                 robi_prompt_pool_.push_back(std::move(talk_prm));
                 const char* talk_ptr = robi_prompt_pool_.back().c_str();
-                RobiButton(menu, talk_lbl.c_str(), 0x374151, 42, 9, OnActivity, const_cast<char*>(talk_ptr));
+                lv_obj_t* tb = RobiButton(menu, talk_lbl.c_str(), 0x374151, 42, 9, OnActivity, const_cast<char*>(talk_ptr));
+                lv_obj_set_size(tb, 196, 42);
                 lv_obj_add_flag(menu, LV_OBJ_FLAG_HIDDEN);
                 robi_menus_[i] = menu;
 
