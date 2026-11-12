@@ -84,6 +84,17 @@
             <div id="keyStatus" class="status-msg"></div>
           </div>
 
+          <div class="field">
+            <label for="selPreferredModel">מודל Gemini Live לשיחה קולית בזמן אמת</label>
+            <select id="selPreferredModel">
+              <option value="auto">אוטומטי חכם — Gemini 3.8 Live ראשי + גיבוי אוטומטי (מומלץ!)</option>
+              <option value="gemini-3.8-live">Gemini 3.8 Live — הדור החדש עם עברית מובנית (he-IL)</option>
+              <option value="gemini-2.5-flash-native-audio-preview-12-2025">Gemini 2.5 Flash Native Audio — מהיר ויציב</option>
+              <option value="gemini-2.0-flash-live-001">Gemini 2.0 Flash Live — מודל גיבוי רב-תכליתי</option>
+            </select>
+            <small>במסלול החינמי (Free Tier) יש מכסה של כ-45 דקות שיחה נטו ביום (עד 500 סשנים / 1,000,000 טוקנים). ניתן לעקוב אחרי הניצול בזמן אמת בכתובת <code>http://robi.local</code>.</small>
+          </div>
+
           <div class="pane-nav">
             <span></span>
             <button type="button" class="btn btn-primary" data-goto="2">המשך לבחירת קול ←</button>

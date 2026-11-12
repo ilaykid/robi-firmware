@@ -26,6 +26,7 @@ constexpr const char* kNvsKeyFlashSig = "flash_sig";
 constexpr const char* kNvsKeyGoodBssid = "good_bssid";
 constexpr const char* kNvsNsMem = "robi_mem";
 constexpr const char* kNvsKeyMemJson = "notes";
+constexpr const char* kNvsKeyUsageJson = "usage";
 constexpr const char* kFlashMagic = "ROBICFG1";
 
 // Smart Multi-AP DHCP Failover Guard:
@@ -185,6 +186,12 @@ bool IsValidVoice(const std::string& v) {
     return false;
 }
 
+bool IsValidPreferredModel(const std::string& m) {
+    return m == "auto" || m == "gemini-3.8-live" ||
+           m == "gemini-2.5-flash-native-audio-preview-12-2025" ||
+           m == "gemini-2.0-flash-live-001";
+}
+
 std::vector<RobiActivity> DefaultActivitiesForKid(const std::string& language) {
     if (language == "en-US") {
         return {
@@ -255,12 +262,13 @@ void RobiConfig::EnsureLoaded() {
     }
     InstallSmartWifiDhcpGuard();
 
-    // 3. Load persistent memories
+    // 3. Load persistent memories and daily model usage
     LoadMemoriesFromNvsLocked();
+    LoadUsageFromNvsLocked();
 
-    ESP_LOGI(TAG, "Loaded config: bot='%s', voice='%s', lang='%s', theme='%s', kids=%u, key=%s",
-             data_.bot_name.c_str(), data_.voice.c_str(), data_.language.c_str(),
-             data_.theme.c_str(), static_cast<unsigned>(data_.kids.size()),
+    ESP_LOGI(TAG, "Loaded config: bot='%s', model='%s', voice='%s', lang='%s', theme='%s', kids=%u, key=%s",
+             data_.bot_name.c_str(), data_.preferred_model.c_str(), data_.voice.c_str(),
+             data_.language.c_str(), data_.theme.c_str(), static_cast<unsigned>(data_.kids.size()),
              data_.gemini_key.empty() ? "EMPTY" : "SET");
 }
 
@@ -367,6 +375,11 @@ bool RobiConfig::ParseIntoLocked(const std::string& json_str, bool keep_existing
         } else if (k.size() <= 160) {
             next.gemini_key = k;
         }
+    }
+
+    std::string pref_model = SafeGetStr(root, "preferred_model", next.preferred_model);
+    if (IsValidPreferredModel(pref_model)) {
+        next.preferred_model = pref_model;
     }
 
     std::string voice = SafeGetStr(root, "voice", next.voice);
@@ -487,6 +500,7 @@ std::string RobiConfig::SerializeLocked(bool mask_api_key) const {
     } else {
         cJSON_AddStringToObject(root, "gemini_key", data_.gemini_key.c_str());
     }
+    cJSON_AddStringToObject(root, "preferred_model", data_.preferred_model.c_str());
     cJSON_AddStringToObject(root, "voice", data_.voice.c_str());
     cJSON_AddStringToObject(root, "language", data_.language.c_str());
     cJSON_AddStringToObject(root, "theme", data_.theme.c_str());
@@ -651,10 +665,156 @@ void RobiConfig::ClearMemoryNotes() {
     dialogue_.clear();
     nvs_handle_t h = 0;
     if (nvs_open(kNvsNsMem, NVS_READWRITE, &h) == ESP_OK) {
-        nvs_erase_all(h);
+        nvs_erase_key(h, kNvsKeyMemJson);
         nvs_commit(h);
         nvs_close(h);
     }
+}
+
+void RobiConfig::LoadUsageFromNvsLocked() {
+    static const char* const kKnownModels[3] = {
+        "gemini-3.8-live",
+        "gemini-2.5-flash-native-audio-preview-12-2025",
+        "gemini-2.0-flash-live-001",
+    };
+    model_usage_.clear();
+    for (const char* m : kKnownModels) {
+        model_usage_.push_back({m, 0, 0, 0, 0});
+    }
+
+    nvs_handle_t h = 0;
+    if (nvs_open(kNvsNsMem, NVS_READONLY, &h) != ESP_OK) return;
+    size_t req = 0;
+    if (nvs_get_blob(h, kNvsKeyUsageJson, nullptr, &req) == ESP_OK && req > 0 && req <= 4096) {
+        std::string raw(req, '\0');
+        if (nvs_get_blob(h, kNvsKeyUsageJson, raw.data(), &req) == ESP_OK) {
+            cJSON* obj = cJSON_ParseWithLength(raw.data(), raw.size());
+            if (cJSON_IsObject(obj)) {
+                std::string day = SafeGetStr(obj, "day", "today");
+                if (!day.empty() && day.size() <= 16) {
+                    usage_day_ = day;
+                }
+                const cJSON* models_arr = cJSON_GetObjectItemCaseSensitive(obj, "models");
+                if (cJSON_IsArray(models_arr)) {
+                    const cJSON* it = nullptr;
+                    cJSON_ArrayForEach(it, models_arr) {
+                        if (!cJSON_IsObject(it)) continue;
+                        std::string id = SafeGetStr(it, "id", "");
+                        if (id.empty()) continue;
+                        auto& mu = FindOrCreateModelUsageLocked(id);
+                        mu.sessions = static_cast<uint32_t>(std::max(0, SafeGetInt(it, "s", 0)));
+                        mu.turns = static_cast<uint32_t>(std::max(0, SafeGetInt(it, "t", 0)));
+                        mu.audio_sec = static_cast<uint32_t>(std::max(0, SafeGetInt(it, "a", 0)));
+                        mu.tokens = static_cast<uint32_t>(std::max(0, SafeGetInt(it, "tok", 0)));
+                    }
+                }
+            }
+            if (obj) cJSON_Delete(obj);
+        }
+    }
+    nvs_close(h);
+}
+
+void RobiConfig::SaveUsageToNvsLocked() {
+    cJSON* obj = cJSON_CreateObject();
+    cJSON_AddStringToObject(obj, "day", usage_day_.c_str());
+    cJSON* arr = cJSON_CreateArray();
+    for (const auto& mu : model_usage_) {
+        cJSON* item = cJSON_CreateObject();
+        cJSON_AddStringToObject(item, "id", mu.id.c_str());
+        cJSON_AddNumberToObject(item, "s", mu.sessions);
+        cJSON_AddNumberToObject(item, "t", mu.turns);
+        cJSON_AddNumberToObject(item, "a", mu.audio_sec);
+        cJSON_AddNumberToObject(item, "tok", mu.tokens);
+        cJSON_AddItemToArray(arr, item);
+    }
+    cJSON_AddItemToObject(obj, "models", arr);
+    char* printed = cJSON_PrintUnformatted(obj);
+    std::string raw = printed ? printed : "{}";
+    if (printed) cJSON_free(printed);
+    cJSON_Delete(obj);
+
+    nvs_handle_t h = 0;
+    if (nvs_open(kNvsNsMem, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_blob(h, kNvsKeyUsageJson, raw.data(), raw.size());
+        nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+RobiModelUsage& RobiConfig::FindOrCreateModelUsageLocked(const std::string& model_id) {
+    for (auto& mu : model_usage_) {
+        if (mu.id == model_id) return mu;
+    }
+    model_usage_.push_back({model_id, 0, 0, 0, 0});
+    return model_usage_.back();
+}
+
+void RobiConfig::SyncUsageDay(const std::string& client_day_iso) {
+    if (client_day_iso.size() != 10 || client_day_iso[4] != '-' || client_day_iso[7] != '-') {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (usage_day_ == client_day_iso) {
+        return;
+    }
+    if (usage_day_ == "today" || usage_day_.empty()) {
+        // First time syncing calendar date on this day: adopt calendar date without zeroing today's counters
+        usage_day_ = client_day_iso;
+        SaveUsageToNvsLocked();
+        return;
+    }
+    // New calendar day! Reset daily counters
+    ESP_LOGI(TAG, "New calendar day detected (%s -> %s): resetting daily model quota counters",
+             usage_day_.c_str(), client_day_iso.c_str());
+    usage_day_ = client_day_iso;
+    for (auto& mu : model_usage_) {
+        mu.sessions = 0;
+        mu.turns = 0;
+        mu.audio_sec = 0;
+        mu.tokens = 0;
+    }
+    SaveUsageToNvsLocked();
+}
+
+void RobiConfig::RecordModelSession(const std::string& model_id) {
+    if (model_id.empty()) return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto& mu = FindOrCreateModelUsageLocked(model_id);
+    ++mu.sessions;
+    SaveUsageToNvsLocked();
+}
+
+void RobiConfig::RecordModelTurn(const std::string& model_id, uint32_t audio_sec_delta,
+                                 uint32_t tokens_delta) {
+    if (model_id.empty()) return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto& mu = FindOrCreateModelUsageLocked(model_id);
+    ++mu.turns;
+    mu.audio_sec += audio_sec_delta;
+    mu.tokens += tokens_delta;
+    SaveUsageToNvsLocked();
+}
+
+void RobiConfig::ResetDailyUsage() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& mu : model_usage_) {
+        mu.sessions = 0;
+        mu.turns = 0;
+        mu.audio_sec = 0;
+        mu.tokens = 0;
+    }
+    SaveUsageToNvsLocked();
+}
+
+std::string RobiConfig::GetUsageDay() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return usage_day_;
+}
+
+std::vector<RobiModelUsage> RobiConfig::GetModelUsage() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return model_usage_;
 }
 
 void RobiConfig::AddDialogueTurn(const std::string& role, const std::string& text) {

@@ -70,6 +70,14 @@ button{cursor:pointer;border:none;border-radius:12px;padding:11px 16px;font-weig
 .emo-row{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
 .toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:#064e3b;border:1px solid #10b981;color:#fff;padding:10px 20px;border-radius:99px;display:none;z-index:99}
 .mem-list{margin:8px 0;padding-right:18px;color:#cbd5e1;font-size:.88rem}
+.q-box{background:#091022;border:1px solid #223357;border-radius:13px;padding:12px;margin-bottom:10px}
+.q-bar{height:10px;background:#16223b;border-radius:99px;overflow:hidden;margin:7px 0}
+.q-fill{height:100%;background:linear-gradient(90deg,#10b981,#00e5ff);border-radius:99px;transition:width .35s}
+.m-card{background:#0a1224;border:1px solid #223357;border-radius:13px;padding:11px 13px;margin-top:8px;display:flex;flex-direction:column;gap:5px}
+.m-card.live{border-color:#10b981;box-shadow:0 0 14px rgba(16,185,129,.22)}
+.m-head{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px}
+.m-badge{font-size:.76rem;padding:3px 9px;border-radius:99px;font-weight:600}
+.m-stats{display:flex;flex-wrap:wrap;gap:10px;font-size:.81rem;color:#94a3b8}
 </style>
 </head>
 <body>
@@ -81,7 +89,7 @@ button{cursor:pointer;border:none;border-radius:12px;padding:11px 16px;font-weig
   </header>
 
   <div class="card">
-    <h2>🔑 מפתח Gemini וקול</h2>
+    <h2>🔑 מפתח Gemini, מודל וקול</h2>
     <label>מפתח Gemini API <span id="keyHint" style="color:#10b981;font-size:.8rem"></span></label>
     <input type="password" id="geminiKey" dir="ltr" placeholder="השאר ריק כדי לשמור על המפתח הקיים, או הדבק מפתח חדש (AIza...)">
     <div class="row">
@@ -97,6 +105,13 @@ button{cursor:pointer;border:none;border-radius:12px;padding:11px 16px;font-weig
         </select>
       </div>
     </div>
+    <label>מודל Gemini Live מועדף</label>
+    <select id="preferredModel">
+      <option value="auto">אוטומטי חכם — Gemini 3.8 Live ראשי + גיבוי אוטומטי (מומלץ!)</option>
+      <option value="gemini-3.8-live">Gemini 3.8 Live — הדור החדש עם עברית מובנית (he-IL)</option>
+      <option value="gemini-2.5-flash-native-audio-preview-12-2025">Gemini 2.5 Flash Native Audio — מהיר ויציב</option>
+      <option value="gemini-2.0-flash-live-001">Gemini 2.0 Flash Live — מודל גיבוי קלאסי</option>
+    </select>
     <label>הקול של רובי</label>
     <select id="voice">
       <option value="Puck">Puck — שובב, אנרגטי וזורם (מומלץ!)</option>
@@ -108,6 +123,16 @@ button{cursor:pointer;border:none;border-radius:12px;padding:11px 16px;font-weig
       <option value="Charon">Charon — חכם, שקול ומסתורי</option>
       <option value="Achird">Achird — צעיר, סקרן ונלהב</option>
     </select>
+  </div>
+
+  <div class="card">
+    <h2>📊 מודלי Gemini Live וניצול מכסה יומית</h2>
+    <div id="quotaBox" class="q-box">טוען נתוני שימוש ומכסה יומית...</div>
+    <div id="modelsList"></div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px;flex-wrap:wrap;gap:8px">
+      <span style="font-size:.79rem;color:var(--muted)" id="usageDayLbl">מתעדכן אוטומטית כל 5 שניות</span>
+      <button type="button" class="btn-sec" onclick="resetUsage()">🔄 אפס מונה יומי ורענן מודלים</button>
+    </div>
   </div>
 
   <div class="card">
@@ -298,11 +323,82 @@ async function clearMem(){
   showToast('הזיכרונות נוקו');
 }
 
+async function resetUsage(){
+  await sendCtrl({reset_usage:true});
+  showToast('מונה השימוש היומי אופס והמודלים רועננו');
+  refreshStatusOnly();
+}
+
+function fmtAudioSec(sec){
+  sec=+sec||0;
+  const m=Math.floor(sec/60),s=sec%60;
+  return m>0?`${m} דק' ו-${s} שנ'`:`${s} שנ'`;
+}
+
+function renderModelsAndQuota(st){
+  const q=st.daily_quota||{used_sessions:0,max_sessions:500,used_turns:0,used_audio_sec:0,max_audio_sec:2700,used_tokens:0,max_tokens:1000000};
+  const pctAudio=Math.min(100,Math.round((q.used_audio_sec*100)/(q.max_audio_sec||2700)));
+  const pctSess=Math.min(100,Math.round((q.used_sessions*100)/(q.max_sessions||500)));
+  const pctTok=Math.min(100,Math.round((q.used_tokens*100)/(q.max_tokens||1000000)));
+  const topPct=Math.max(pctAudio,pctSess,pctTok);
+  const barCol=topPct>80?'linear-gradient(90deg,#f59e0b,#ef4444)':'linear-gradient(90deg,#10b981,#00e5ff)';
+
+  document.getElementById('quotaBox').innerHTML=`
+    <div style="display:flex;justify-content:space-between;font-size:.88rem;font-weight:600">
+      <span>🎙️ זמן שיחה נטו היום: ${fmtAudioSec(q.used_audio_sec)} מתוך ~45 דק' חינם</span>
+      <span dir="ltr" style="color:var(--cyan)">${topPct}%</span>
+    </div>
+    <div class="q-bar"><div class="q-fill" style="width:${Math.max(2,topPct)}%;background:${barCol}"></div></div>
+    <div class="m-stats" style="color:#cbd5e1;margin-top:4px">
+      <span>🔌 סשנים שנפתחו: <b>${q.used_sessions} / ${q.max_sessions}</b></span>
+      <span>💬 חילופי דברים: <b>${q.used_turns}</b></span>
+      <span>🔢 טוקנים משוערים: <b dir="ltr">${(q.used_tokens||0).toLocaleString()} / 1,000,000</b></span>
+    </div>`;
+
+  const META={
+    'gemini-3.8-live':{title:'Gemini 3.8 Live',desc:'הדור החדש — עברית מובנית ברמת הפרוטוקול (he-IL)'},
+    'gemini-2.5-flash-native-audio-preview-12-2025':{title:'Gemini 2.5 Flash Native Audio',desc:'מודל אודיו ילידי מהיר ויציב'},
+    'gemini-2.0-flash-live-001':{title:'Gemini 2.0 Flash Live',desc:'מודל גיבוי רב-תכליתי יציב'}
+  };
+  const models=st.models||[];
+  document.getElementById('modelsList').innerHTML=models.map(m=>{
+    const info=META[m.id]||{title:m.id,desc:''};
+    let badge='<span class="m-badge" style="background:#1e293b;color:#cbd5e1">⚡ זמין ומוכן</span>';
+    if(m.active){
+      badge='<span class="m-badge" style="background:#064e3b;color:#34d399;border:1px solid #10b981">🟢 פעיל בשיחה כעת</span>';
+    }else if(m.cooldown_sec>0){
+      badge=`<span class="m-badge" style="background:#3b1219;color:#fca5a5">🔄 עבר לגיבוי (${m.cooldown_sec} שנ')</span>`;
+    }else if(m.last_used){
+      badge='<span class="m-badge" style="background:#0f213d;color:#38bdf8;border:1px solid #0284c7">✅ אחרון בשימוש</span>';
+    }
+    return `<div class="m-card${m.active?' live':''}">
+      <div class="m-head">
+        <div>
+          <strong dir="ltr" style="color:#f8fafc">${esc(info.title)}</strong>
+          <div style="font-size:.78rem;color:var(--muted)">${esc(info.desc)}</div>
+        </div>
+        ${badge}
+      </div>
+      <div class="m-stats">
+        <span>🔌 סשנים: <b>${m.sessions||0}</b></span>
+        <span>💬 תורות שיחה: <b>${m.turns||0}</b></span>
+        <span>🎙️ זמן דיבור: <b>${fmtAudioSec(m.audio_sec||0)}</b></span>
+        <span>🔢 טוקנים: <b dir="ltr">${(m.tokens||0).toLocaleString()}</b></span>
+      </div>
+    </div>`;
+  }).join('');
+
+  if(st.usage_day){
+    document.getElementById('usageDayLbl').textContent=`תאריך מונה יומי: ${st.usage_day} • מתעדכן אוטומטית כל 5 שניות`;
+  }
+}
+
 async function saveAll(){
   const keyVal=document.getElementById('geminiKey').value.trim();
   const payload={
     bot_name:document.getElementById('botName').value.trim()||'רובי',
     gemini_key:keyVal?keyVal:'__KEEP__',
+    preferred_model:document.getElementById('preferredModel').value,
     voice:document.getElementById('voice').value,
     language:document.getElementById('language').value,
     theme:state.theme,
@@ -322,12 +418,32 @@ async function saveAll(){
   }catch(e){showToast('שגיאה בשמירה: '+e.message,true);}
 }
 
+function getLocalIsoDay(){
+  const d=new Date();
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+}
+
+async function refreshStatusOnly(){
+  try{
+    const sr=await fetch('/api/status?day='+encodeURIComponent(getLocalIsoDay()));
+    const st=await sr.json();
+    const actMod=st.active_model||st.last_model||'מוכן';
+    document.getElementById('statusBar').innerHTML=`
+      <span class="pill">📶 ${esc(st.ssid||'WiFi')} (${st.rssi||0} dBm)</span>
+      <span class="pill" dir="ltr">🌐 ${esc(st.ip||'robi.local')}</span>
+      <span class="pill" dir="ltr">🤖 ${esc(actMod)}</span>
+      <span class="pill" dir="ltr">🔋 ${st.battery??100}% ${st.charging?'⚡':''}</span>`;
+    renderModelsAndQuota(st);
+  }catch(e){}
+}
+
 async function loadAll(){
   try{
-    const [cr,sr]=await Promise.all([fetch('/api/config'),fetch('/api/status')]);
+    const [cr,sr]=await Promise.all([fetch('/api/config'),fetch('/api/status?day='+encodeURIComponent(getLocalIsoDay()))]);
     const cfg=await cr.json();
     const st=await sr.json();
     document.getElementById('botName').value=cfg.bot_name||'רובי';
+    document.getElementById('preferredModel').value=cfg.preferred_model||'auto';
     document.getElementById('voice').value=cfg.voice||'Puck';
     document.getElementById('language').value=cfg.language||'he-IL';
     document.getElementById('customPrompt').value=cfg.custom_prompt||'';
@@ -341,10 +457,13 @@ async function loadAll(){
     renderTopics();
     renderKids();
 
+    const actMod=st.active_model||st.last_model||'מוכן';
     document.getElementById('statusBar').innerHTML=`
       <span class="pill">📶 ${esc(st.ssid||'WiFi')} (${st.rssi||0} dBm)</span>
       <span class="pill" dir="ltr">🌐 ${esc(st.ip||'robi.local')}</span>
+      <span class="pill" dir="ltr">🤖 ${esc(actMod)}</span>
       <span class="pill" dir="ltr">🔋 ${st.battery??100}% ${st.charging?'⚡':''}</span>`;
+    renderModelsAndQuota(st);
     if(st.volume!==undefined){document.getElementById('volRange').value=st.volume;document.getElementById('volLbl').textContent=st.volume;}
     if(st.brightness!==undefined){document.getElementById('briRange').value=st.brightness;document.getElementById('briLbl').textContent=st.brightness;}
     const ml=document.getElementById('memList');
@@ -356,6 +475,7 @@ async function loadAll(){
   }catch(e){}
 }
 loadAll();
+setInterval(refreshStatusOnly,5000);
 </script>
 </body>
 </html>)ROBIHTML";
@@ -398,6 +518,8 @@ esp_err_t HandleConfigPost(httpd_req_t* req) {
         return ESP_FAIL;
     }
 
+    GeminiLiveProtocol::ResetModelCooldowns();
+
     // Reset active voice channel if idle/listening so next turn uses updated voice/prompt
     Application::GetInstance().Schedule([]() {
         auto& app = Application::GetInstance();
@@ -412,14 +534,25 @@ esp_err_t HandleConfigPost(httpd_req_t* req) {
 }
 
 esp_err_t HandleStatusGet(httpd_req_t* req) {
+    char query_buf[64] = {};
+    if (httpd_req_get_url_query_str(req, query_buf, sizeof(query_buf)) == ESP_OK) {
+        char day_buf[16] = {};
+        if (httpd_query_key_value(query_buf, "day", day_buf, sizeof(day_buf)) == ESP_OK) {
+            RobiConfig::GetInstance().SyncUsageDay(day_buf);
+        }
+    }
+
     auto& board = Board::GetInstance();
     auto& wifi = WifiManager::GetInstance();
     auto& app = Application::GetInstance();
+    auto cfg = RobiConfig::GetInstance().Get();
 
     cJSON* root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "ssid", wifi.GetSsid().c_str());
     cJSON_AddStringToObject(root, "ip", wifi.GetIpAddress().c_str());
     cJSON_AddNumberToObject(root, "rssi", wifi.GetRssi());
+    cJSON_AddStringToObject(root, "preferred_model", cfg.preferred_model.c_str());
+    cJSON_AddStringToObject(root, "usage_day", RobiConfig::GetInstance().GetUsageDay().c_str());
 
     const char* st_str = "unknown";
     switch (app.GetDeviceState()) {
@@ -440,14 +573,70 @@ esp_err_t HandleStatusGet(httpd_req_t* req) {
     cJSON_AddNumberToObject(root, "free_psram",
                             static_cast<double>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
 
+    std::string active_model;
+    std::string last_model = GeminiLiveProtocol::GetLastConnectedModel();
     if (auto* proto = GeminiLiveProtocol::GetActiveInstance()) {
-        cJSON_AddBoolToObject(root, "channel_open", proto->IsAudioChannelOpened());
+        bool open = proto->IsAudioChannelOpened();
+        cJSON_AddBoolToObject(root, "channel_open", open);
         cJSON_AddNumberToObject(root, "turns_completed", proto->GetTurnsCompleted());
         cJSON_AddNumberToObject(root, "audio_frames_played", proto->GetAudioFramesPlayed());
         cJSON_AddNumberToObject(root, "ring_avail", static_cast<double>(proto->GetRingAvailableSamples()));
         cJSON_AddBoolToObject(root, "awaiting_response", proto->IsAwaitingResponse());
         cJSON_AddBoolToObject(root, "streaming_speech", proto->IsStreamingSpeech());
+        if (open) {
+            active_model = proto->GetActiveModel();
+        }
     }
+    cJSON_AddStringToObject(root, "active_model", active_model.c_str());
+    cJSON_AddStringToObject(root, "last_model", last_model.c_str());
+
+    static const char* const kModelIds[3] = {
+        "gemini-3.8-live",
+        "gemini-2.5-flash-native-audio-preview-12-2025",
+        "gemini-2.0-flash-live-001",
+    };
+    auto usage_vec = RobiConfig::GetInstance().GetModelUsage();
+    cJSON* models_arr = cJSON_CreateArray();
+    uint32_t tot_sessions = 0, tot_turns = 0, tot_audio_sec = 0, tot_tokens = 0;
+    for (int i = 0; i < 3; ++i) {
+        const char* mid = kModelIds[i];
+        uint32_t s = 0, t = 0, a = 0, tok = 0;
+        for (const auto& u : usage_vec) {
+            if (u.id == mid) {
+                s = u.sessions;
+                t = u.turns;
+                a = u.audio_sec;
+                tok = u.tokens;
+                break;
+            }
+        }
+        tot_sessions += s;
+        tot_turns += t;
+        tot_audio_sec += a;
+        tot_tokens += tok;
+
+        cJSON* m_obj = cJSON_CreateObject();
+        cJSON_AddStringToObject(m_obj, "id", mid);
+        cJSON_AddNumberToObject(m_obj, "sessions", s);
+        cJSON_AddNumberToObject(m_obj, "turns", t);
+        cJSON_AddNumberToObject(m_obj, "audio_sec", a);
+        cJSON_AddNumberToObject(m_obj, "tokens", tok);
+        cJSON_AddNumberToObject(m_obj, "cooldown_sec", GeminiLiveProtocol::GetModelCooldownSec(i));
+        cJSON_AddBoolToObject(m_obj, "active", active_model == mid);
+        cJSON_AddBoolToObject(m_obj, "last_used", last_model == mid);
+        cJSON_AddItemToArray(models_arr, m_obj);
+    }
+    cJSON_AddItemToObject(root, "models", models_arr);
+
+    cJSON* quota_obj = cJSON_CreateObject();
+    cJSON_AddNumberToObject(quota_obj, "used_sessions", tot_sessions);
+    cJSON_AddNumberToObject(quota_obj, "max_sessions", 500);
+    cJSON_AddNumberToObject(quota_obj, "used_turns", tot_turns);
+    cJSON_AddNumberToObject(quota_obj, "used_audio_sec", tot_audio_sec);
+    cJSON_AddNumberToObject(quota_obj, "max_audio_sec", 2700);
+    cJSON_AddNumberToObject(quota_obj, "used_tokens", tot_tokens);
+    cJSON_AddNumberToObject(quota_obj, "max_tokens", 1000000);
+    cJSON_AddItemToObject(root, "daily_quota", quota_obj);
 
     int bat = 100;
     bool chg = false, dis = false;
@@ -574,6 +763,10 @@ esp_err_t HandleControlPost(httpd_req_t* req) {
                 disp->SetEmotion(cmd.c_str());
             }
         });
+    }
+    if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "reset_usage"))) {
+        RobiConfig::GetInstance().ResetDailyUsage();
+        GeminiLiveProtocol::ResetModelCooldowns();
     }
     cJSON_Delete(root);
 

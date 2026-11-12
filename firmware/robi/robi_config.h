@@ -22,9 +22,18 @@ struct RobiKid {
     std::vector<RobiActivity> activities;
 };
 
+struct RobiModelUsage {
+    std::string id;
+    uint32_t sessions = 0;
+    uint32_t turns = 0;
+    uint32_t audio_sec = 0;
+    uint32_t tokens = 0;
+};
+
 struct RobiConfigData {
     std::string bot_name = "רובי";
     std::string gemini_key;
+    std::string preferred_model = "auto";
     std::string voice = "Puck";
     std::string language = "he-IL";
     std::string theme = "cyber_cyan";
@@ -63,6 +72,14 @@ public:
     std::vector<std::pair<std::string, std::string>> GetDialogue() const;
     void ClearDialogue();
 
+    // Daily per-model usage & quota tracking persisted in NVS ("robi_mem" / "usage")
+    void SyncUsageDay(const std::string& client_day_iso);
+    void RecordModelSession(const std::string& model_id);
+    void RecordModelTurn(const std::string& model_id, uint32_t audio_sec_delta, uint32_t tokens_delta);
+    void ResetDailyUsage();
+    std::string GetUsageDay() const;
+    std::vector<RobiModelUsage> GetModelUsage() const;
+
     // Builds full system instruction for Gemini Live
     std::string BuildSystemPrompt() const;
 
@@ -84,6 +101,9 @@ private:
     bool SaveConfigToNvsLocked(const std::string& serialized);
     void LoadMemoriesFromNvsLocked();
     void SaveMemoriesToNvsLocked();
+    void LoadUsageFromNvsLocked();
+    void SaveUsageToNvsLocked();
+    RobiModelUsage& FindOrCreateModelUsageLocked(const std::string& model_id);
     void TryImportFlashSectorLocked();
 
     mutable std::mutex mutex_;
@@ -91,6 +111,8 @@ private:
     RobiConfigData data_;
     std::vector<std::string> memories_;
     std::vector<std::pair<std::string, std::string>> dialogue_;
+    std::string usage_day_ = "today";
+    std::vector<RobiModelUsage> model_usage_;
     std::function<void()> ui_reload_cb_;
     std::function<std::string()> ui_status_cb_;
 };

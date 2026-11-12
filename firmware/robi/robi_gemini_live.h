@@ -35,6 +35,10 @@ public:
 
     // Live diagnostics & hardware stress-test control hooks
     static GeminiLiveProtocol* GetActiveInstance();
+    std::string GetActiveModel() const;
+    static std::string GetLastConnectedModel();
+    static int GetModelCooldownSec(int idx);
+    static void ResetModelCooldowns();
     uint32_t GetTurnsCompleted() const { return turns_completed_.load(); }
     uint32_t GetAudioFramesPlayed() const { return audio_frames_played_.load(); }
     size_t GetRingAvailableSamples() const { return RingAvailable(); }
@@ -97,6 +101,11 @@ private:
     std::atomic<uint32_t> turn_gen_{0};
     std::atomic<uint32_t> turns_completed_{0};
     std::atomic<uint32_t> audio_frames_played_{0};
+    std::atomic<uint32_t> turn_uplink_pcm_bytes_{0};
+    std::atomic<uint32_t> turn_downlink_samples_{0};
+    std::atomic<uint32_t> turn_server_tokens_{0};
+    mutable std::mutex model_mutex_;
+    std::string active_model_;
 
     ListeningMode listening_mode_ = kListeningModeAutoStop;
 

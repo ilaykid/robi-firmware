@@ -66,7 +66,9 @@ constexpr size_t kPreBufferSamples = 7200;     // 300ms @ 24kHz cushion before s
 constexpr size_t kRebufferSamples = 3600;      // 150ms @ 24kHz cushion if network stalls mid-turn
 constexpr size_t kPlaybackFrameSamples = 1200; // 50ms @ 24kHz (divides 2400/4800/9600 evenly!)
 
-int64_t g_model_cooldown_until_us[2] = {0, 0};
+int64_t g_model_cooldown_until_us[3] = {0, 0, 0};
+std::mutex g_last_model_mutex;
+std::string g_last_connected_model;
 GeminiLiveProtocol* g_active_protocol = nullptr;
 
 struct EmojiMapping {
@@ -204,6 +206,30 @@ GeminiLiveProtocol* GeminiLiveProtocol::GetActiveInstance() {
     return g_active_protocol;
 }
 
+std::string GeminiLiveProtocol::GetActiveModel() const {
+    std::lock_guard<std::mutex> lk(model_mutex_);
+    return active_model_;
+}
+
+std::string GeminiLiveProtocol::GetLastConnectedModel() {
+    std::lock_guard<std::mutex> lk(g_last_model_mutex);
+    return g_last_connected_model;
+}
+
+int GeminiLiveProtocol::GetModelCooldownSec(int idx) {
+    if (idx < 0 || idx >= 3) return 0;
+    int64_t now_us = esp_timer_get_time();
+    int64_t until_us = g_model_cooldown_until_us[idx];
+    if (until_us <= now_us) return 0;
+    return static_cast<int>((until_us - now_us + 999999LL) / 1000000LL);
+}
+
+void GeminiLiveProtocol::ResetModelCooldowns() {
+    for (int i = 0; i < 3; ++i) {
+        g_model_cooldown_until_us[i] = 0;
+    }
+}
+
 bool GeminiLiveProtocol::Start() {
     return true;
 }
@@ -223,6 +249,10 @@ void GeminiLiveProtocol::StopSessionInternal(bool notify_closed) {
     channel_opened_.store(false);
     ws_connected_.store(false);
     turn_gen_.fetch_add(1);
+    {
+        std::lock_guard<std::mutex> lk(model_mutex_);
+        active_model_.clear();
+    }
 
     {
         std::lock_guard<std::mutex> lk(rx_mutex_);
@@ -503,6 +533,18 @@ bool GeminiLiveProtocol::TryConnectModel(const std::string& api_key, const std::
                                            pdFALSE, pdMS_TO_TICKS(8000));
     if (bits & kEvtSetupComplete) {
         ESP_LOGI(TAG, "Gemini Live ready! (%s / %s)", model_name.c_str(), voice_name.c_str());
+        {
+            std::lock_guard<std::mutex> lk(model_mutex_);
+            active_model_ = model_name;
+        }
+        {
+            std::lock_guard<std::mutex> lk(g_last_model_mutex);
+            g_last_connected_model = model_name;
+        }
+        turn_uplink_pcm_bytes_.store(0);
+        turn_downlink_samples_.store(0);
+        turn_server_tokens_.store(0);
+        RobiConfig::GetInstance().RecordModelSession(model_name);
         channel_opened_.store(true);
         if (on_connected_) on_connected_();
         if (on_audio_channel_opened_) on_audio_channel_opened_();
@@ -532,32 +574,53 @@ bool GeminiLiveProtocol::OpenAudioChannel() {
         bool with_lang;
         int idx;
     };
-    const Candidate candidates[2] = {
-        {"gemini-2.5-flash-native-audio-preview-12-2025", false, 0},
-        {"gemini-2.0-flash-live-001", true, 1},
+    const Candidate base_candidates[3] = {
+        {"gemini-3.8-live", true, 0},
+        {"gemini-2.5-flash-native-audio-preview-12-2025", false, 1},
+        {"gemini-2.0-flash-live-001", true, 2},
     };
 
+    Candidate ordered[3] = {base_candidates[0], base_candidates[1], base_candidates[2]};
+    if (!cfg.preferred_model.empty() && cfg.preferred_model != "auto") {
+        int pref_pos = -1;
+        for (int i = 0; i < 3; ++i) {
+            if (cfg.preferred_model == base_candidates[i].model) {
+                pref_pos = i;
+                break;
+            }
+        }
+        if (pref_pos > 0) {
+            ordered[0] = base_candidates[pref_pos];
+            int out_i = 1;
+            for (int i = 0; i < 3; ++i) {
+                if (i != pref_pos) {
+                    ordered[out_i++] = base_candidates[i];
+                }
+            }
+        }
+    }
+
     int64_t now_us = esp_timer_get_time();
-    for (const auto& c : candidates) {
+    for (const auto& c : ordered) {
         if (now_us < g_model_cooldown_until_us[c.idx]) {
             continue;
         }
         if (TryConnectModel(cfg.gemini_key, c.model, cfg.voice, cfg.language, c.with_lang)) {
+            g_model_cooldown_until_us[c.idx] = 0;
             return true;
         }
-        // Cooldown failed primary briefly (90s) so consecutive taps don't wait twice
-        if (c.idx == 0) {
-            g_model_cooldown_until_us[0] = esp_timer_get_time() + 90LL * 1000000LL;
-        }
+        // Cooldown failed model (10 min) so consecutive sessions connect immediately to the working fallback
+        g_model_cooldown_until_us[c.idx] = esp_timer_get_time() + 600LL * 1000000LL;
     }
 
-    // Retry cooled-down candidate once in case cooldown was stale
-    for (const auto& c : candidates) {
+    // Retry cooled-down candidates once in case all were cooled down
+    for (const auto& c : ordered) {
         if (now_us >= g_model_cooldown_until_us[c.idx]) continue;
         g_model_cooldown_until_us[c.idx] = 0;
         if (TryConnectModel(cfg.gemini_key, c.model, cfg.voice, cfg.language, c.with_lang)) {
             return true;
         }
+        g_model_cooldown_until_us[c.idx] = esp_timer_get_time() + 600LL * 1000000LL;
     }
 
     SetError(Lang::Strings::SERVER_NOT_CONNECTED);
@@ -721,6 +784,7 @@ bool GeminiLiveProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
 
     last_activity_us_.store(now_us);
     ++speech_frames_;
+    turn_uplink_pcm_bytes_.fetch_add(static_cast<uint32_t>(packet->payload.size()));
     tx_pcm_batch_.insert(tx_pcm_batch_.end(), packet->payload.begin(), packet->payload.end());
     if (tx_pcm_batch_.size() >= 3840) {
         EnqueuePcm16k(tx_pcm_batch_.data(), tx_pcm_batch_.size());
@@ -1087,6 +1151,14 @@ void GeminiLiveProtocol::RxWorkerLoop() {
             continue;
         }
 
+        const cJSON* um = cJSON_GetObjectItemCaseSensitive(msg, "usageMetadata");
+        if (cJSON_IsObject(um)) {
+            const cJSON* tot_tok = cJSON_GetObjectItemCaseSensitive(um, "totalTokenCount");
+            if (cJSON_IsNumber(tot_tok) && tot_tok->valueint > 0) {
+                turn_server_tokens_.fetch_add(static_cast<uint32_t>(tot_tok->valueint));
+            }
+        }
+
         const cJSON* tool_call = cJSON_GetObjectItemCaseSensitive(msg, "toolCall");
         if (cJSON_IsObject(tool_call)) {
             HandleToolCalls(tool_call);
@@ -1198,8 +1270,10 @@ void GeminiLiveProtocol::RxWorkerLoop() {
                         // so SendAudio() can never open the mic during the pre-buffer window!
                         tool_hold_until_us_.store(0);
                         turn_complete_.store(false);
+                        size_t rx_samples = decoded_len / sizeof(int16_t);
+                        turn_downlink_samples_.fetch_add(static_cast<uint32_t>(rx_samples));
                         PushPcm24kToRing(reinterpret_cast<const int16_t*>(pcm_bytes.data()),
-                                         decoded_len / sizeof(int16_t));
+                                         rx_samples);
                     }
                 }
             }
@@ -1428,6 +1502,16 @@ void GeminiLiveProtocol::PlaybackFeederLoop() {
 
         if (!stopping_.load() && active_gen == turn_gen_.load()) {
             turns_completed_.fetch_add(1);
+            uint32_t up_bytes = turn_uplink_pcm_bytes_.exchange(0);
+            uint32_t down_samples = turn_downlink_samples_.exchange(0);
+            uint32_t srv_tok = turn_server_tokens_.exchange(0);
+            uint32_t up_sec = (up_bytes + 16000) / 32000;
+            uint32_t down_sec = (down_samples + 12000) / 24000;
+            uint32_t audio_sec_delta = std::max<uint32_t>(1, up_sec + down_sec);
+            if (srv_tok == 0) {
+                srv_tok = audio_sec_delta * 35 + 140;
+            }
+            RobiConfig::GetInstance().RecordModelTurn(GetActiveModel(), audio_sec_delta, srv_tok);
             awaiting_response_.store(false);
             EmitEmotion("v:0");
             last_activity_us_.store(esp_timer_get_time());

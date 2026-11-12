@@ -63,6 +63,7 @@ const STORAGE_KEY = "heyrobi_wizard_draft_v2";
 const state = {
   step: 1,
   gemini_key: "",
+  preferred_model: "auto",
   keyVerified: false,
   robot_name: "רובי",
   language: "he-IL",
@@ -90,6 +91,7 @@ function loadDraft() {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return;
     const saved = JSON.parse(raw);
+    if (saved.preferred_model) state.preferred_model = saved.preferred_model;
     if (saved.robot_name) state.robot_name = saved.robot_name;
     if (saved.language) state.language = saved.language;
     if (saved.voice) state.voice = saved.voice;
@@ -111,6 +113,7 @@ function saveDraft() {
   try {
     const safeCopy = {
       gemini_key: state.gemini_key,
+      preferred_model: state.preferred_model,
       robot_name: state.robot_name,
       language: state.language,
       voice: state.voice,
@@ -576,6 +579,7 @@ export function buildConfigObject({ includeSecrets = true } = {}) {
   const obj = {
     bot_name: rName,
     robot_name: rName,
+    preferred_model: state.preferred_model || "auto",
     voice: state.voice || "Puck",
     language: state.language || "he-IL",
     theme: fTheme,
@@ -792,6 +796,7 @@ function importJsonFile(file) {
   reader.onload = () => {
     try {
       const data = JSON.parse(String(reader.result));
+      if (data.preferred_model) state.preferred_model = data.preferred_model;
       if (data.robot_name || data.bot_name) state.robot_name = data.robot_name || data.bot_name;
       if (data.language) state.language = data.language;
       if (data.voice) state.voice = data.voice;
@@ -820,6 +825,8 @@ function importJsonFile(file) {
 
 function hydrateInputs() {
   document.getElementById("inpGeminiKey").value = state.gemini_key;
+  const selMod = document.getElementById("selPreferredModel");
+  if (selMod) selMod.value = state.preferred_model || "auto";
   document.getElementById("inpRobotName").value = state.robot_name;
   document.getElementById("selLanguage").value = state.language;
   document.getElementById("rngVolume").value = state.volume;
@@ -867,6 +874,13 @@ window.addEventListener("DOMContentLoaded", () => {
     state.keyVerified = false;
     saveDraft();
   });
+  const selMod = document.getElementById("selPreferredModel");
+  if (selMod) {
+    selMod.addEventListener("change", (e) => {
+      state.preferred_model = e.target.value;
+      saveDraft();
+    });
+  }
   document.getElementById("btnVerifyKey").addEventListener("click", verifyGeminiKey);
 
   document.getElementById("inpRobotName").addEventListener("input", (e) => {
