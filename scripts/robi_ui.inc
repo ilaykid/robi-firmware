@@ -79,6 +79,14 @@
     }
 
     virtual void SetEmotion(const char* emotion) override {
+        if (emotion != nullptr && emotion[0] == 'v' && emotion[1] == ':') {
+            int lvl = atoi(emotion + 2);
+            if (lvl < 0) lvl = 0;
+            if (lvl > 100) lvl = 100;
+            robi_voice_env_ = static_cast<float>(lvl) / 100.0f;
+            robi_voice_env_ts_ = esp_timer_get_time();
+            return;
+        }
         DisplayLockGuard lock(this);
         if (emoji_label_ != nullptr) {
             lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
@@ -87,14 +95,6 @@
             lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
         }
         if (emotion == nullptr || emotion[0] == '\0' || !robi_face_ready_) {
-            return;
-        }
-        if (emotion[0] == 'v' && emotion[1] == ':') {
-            int lvl = atoi(emotion + 2);
-            if (lvl < 0) lvl = 0;
-            if (lvl > 100) lvl = 100;
-            robi_voice_env_ = static_cast<float>(lvl) / 100.0f;
-            robi_voice_env_ts_ = esp_timer_get_time();
             return;
         }
         if (strncmp(emotion, "kid:", 4) == 0) {

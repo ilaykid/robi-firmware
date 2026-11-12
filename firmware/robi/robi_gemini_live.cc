@@ -1559,18 +1559,24 @@ void GeminiLiveProtocol::HandleToolCalls(const cJSON* tool_call) {
                 int vol = 70;
                 const cJSON* v = args ? cJSON_GetObjectItemCaseSensitive(args, "volume") : nullptr;
                 if (cJSON_IsNumber(v)) vol = std::clamp(v->valueint, 0, 100);
-                if (auto* codec = Board::GetInstance().GetAudioCodec()) {
-                    codec->SetOutputVolume(vol);
-                }
+                // Schedule onto Internal SRAM main task so NVS inside SetOutputVolume never panics on PSRAM stack
+                Application::GetInstance().Schedule([vol]() {
+                    if (auto* codec = Board::GetInstance().GetAudioCodec()) {
+                        codec->SetOutputVolume(vol);
+                    }
+                });
                 cJSON_AddNumberToObject(res_obj, "volume", vol);
                 cJSON_AddStringToObject(res_obj, "result", "ok");
             } else if (name == "set_brightness") {
                 int bri = 80;
                 const cJSON* b = args ? cJSON_GetObjectItemCaseSensitive(args, "brightness") : nullptr;
                 if (cJSON_IsNumber(b)) bri = std::clamp(b->valueint, 10, 100);
-                if (auto* bl = Board::GetInstance().GetBacklight()) {
-                    bl->SetBrightness(static_cast<uint8_t>(bri), true);
-                }
+                // Schedule onto Internal SRAM main task so NVS inside SetBrightness never panics on PSRAM stack
+                Application::GetInstance().Schedule([bri]() {
+                    if (auto* bl = Board::GetInstance().GetBacklight()) {
+                        bl->SetBrightness(static_cast<uint8_t>(bri), true);
+                    }
+                });
                 cJSON_AddNumberToObject(res_obj, "brightness", bri);
                 cJSON_AddStringToObject(res_obj, "result", "ok");
             } else if (name == "get_device_status") {

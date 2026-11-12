@@ -131,8 +131,18 @@ must_replace(
     "    if not default_emoji_collection:\n        return None\n",
 )
 
-# 3. Waveshare 1.75 board UI, PowerSaveTimer fix, and CST9217 100kHz I2C resilience
+# 3. Waveshare 1.75 board UI, AXP2101 VBUS 2A power-path unlock, PowerSaveTimer fix, and CST9217 100kHz I2C resilience
 board_cc = fw / "main/boards/waveshare/esp32-s3-touch-amoled-1.75/esp32-s3-touch-amoled-1.75.cc"
+must_replace(
+    board_cc,
+    "        WriteReg(0x22, 0b110); // PWRON > OFFLEVEL as POWEROFF Source enable\n"
+    "        WriteReg(0x27, 0x10);  // hold 4s to power off\n",
+    "        WriteReg(0x22, 0b110); // PWRON > OFFLEVEL as POWEROFF Source enable\n"
+    "        WriteReg(0x27, 0x10);  // hold 4s to power off\n"
+    "        WriteReg(0x15, 0x00);  // VINDPM = 3.88V: prevent USB cable voltage drop from cutting VBUS on speaker bursts\n"
+    "        WriteReg(0x16, 0x05);  // IIN_LIM = 2000mA: unlock 500mA USB SDP limit when running without battery\n"
+    "        WriteReg(0x24, 0x00);  // VOFF = 2.6V: lowest VSYS UVLO threshold to absorb peak speaker + WiFi transients\n",
+)
 must_replace(
     board_cc,
     "#include <lvgl.h>\n",

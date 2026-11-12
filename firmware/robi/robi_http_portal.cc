@@ -836,6 +836,11 @@ bool ParseMdnsRobiLocalQuery(const uint8_t* pkt, size_t len, uint16_t& qtype_out
 
 }  // namespace
 
+esp_err_t HandleFaviconGet(httpd_req_t* req) {
+    httpd_resp_set_status(req, "204 No Content");
+    return httpd_resp_send(req, nullptr, 0);
+}
+
 RobiHttpPortal& RobiHttpPortal::GetInstance() {
     static RobiHttpPortal instance;
     return instance;
@@ -849,13 +854,18 @@ void RobiHttpPortal::Start() {
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
-    config.max_uri_handlers = 8;
+    config.max_uri_handlers = 10;
+    config.max_open_sockets = 7;
+    config.backlog_conn = 6;
+    config.recv_wait_timeout = 5;
+    config.send_wait_timeout = 5;
     config.stack_size = 8192;
     config.lru_purge_enable = true;
 
     if (httpd_start(&server_, &config) == ESP_OK) {
         static const httpd_uri_t kUris[] = {
             {"/", HTTP_GET, HandleIndexGet, nullptr},
+            {"/favicon.ico", HTTP_GET, HandleFaviconGet, nullptr},
             {"/api/config", HTTP_GET, HandleConfigGet, nullptr},
             {"/api/config", HTTP_POST, HandleConfigPost, nullptr},
             {"/api/status", HTTP_GET, HandleStatusGet, nullptr},
@@ -911,6 +921,13 @@ void RobiHttpPortal::MdnsResponderLoop() {
     int reuse = 1;
     setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
 
+    // RFC 6762 Section 11: mDNS packets MUST have IP TTL = 255 so Android/iOS mdnsd
+    // and dual-band 5GHz<->2.4GHz router bridges never drop them
+    int ttl255 = 255;
+    uint8_t mcast_ttl255 = 255;
+    setsockopt(sock, IPPROTO_IP, IP_TTL, &ttl255, sizeof(ttl255));
+    setsockopt(sock, IPPROTO_IP, IP_MULTICAST_TTL, &mcast_ttl255, sizeof(mcast_ttl255));
+
     sockaddr_in bind_addr = {};
     bind_addr.sin_family = AF_INET;
     bind_addr.sin_port = htons(5353);
@@ -939,16 +956,29 @@ void RobiHttpPortal::MdnsResponderLoop() {
     uint32_t joined_ip = 0;
     int64_t last_announce_us = 0;
 
-    auto build_mdns_a_packet = [](uint8_t* resp, uint16_t txid, const in_addr& ip_bin) -> size_t {
-        std::memset(resp, 0, 64);
+    // Builds an RFC 6762 mDNS response containing both the IPv4 A record for robi.local
+    // AND an NSEC record proving robi.local has ONLY Type A (no IPv6 AAAA), so Android/iOS
+    // resolve robi.local immediately without waiting for an IPv6 timeout.
+    auto build_mdns_a_packet = [](uint8_t* resp, uint16_t txid, const in_addr& ip_bin, uint16_t qtype) -> size_t {
+        std::memset(resp, 0, 96);
         resp[0] = static_cast<uint8_t>((txid >> 8) & 0xFF);
         resp[1] = static_cast<uint8_t>(txid & 0xFF);
         resp[2] = 0x84;  // QR=1, AA=1
         resp[3] = 0x00;
-        resp[6] = 0x00;
-        resp[7] = 0x01;  // ANCOUNT = 1
+        if (qtype == 28) {
+            // For explicit AAAA (IPv6) queries: put NSEC + A in Answer section (ANCOUNT = 2)
+            resp[6] = 0x00;
+            resp[7] = 0x02;
+        } else {
+            // Standard A/ANY query: A in Answer (ANCOUNT = 1), NSEC in Additional (ARCOUNT = 1)
+            resp[6] = 0x00;
+            resp[7] = 0x01;
+            resp[10] = 0x00;
+            resp[11] = 0x01;
+        }
 
         size_t off = 12;
+        // Offset 12 (0x0C): QNAME "robi.local."
         const uint8_t qname[] = {4, 'r', 'o', 'b', 'i', 5, 'l', 'o', 'c', 'a', 'l', 0};
         std::memcpy(resp + off, qname, sizeof(qname));
         off += sizeof(qname);
@@ -964,6 +994,25 @@ void RobiHttpPortal::MdnsResponderLoop() {
         resp[off++] = 0x04;  // RDLENGTH 4
         std::memcpy(resp + off, &ip_bin.s_addr, 4);
         off += 4;
+
+        // RFC 6762 Section 6.1 NSEC record pointing to 0xC00C ("robi.local.")
+        resp[off++] = 0xC0;
+        resp[off++] = 0x0C;  // Name pointer -> robi.local.
+        resp[off++] = 0x00;
+        resp[off++] = 0x2F;  // TYPE NSEC (47)
+        resp[off++] = 0x80;  // CLASS IN + cache-flush
+        resp[off++] = 0x01;
+        resp[off++] = 0x00;
+        resp[off++] = 0x00;
+        resp[off++] = 0x00;
+        resp[off++] = 120;   // TTL 120s
+        resp[off++] = 0x00;
+        resp[off++] = 0x05;  // RDLENGTH 5
+        resp[off++] = 0xC0;
+        resp[off++] = 0x0C;  // Next Domain Name -> robi.local.
+        resp[off++] = 0x00;  // Window Block 0
+        resp[off++] = 0x01;  // Bitmap Length 1
+        resp[off++] = 0x40;  // Bit 1 = TYPE A (1) only!
         return off;
     };
 
@@ -983,16 +1032,16 @@ void RobiHttpPortal::MdnsResponderLoop() {
             setsockopt(sock, IPPROTO_IP, IP_MULTICAST_IF, &ip_bin, sizeof(ip_bin));
 
             // Broadcast immediate gratuitous mDNS announcement when IP is acquired
-            uint8_t ann[64];
-            size_t alen = build_mdns_a_packet(ann, 0, ip_bin);
+            uint8_t ann[96];
+            size_t alen = build_mdns_a_packet(ann, 0, ip_bin, 1);
             sendto(sock, ann, alen, 0, reinterpret_cast<sockaddr*>(&mcast_dst), sizeof(mcast_dst));
             last_announce_us = esp_timer_get_time();
         }
 
         int64_t now_us = esp_timer_get_time();
-        if (have_ip && (now_us - last_announce_us) > 12LL * 1000000LL) {
-            uint8_t ann[64];
-            size_t alen = build_mdns_a_packet(ann, 0, ip_bin);
+        if (have_ip && (now_us - last_announce_us) > 10LL * 1000000LL) {
+            uint8_t ann[96];
+            size_t alen = build_mdns_a_packet(ann, 0, ip_bin, 1);
             sendto(sock, ann, alen, 0, reinterpret_cast<sockaddr*>(&mcast_dst), sizeof(mcast_dst));
             last_announce_us = now_us;
         }
@@ -1008,10 +1057,14 @@ void RobiHttpPortal::MdnsResponderLoop() {
         }
 
         uint16_t txid = (static_cast<uint16_t>(buf[0]) << 8) | buf[1];
-        uint8_t resp[64];
-        size_t off = build_mdns_a_packet(resp, txid, ip_bin);
-
+        uint8_t resp[96];
+        // RFC 6762 Section 18.1: Multicast responses MUST have ID = 0
+        size_t off = build_mdns_a_packet(resp, 0, ip_bin, qtype);
         sendto(sock, resp, off, 0, reinterpret_cast<sockaddr*>(&mcast_dst), sizeof(mcast_dst));
+
+        // Unicast reply directly to the querier preserves the query's transaction ID
+        resp[0] = static_cast<uint8_t>((txid >> 8) & 0xFF);
+        resp[1] = static_cast<uint8_t>(txid & 0xFF);
         sendto(sock, resp, off, 0, reinterpret_cast<sockaddr*>(&src), slen);
     }
 
