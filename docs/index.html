@@ -16,7 +16,7 @@
       </div>
     </div>
     <div class="top-actions">
-      <span class="badge">⚡ 100% מקומי בדפדפן</span>
+      <span class="badge">🔒 100% מקומי בדפדפן • אפס מידע נשלח לשרת</span>
       <button type="button" id="btnExportJson" class="btn btn-secondary" style="padding:7px 13px;font-size:0.82rem;">ייצוא פרופיל</button>
       <label class="btn btn-secondary" style="padding:7px 13px;font-size:0.82rem;margin:0;">
         טעינת פרופיל
@@ -24,6 +24,22 @@
       </label>
     </div>
   </header>
+
+  <section
+    aria-label="הצהרת פרטיות ואפס אחסון מידע"
+    style="max-width:1220px;margin:14px auto 0;padding:0 20px;"
+  >
+    <div
+      style="background:rgba(16,185,129,0.12);border:1.5px solid rgba(16,185,129,0.45);border-radius:14px;padding:12px 18px;display:flex;align-items:flex-start;gap:12px;line-height:1.55;font-size:0.88rem;color:#e2e8f0;"
+    >
+      <span style="font-size:1.35rem;line-height:1;">🛡️</span>
+      <div>
+        <strong style="color:#34d399;font-size:0.94rem;">התחייבות לפרטיות מוחלטת — שום מידע לא נשלח אלינו וקל וחומר לא מאוחסן אצלנו!</strong><br />
+        עמוד זה הוא כלי דפדפן סטטי ומקומי בלבד (<code>Client-Side WebSerial</code> ללא שרת אחורי וללא מסד נתונים).
+        <strong>מפתח ה-Gemini שלכם, פרטי ה-WiFi ושמות הילדים לעולם אינם נשלחים למפתחי הפרויקט או לאתר זה, אינם עוברים דרך שום שרת צד-שלישי, ואפילו אינם נשמרים ב-<code>localStorage</code> של הדפדפן שלכם</strong> — הם נכתבים ישירות מתוך הדפדפן דרך כבל ה-USB אל שבב הזיכרון הפנימי של רובי אצלכם בבית בלבד.
+      </div>
+    </div>
+  </section>
 
   <main class="layout">
     <!-- Right Column: 5-Step Wizard -->
@@ -80,7 +96,7 @@
               />
               <button type="button" id="btnVerifyKey" class="btn btn-accent">בדוק מפתח</button>
             </div>
-            <small>פרטיות מלאה: המפתח נבדק ישירות מול Google ולא נשלח לשום שרת צד-שלישי.</small>
+            <small>🔒 <strong>אפס שליחה ואפס אחסון:</strong> המפתח לעולם לא נשלח למפתחי האתר ולא נשמר בדפדפן — הוא נבדק ישירות מול Google ונצרב בכבל ה-USB לתוך רובי אצלכם בבית בלבד.</small>
             <div id="keyStatus" class="status-msg"></div>
           </div>
 
@@ -219,7 +235,8 @@
         <div class="step-pane" data-pane="5">
           <h2 class="pane-title">שלב 5 — חיבור ל-WiFi הביתי וצריבה בלחיצה אחת!</h2>
           <p class="pane-sub">
-            חברו את רובי למחשב עם כבל USB-C. בלחיצה אחת הדפדפן יצרוב גם את מערכת HeyRobi וגם את כל ההגדרות שלכם!
+            חברו את רובי למחשב עם כבל USB-C. בלחיצה אחת הדפדפן יצרוב ישירות לשבב את מערכת HeyRobi ואת ההגדרות שלכם!
+            <br /><strong style="color:#34d399;">🔒 פרטי ה-WiFi שלכם מעובדים בזיכרון ה-RAM של הדפדפן שלכם בלבד — הם אינם נשלחים לאתר זה ואינם נשמרים בשום מקום מחוץ לרובי.</strong>
           </p>
 
           <div class="row-2">

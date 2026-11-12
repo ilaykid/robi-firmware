@@ -12,8 +12,30 @@ env:
   ROBI_VERSION: 3.0.0
 
 jobs:
+  changes:
+    name: Detect Firmware Changes
+    runs-on: ubuntu-latest
+    outputs:
+      fw: ${{ steps.check.outputs.fw }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - id: check
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "fw=true" >> "$GITHUB_OUTPUT"
+          elif git diff --name-only HEAD~1 HEAD 2>/dev/null | grep -qE '^(firmware/|scripts/|assets/)'; then
+            echo "fw=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "fw=false" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
     name: HeyRobi Standalone (${{ matrix.wake }})
+    needs: changes
+    if: needs.changes.outputs.fw == 'true'
     runs-on: ubuntu-latest
     container:
       image: espressif/idf:v6.1
@@ -64,8 +86,8 @@ jobs:
 
   deploy-wizard-pages:
     name: Deploy WebSerial Wizard + Binaries to GitHub Pages
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: build
+    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && (needs.build.result == 'success' || needs.build.result == 'skipped')
+    needs: [changes, build]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -77,19 +99,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/download-artifact@v4
+      - name: Download Built Artifacts
+        if: needs.build.result == 'success'
+        uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: false
 
       - name: Stage Wizard & Pre-Built Binaries
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p _site/firmware
           cp -r docs/* _site/
-          cp artifacts/heyrobi-firmware-heyrobby/robi-full-heyrobby.bin _site/firmware/
-          cp artifacts/heyrobi-firmware-hiesp/robi-full-hiesp.bin _site/firmware/
-          cat artifacts/heyrobi-firmware-*/SHA256SUMS-*.txt > _site/firmware/SHA256SUMS.txt
+          if [[ "${{ needs.build.result }}" == "success" ]]; then
+            cp artifacts/heyrobi-firmware-heyrobby/robi-full-heyrobby.bin _site/firmware/
+            cp artifacts/heyrobi-firmware-hiesp/robi-full-hiesp.bin _site/firmware/
+            cat artifacts/heyrobi-firmware-*/SHA256SUMS-*.txt > _site/firmware/SHA256SUMS.txt
+          else
+            gh release download "v${ROBI_VERSION}" --pattern "robi-full-*.bin" --dir _site/firmware
+            (cd _site/firmware && sha256sum *.bin > SHA256SUMS.txt)
+          fi
           touch _site/.nojekyll
           ls -lh _site/firmware/
 

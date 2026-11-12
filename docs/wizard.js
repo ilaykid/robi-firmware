@@ -103,11 +103,11 @@ function loadDraft() {
     if (typeof saved.custom_prompt === "string") state.custom_prompt = saved.custom_prompt;
     if (Array.isArray(saved.kids)) state.kids = saved.kids.slice(0, 3);
     if (saved.wake_variant) state.wake_variant = saved.wake_variant;
-    if (saved.wifi_ssid) state.wifi_ssid = saved.wifi_ssid;
     // Security: scrub any legacy plaintext secrets from localStorage immediately
-    if (saved.gemini_key || saved.wifi_pass) {
+    if (saved.gemini_key !== undefined || saved.wifi_pass !== undefined || saved.wifi_ssid !== undefined) {
       delete saved.gemini_key;
       delete saved.wifi_pass;
+      delete saved.wifi_ssid;
       localStorage.setItem(STORAGE_KEY, JSON.stringify(saved));
     }
   } catch (_) {}
@@ -115,7 +115,7 @@ function loadDraft() {
 
 function saveDraft() {
   try {
-    // Security: never store gemini_key or wifi_pass in persistent browser localStorage
+    // Security: never store gemini_key, wifi_ssid, or wifi_pass in persistent browser localStorage
     const safeCopy = {
       preferred_model: state.preferred_model,
       robot_name: state.robot_name,
@@ -129,7 +129,6 @@ function saveDraft() {
       custom_prompt: state.custom_prompt,
       kids: state.kids,
       wake_variant: state.wake_variant,
-      wifi_ssid: state.wifi_ssid,
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(safeCopy));
   } catch (_) {}
