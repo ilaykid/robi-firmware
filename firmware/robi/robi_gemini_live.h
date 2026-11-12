@@ -66,6 +66,7 @@ private:
 
     void HandleGeminiJson(const char* data, size_t len);
     void HandleToolCalls(const cJSON* tool_call);
+    void FlushPendingTranscripts();
 
     void PushPcm24kToRing(const int16_t* samples, size_t count);
     size_t PopPcm24kFromRing(int16_t* out_samples, size_t max_count);
@@ -89,6 +90,7 @@ private:
     std::atomic<bool> turn_complete_{false};
     std::atomic<bool> close_after_turn_{false};
     std::atomic<bool> awaiting_response_{false};
+    std::atomic<bool> speaking_active_{false};
     std::atomic<int64_t> awaiting_since_us_{0};
     std::atomic<int64_t> tool_hold_until_us_{0};
     std::atomic<int64_t> last_rx_audio_us_{0};
@@ -115,6 +117,11 @@ private:
     std::mutex rx_mutex_;
     std::condition_variable rx_cv_;
     std::deque<std::string> rx_queue_;
+
+    // Accumulated transcripts flushed on turnComplete or synthesized turn end
+    std::mutex transcript_mutex_;
+    std::string pending_user_transcript_;
+    std::string pending_bot_transcript_;
 
     // Outgoing WebSocket JSON queue
     std::mutex tx_mutex_;
