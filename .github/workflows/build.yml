@@ -94,8 +94,12 @@ jobs:
           ls -lh _site/firmware/
 
       - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+        continue-on-error: true
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site
       - id: deployment
         uses: actions/deploy-pages@v4
+        continue-on-error: true

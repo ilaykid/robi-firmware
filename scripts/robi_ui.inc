@@ -97,6 +97,26 @@
             robi_voice_env_ts_ = esp_timer_get_time();
             return;
         }
+        if (strncmp(emotion, "kid:", 4) == 0) {
+            int k_idx = atoi(emotion + 4);
+            RobiStopMenuTimer();
+            RobiHideAllMenus();
+            if (k_idx >= 0 && k_idx < kMaxKids && robi_menus_[k_idx] != nullptr) {
+                if (robi_profiles_ != nullptr) {
+                    lv_obj_add_flag(robi_profiles_, LV_OBJ_FLAG_HIDDEN);
+                }
+                lv_obj_remove_flag(robi_menus_[k_idx], LV_OBJ_FLAG_HIDDEN);
+                RobiUpdateSetupHintVisibility(true);
+                robi_menu_timer_ = lv_timer_create(OnMenuTimeout, 20000, nullptr);
+                lv_timer_set_repeat_count(robi_menu_timer_, 1);
+            } else {
+                if (robi_profiles_ != nullptr && robi_face_mode_ == ROBI_MODE_IDLE) {
+                    lv_obj_remove_flag(robi_profiles_, LV_OBJ_FLAG_HIDDEN);
+                }
+                RobiUpdateSetupHintVisibility(robi_face_mode_ == ROBI_MODE_IDLE);
+            }
+            return;
+        }
         const char* mapped = emotion;
         if (robi_face_mode_ == ROBI_MODE_LISTENING && strcmp(emotion, "neutral") == 0) {
             mapped = "listening";
@@ -1536,5 +1556,58 @@ private:
                 }
             });
         });
+
+        RobiConfig::GetInstance().SetUiStatusProvider([]() -> std::string {
+            if (robi_self_ == nullptr) return "{}";
+            DisplayLockGuard lock(robi_self_);
+            return robi_self_->RobiBuildUiStatusJsonLocked();
+        });
+    }
+
+    std::string RobiBuildUiStatusJsonLocked() {
+        auto rect_str = [](lv_obj_t* o) -> std::string {
+            if (o == nullptr) return "null";
+            lv_obj_update_layout(o);
+            lv_area_t a;
+            lv_obj_get_coords(o, &a);
+            bool vis = !lv_obj_has_flag(o, LV_OBJ_FLAG_HIDDEN);
+            char buf[160];
+            snprintf(buf, sizeof(buf), "{\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,\"y2\":%d,\"vis\":%s}",
+                     static_cast<int>(a.x1), static_cast<int>(a.y1),
+                     static_cast<int>(a.x2 - a.x1 + 1), static_cast<int>(a.y2 - a.y1 + 1),
+                     static_cast<int>(a.y2), vis ? "true" : "false");
+            return std::string(buf);
+        };
+
+        int open_menu = -1;
+        for (int i = 0; i < kMaxKids; ++i) {
+            if (robi_menus_[i] != nullptr && !lv_obj_has_flag(robi_menus_[i], LV_OBJ_FLAG_HIDDEN)) {
+                open_menu = i;
+                break;
+            }
+        }
+
+        char head[384];
+        snprintf(head, sizeof(head),
+                 "{\"emotion\":\"%s\",\"face_mode\":%d,\"theme_id\":%d,\"style_id\":%d,"
+                 "\"face_y\":%.1f,\"face_scale\":%.2f,\"hint_text\":\"%s\",\"hint_dir\":%d,\"open_menu\":%d",
+                 robi_last_emotion_, static_cast<int>(robi_face_mode_),
+                 static_cast<int>(robi_theme_id_), static_cast<int>(robi_face_style_),
+                 face_y_, face_scale_, last_hint_txt_.c_str(),
+                 robi_setup_lbl_ ? static_cast<int>(lv_obj_get_style_base_dir(robi_setup_lbl_, 0)) : -1,
+                 open_menu);
+
+        std::string out(head);
+        out += ",\"eye_l\":" + rect_str(eye_l_.core);
+        out += ",\"eye_r\":" + rect_str(eye_r_.core);
+        out += ",\"visor\":" + rect_str(visor_bar_);
+        out += ",\"mouth_mid\":" + rect_str(mouth_seg_[4]);
+        out += ",\"profiles_box\":" + rect_str(robi_profiles_);
+        out += ",\"hint_pill\":" + rect_str(robi_setup_hint_);
+        if (open_menu >= 0) {
+            out += ",\"active_menu\":" + rect_str(robi_menus_[open_menu]);
+        }
+        out += "}";
+        return out;
     }
     // ===================== end OpenRobi UI =====================

@@ -477,6 +477,13 @@ esp_err_t HandleStatusGet(httpd_req_t* req) {
     }
     cJSON_AddItemToObject(root, "dialogue", dlg);
 
+    std::string ui_json_str = RobiConfig::GetInstance().GetUiStatusJson();
+    if (!ui_json_str.empty()) {
+        if (cJSON* ui_obj = cJSON_ParseWithLength(ui_json_str.data(), ui_json_str.size())) {
+            cJSON_AddItemToObject(root, "ui", ui_obj);
+        }
+    }
+
     char* s = cJSON_PrintUnformatted(root);
     std::string out = s ? s : "{}";
     if (s) cJSON_free(s);
@@ -557,6 +564,16 @@ esp_err_t HandleControlPost(httpd_req_t* req) {
     }
     if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "reboot"))) {
         Application::GetInstance().Schedule([]() { Application::GetInstance().Reboot(); });
+    }
+    const cJSON* open_kid = cJSON_GetObjectItemCaseSensitive(root, "open_kid");
+    if (cJSON_IsNumber(open_kid)) {
+        int k_idx = open_kid->valueint;
+        Application::GetInstance().Schedule([k_idx]() {
+            if (auto* disp = Board::GetInstance().GetDisplay()) {
+                std::string cmd = "kid:" + std::to_string(k_idx);
+                disp->SetEmotion(cmd.c_str());
+            }
+        });
     }
     cJSON_Delete(root);
 

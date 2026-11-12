@@ -690,6 +690,20 @@ void RobiConfig::NotifyUiReload() {
     if (cb) cb();
 }
 
+void RobiConfig::SetUiStatusProvider(std::function<std::string()> cb) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ui_status_cb_ = std::move(cb);
+}
+
+std::string RobiConfig::GetUiStatusJson() const {
+    std::function<std::string()> cb;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        cb = ui_status_cb_;
+    }
+    return cb ? cb() : "{}";
+}
+
 std::string RobiConfig::BuildSystemPrompt() const {
     std::lock_guard<std::mutex> lock(mutex_);
     std::string p;
