@@ -82,9 +82,9 @@ extra = [
     "CONFIG_LV_USE_BIDI=y",
     "CONFIG_LV_BIDI_DIR_AUTO=y",
     "CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y",
-    "CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=8",
+    "CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6",
     "CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=32",
-    "CONFIG_ESP_WIFI_RX_BA_WIN=16",
+    "CONFIG_ESP_WIFI_RX_BA_WIN=12",
     "CONFIG_LWIP_TCP_WND_DEFAULT=32768",
     "CONFIG_LWIP_TCP_SND_BUF_DEFAULT=16384",
     "CONFIG_LWIP_TCP_RECVMBOX_SIZE=32",
@@ -322,6 +322,30 @@ must_replace(
 
 # 6. Standalone Application boot (no cloud server activation, start local portal + GeminiLiveProtocol)
 app_cc = fw / "main/application.cc"
+must_replace(
+    app_cc,
+    "void Application::BeginWakeWordInvoke(const std::string& wake_word) {\n"
+    "    // Must run in the main task with the device in idle state\n"
+    "    audio_service_.EncodeWakeWord();\n",
+    "void Application::BeginWakeWordInvoke(const std::string& wake_word) {\n"
+    "    // Stop MultiNet7/AEC immediately before connecting and skip unused Opus wake-word encoding\n"
+    "    audio_service_.EnableWakeWordDetection(false);\n",
+)
+must_replace(
+    app_cc,
+    "        case kDeviceStateConnecting:\n"
+    "            display->SetStatus(Lang::Strings::CONNECTING);\n"
+    '            display->SetEmotion("neutral");\n'
+    '            display->SetChatMessage("system", "");\n'
+    "            break;\n",
+    "        case kDeviceStateConnecting:\n"
+    "            display->SetStatus(Lang::Strings::CONNECTING);\n"
+    '            display->SetEmotion("neutral");\n'
+    '            display->SetChatMessage("system", "");\n'
+    "            audio_service_.EnableVoiceProcessing(false);\n"
+    "            audio_service_.EnableWakeWordDetection(false);\n"
+    "            break;\n",
+)
 must_replace(
     app_cc,
     "        case kDeviceStateSpeaking:\n"

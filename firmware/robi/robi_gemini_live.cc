@@ -168,6 +168,13 @@ GeminiLiveProtocol::GeminiLiveProtocol() {
         pcm_ring_ = static_cast<int16_t*>(malloc(kFallbackRingSamples * sizeof(int16_t)));
         ring_capacity_ = pcm_ring_ ? kFallbackRingSamples : 0;
     }
+
+    rx_stack_ = static_cast<StackType_t*>(heap_caps_malloc(16384, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    rx_tcb_ = static_cast<StaticTask_t*>(heap_caps_malloc(sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    tx_stack_ = static_cast<StackType_t*>(heap_caps_malloc(10240, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    tx_tcb_ = static_cast<StaticTask_t*>(heap_caps_malloc(sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    play_stack_ = static_cast<StackType_t*>(heap_caps_malloc(10240, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    play_tcb_ = static_cast<StaticTask_t*>(heap_caps_malloc(sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 }
 
 GeminiLiveProtocol::~GeminiLiveProtocol() {
@@ -175,6 +182,12 @@ GeminiLiveProtocol::~GeminiLiveProtocol() {
         g_active_protocol = nullptr;
     }
     StopSessionInternal(false);
+    if (rx_stack_) heap_caps_free(rx_stack_);
+    if (rx_tcb_) heap_caps_free(rx_tcb_);
+    if (tx_stack_) heap_caps_free(tx_stack_);
+    if (tx_tcb_) heap_caps_free(tx_tcb_);
+    if (play_stack_) heap_caps_free(play_stack_);
+    if (play_tcb_) heap_caps_free(play_tcb_);
     if (pcm_ring_ != nullptr) {
         heap_caps_free(pcm_ring_);
         pcm_ring_ = nullptr;
@@ -445,33 +458,33 @@ bool GeminiLiveProtocol::TryConnectModel(const std::string& api_key, const std::
 
     ws_connected_.store(true);
 
-    // Launch worker tasks at priority 3 so AudioOutputTask (priority 4) is never preempted during I2S DMA writes
-    xTaskCreate(
+    // Launch worker tasks using pre-allocated PSRAM stacks so Internal SRAM is never exhausted
+    rx_task_ = xTaskCreateStatic(
         [](void* arg) {
             auto* self = static_cast<GeminiLiveProtocol*>(arg);
             self->RxWorkerLoop();
             xEventGroupSetBits(self->worker_done_group_, kDoneRx);
             vTaskDelete(nullptr);
         },
-        "gemini_rx", 16384, this, 3, &rx_task_);
+        "gemini_rx", 16384, this, 3, rx_stack_, rx_tcb_);
 
-    xTaskCreate(
+    tx_task_ = xTaskCreateStatic(
         [](void* arg) {
             auto* self = static_cast<GeminiLiveProtocol*>(arg);
             self->TxWorkerLoop();
             xEventGroupSetBits(self->worker_done_group_, kDoneTx);
             vTaskDelete(nullptr);
         },
-        "gemini_tx", 10240, this, 3, &tx_task_);
+        "gemini_tx", 10240, this, 3, tx_stack_, tx_tcb_);
 
-    xTaskCreate(
+    play_task_ = xTaskCreateStatic(
         [](void* arg) {
             auto* self = static_cast<GeminiLiveProtocol*>(arg);
             self->PlaybackFeederLoop();
             xEventGroupSetBits(self->worker_done_group_, kDonePlay);
             vTaskDelete(nullptr);
         },
-        "gemini_play", 8192, this, 3, &play_task_);
+        "gemini_play", 10240, this, 4, play_stack_, play_tcb_);
 
     std::string setup_msg = BuildSetupJson(model_name, voice_name, lang_code, include_lang_code);
     if (!websocket_->Send(setup_msg)) {

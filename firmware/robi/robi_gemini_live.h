@@ -134,6 +134,12 @@ private:
     TaskHandle_t rx_task_ = nullptr;
     TaskHandle_t tx_task_ = nullptr;
     TaskHandle_t play_task_ = nullptr;
+    StackType_t* rx_stack_ = nullptr;
+    StaticTask_t* rx_tcb_ = nullptr;
+    StackType_t* tx_stack_ = nullptr;
+    StaticTask_t* tx_tcb_ = nullptr;
+    StackType_t* play_stack_ = nullptr;
+    StaticTask_t* play_tcb_ = nullptr;
 };
 
 #endif  // ROBI_GEMINI_LIVE_H_
