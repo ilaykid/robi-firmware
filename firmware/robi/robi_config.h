@@ -103,6 +103,7 @@ private:
     void SaveMemoriesToNvsLocked();
     void LoadUsageFromNvsLocked();
     void SaveUsageToNvsLocked();
+    void FlushNvsFromInternalStack();
     RobiModelUsage& FindOrCreateModelUsageLocked(const std::string& model_id);
     void TryImportFlashSectorLocked();
 

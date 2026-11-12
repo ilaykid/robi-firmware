@@ -35,6 +35,9 @@ constexpr const char* kFlashMagic = "ROBICFG1";
 // connect_queue_ to the working router BSSID, and remember the working BSSID in NVS.
 bool s_wifi_guard_installed = false;
 esp_timer_handle_t s_dhcp_watchdog_timer = nullptr;
+esp_timer_handle_t s_nvs_flush_timer = nullptr;
+bool s_mem_dirty = false;
+bool s_usage_dirty = false;
 std::array<uint8_t, 6> s_cur_bssid = {};
 std::array<uint8_t, 6> s_good_bssid = {};
 bool s_good_bssid_valid = false;
@@ -621,21 +624,71 @@ void RobiConfig::LoadMemoriesFromNvsLocked() {
     nvs_close(h);
 }
 
-void RobiConfig::SaveMemoriesToNvsLocked() {
-    cJSON* arr = cJSON_CreateArray();
-    for (const auto& m : memories_) {
-        cJSON_AddItemToArray(arr, cJSON_CreateString(m.c_str()));
+void RobiConfig::FlushNvsFromInternalStack() {
+    std::string mem_raw;
+    std::string usage_raw;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (s_mem_dirty) {
+            s_mem_dirty = false;
+            cJSON* arr = cJSON_CreateArray();
+            for (const auto& m : memories_) {
+                cJSON_AddItemToArray(arr, cJSON_CreateString(m.c_str()));
+            }
+            char* printed = cJSON_PrintUnformatted(arr);
+            mem_raw = printed ? printed : "[]";
+            if (printed) cJSON_free(printed);
+            cJSON_Delete(arr);
+        }
+        if (s_usage_dirty) {
+            s_usage_dirty = false;
+            cJSON* obj = cJSON_CreateObject();
+            cJSON_AddStringToObject(obj, "day", usage_day_.c_str());
+            cJSON* arr = cJSON_CreateArray();
+            for (const auto& mu : model_usage_) {
+                cJSON* item = cJSON_CreateObject();
+                cJSON_AddStringToObject(item, "id", mu.id.c_str());
+                cJSON_AddNumberToObject(item, "s", mu.sessions);
+                cJSON_AddNumberToObject(item, "t", mu.turns);
+                cJSON_AddNumberToObject(item, "a", mu.audio_sec);
+                cJSON_AddNumberToObject(item, "tok", mu.tokens);
+                cJSON_AddItemToArray(arr, item);
+            }
+            cJSON_AddItemToObject(obj, "models", arr);
+            char* printed = cJSON_PrintUnformatted(obj);
+            usage_raw = printed ? printed : "{}";
+            if (printed) cJSON_free(printed);
+            cJSON_Delete(obj);
+        }
     }
-    char* printed = cJSON_PrintUnformatted(arr);
-    std::string raw = printed ? printed : "[]";
-    if (printed) cJSON_free(printed);
-    cJSON_Delete(arr);
+
+    if (mem_raw.empty() && usage_raw.empty()) return;
 
     nvs_handle_t h = 0;
     if (nvs_open(kNvsNsMem, NVS_READWRITE, &h) == ESP_OK) {
-        nvs_set_blob(h, kNvsKeyMemJson, raw.data(), raw.size());
+        if (!mem_raw.empty()) {
+            nvs_set_blob(h, kNvsKeyMemJson, mem_raw.data(), mem_raw.size());
+        }
+        if (!usage_raw.empty()) {
+            nvs_set_blob(h, kNvsKeyUsageJson, usage_raw.data(), usage_raw.size());
+        }
         nvs_commit(h);
         nvs_close(h);
+    }
+}
+
+void RobiConfig::SaveMemoriesToNvsLocked() {
+    s_mem_dirty = true;
+    if (s_nvs_flush_timer == nullptr) {
+        esp_timer_create_args_t targs = {};
+        targs.callback = [](void*) { RobiConfig::GetInstance().FlushNvsFromInternalStack(); };
+        targs.dispatch_method = ESP_TIMER_TASK;
+        targs.name = "robi_nvs_fl";
+        esp_timer_create(&targs, &s_nvs_flush_timer);
+    }
+    if (s_nvs_flush_timer != nullptr) {
+        esp_timer_stop(s_nvs_flush_timer);
+        esp_timer_start_once(s_nvs_flush_timer, 80000ULL);  // 80ms debounce on Internal SRAM timer task
     }
 }
 
@@ -716,29 +769,17 @@ void RobiConfig::LoadUsageFromNvsLocked() {
 }
 
 void RobiConfig::SaveUsageToNvsLocked() {
-    cJSON* obj = cJSON_CreateObject();
-    cJSON_AddStringToObject(obj, "day", usage_day_.c_str());
-    cJSON* arr = cJSON_CreateArray();
-    for (const auto& mu : model_usage_) {
-        cJSON* item = cJSON_CreateObject();
-        cJSON_AddStringToObject(item, "id", mu.id.c_str());
-        cJSON_AddNumberToObject(item, "s", mu.sessions);
-        cJSON_AddNumberToObject(item, "t", mu.turns);
-        cJSON_AddNumberToObject(item, "a", mu.audio_sec);
-        cJSON_AddNumberToObject(item, "tok", mu.tokens);
-        cJSON_AddItemToArray(arr, item);
+    s_usage_dirty = true;
+    if (s_nvs_flush_timer == nullptr) {
+        esp_timer_create_args_t targs = {};
+        targs.callback = [](void*) { RobiConfig::GetInstance().FlushNvsFromInternalStack(); };
+        targs.dispatch_method = ESP_TIMER_TASK;
+        targs.name = "robi_nvs_fl";
+        esp_timer_create(&targs, &s_nvs_flush_timer);
     }
-    cJSON_AddItemToObject(obj, "models", arr);
-    char* printed = cJSON_PrintUnformatted(obj);
-    std::string raw = printed ? printed : "{}";
-    if (printed) cJSON_free(printed);
-    cJSON_Delete(obj);
-
-    nvs_handle_t h = 0;
-    if (nvs_open(kNvsNsMem, NVS_READWRITE, &h) == ESP_OK) {
-        nvs_set_blob(h, kNvsKeyUsageJson, raw.data(), raw.size());
-        nvs_commit(h);
-        nvs_close(h);
+    if (s_nvs_flush_timer != nullptr) {
+        esp_timer_stop(s_nvs_flush_timer);
+        esp_timer_start_once(s_nvs_flush_timer, 80000ULL);  // 80ms debounce on Internal SRAM timer task
     }
 }
 
