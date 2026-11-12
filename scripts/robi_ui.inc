@@ -1594,7 +1594,7 @@ private:
                  robi_last_emotion_, static_cast<int>(robi_face_mode_),
                  static_cast<int>(robi_theme_id_), static_cast<int>(robi_face_style_),
                  face_y_, face_scale_, last_hint_txt_.c_str(),
-                 robi_setup_lbl_ ? static_cast<int>(lv_obj_get_style_base_dir(robi_setup_lbl_, 0)) : -1,
+                 robi_setup_lbl_ ? static_cast<int>(lv_obj_get_style_base_dir(robi_setup_lbl_, LV_PART_MAIN)) : -1,
                  open_menu);
 
         std::string out(head);
