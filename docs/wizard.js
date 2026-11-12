@@ -104,15 +104,19 @@ function loadDraft() {
     if (Array.isArray(saved.kids)) state.kids = saved.kids.slice(0, 3);
     if (saved.wake_variant) state.wake_variant = saved.wake_variant;
     if (saved.wifi_ssid) state.wifi_ssid = saved.wifi_ssid;
-    if (saved.wifi_pass) state.wifi_pass = saved.wifi_pass;
-    if (saved.gemini_key) state.gemini_key = saved.gemini_key;
+    // Security: scrub any legacy plaintext secrets from localStorage immediately
+    if (saved.gemini_key || saved.wifi_pass) {
+      delete saved.gemini_key;
+      delete saved.wifi_pass;
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(saved));
+    }
   } catch (_) {}
 }
 
 function saveDraft() {
   try {
+    // Security: never store gemini_key or wifi_pass in persistent browser localStorage
     const safeCopy = {
-      gemini_key: state.gemini_key,
       preferred_model: state.preferred_model,
       robot_name: state.robot_name,
       language: state.language,
@@ -126,7 +130,6 @@ function saveDraft() {
       kids: state.kids,
       wake_variant: state.wake_variant,
       wifi_ssid: state.wifi_ssid,
-      wifi_pass: state.wifi_pass,
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(safeCopy));
   } catch (_) {}

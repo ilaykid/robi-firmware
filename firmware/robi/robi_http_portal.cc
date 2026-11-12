@@ -313,12 +313,12 @@ function addKid(){
 function removeKid(i){state.kids.splice(i,1);renderKids();}
 
 async function sendCtrl(body){
-  try{await fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});}catch(e){}
+  try{await fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/json','X-Robi-Token':'1'},body:JSON.stringify(body)});}catch(e){}
 }
 function testEmo(e){sendCtrl({emotion:e});}
 
 async function clearMem(){
-  await fetch('/api/memory/clear',{method:'POST'});
+  await fetch('/api/memory/clear',{method:'POST',headers:{'X-Robi-Token':'1'}});
   document.getElementById('memList').innerHTML='<li>אין זיכרונות שמורים עדיין</li>';
   showToast('הזיכרונות נוקו');
 }
@@ -410,7 +410,7 @@ async function saveAll(){
     kids:state.kids.filter(k=>k.name&&k.name.trim())
   };
   try{
-    const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json','X-Robi-Token':'1'},body:JSON.stringify(payload)});
     if(!r.ok)throw new Error('שגיאה בשמירה');
     document.getElementById('geminiKey').value='';
     showToast('ההגדרות נשמרו והוחלו על רובי!');
@@ -505,7 +505,32 @@ esp_err_t ReadBody(httpd_req_t* req, std::string& out, size_t max_len) {
     return ESP_OK;
 }
 
+bool VerifyCsrfHeader(httpd_req_t* req) {
+    char tok[16] = {};
+    if (httpd_req_get_hdr_value_str(req, "X-Robi-Token", tok, sizeof(tok)) != ESP_OK ||
+        std::strcmp(tok, "1") != 0) {
+        httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "Missing CSRF token");
+        return false;
+    }
+    char origin[128] = {};
+    if (httpd_req_get_hdr_value_str(req, "Origin", origin, sizeof(origin)) == ESP_OK && origin[0] != '\0') {
+        bool allowed = (std::strncmp(origin, "http://robi.local", 17) == 0) ||
+                       (std::strncmp(origin, "http://robi", 11) == 0) ||
+                       (std::strncmp(origin, "http://192.168.", 15) == 0) ||
+                       (std::strncmp(origin, "http://10.", 10) == 0) ||
+                       (std::strncmp(origin, "http://172.", 11) == 0);
+        if (!allowed) {
+            httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "Origin not allowed");
+            return false;
+        }
+    }
+    return true;
+}
+
 esp_err_t HandleConfigPost(httpd_req_t* req) {
+    if (!VerifyCsrfHeader(req)) {
+        return ESP_FAIL;
+    }
     std::string body;
     if (ReadBody(req, body, RobiConfig::kMaxConfigJsonBytes) != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid body");
@@ -657,22 +682,6 @@ esp_err_t HandleStatusGet(httpd_req_t* req) {
     }
     cJSON_AddItemToObject(root, "memories", mems);
 
-    cJSON* dlg = cJSON_CreateArray();
-    for (const auto& d : RobiConfig::GetInstance().GetDialogue()) {
-        cJSON* item = cJSON_CreateObject();
-        cJSON_AddStringToObject(item, "role", d.first.c_str());
-        cJSON_AddStringToObject(item, "text", d.second.c_str());
-        cJSON_AddItemToArray(dlg, item);
-    }
-    cJSON_AddItemToObject(root, "dialogue", dlg);
-
-    std::string ui_json_str = RobiConfig::GetInstance().GetUiStatusJson();
-    if (!ui_json_str.empty()) {
-        if (cJSON* ui_obj = cJSON_ParseWithLength(ui_json_str.data(), ui_json_str.size())) {
-            cJSON_AddItemToObject(root, "ui", ui_obj);
-        }
-    }
-
     char* s = cJSON_PrintUnformatted(root);
     std::string out = s ? s : "{}";
     if (s) cJSON_free(s);
@@ -683,7 +692,9 @@ esp_err_t HandleStatusGet(httpd_req_t* req) {
 }
 
 esp_err_t HandleMemoryClearPost(httpd_req_t* req) {
-    (void)req;
+    if (!VerifyCsrfHeader(req)) {
+        return ESP_FAIL;
+    }
     RobiConfig::GetInstance().ClearMemoryNotes();
     httpd_resp_set_type(req, "application/json; charset=utf-8");
     const char* ok = "{\"ok\":true}";
@@ -691,6 +702,9 @@ esp_err_t HandleMemoryClearPost(httpd_req_t* req) {
 }
 
 esp_err_t HandleControlPost(httpd_req_t* req) {
+    if (!VerifyCsrfHeader(req)) {
+        return ESP_FAIL;
+    }
     std::string body;
     if (ReadBody(req, body, 1024) != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Bad request");
@@ -725,23 +739,6 @@ esp_err_t HandleControlPost(httpd_req_t* req) {
             }
         });
     }
-    const cJSON* say = cJSON_GetObjectItemCaseSensitive(root, "say");
-    if (cJSON_IsString(say) && say->valuestring != nullptr && say->valuestring[0] != '\0') {
-        std::string s_str = say->valuestring;
-        if (auto* proto = GeminiLiveProtocol::GetActiveInstance()) {
-            proto->InjectUserPromptTurn(s_str);
-        } else {
-            Application::GetInstance().Schedule([s_str]() {
-                Application::GetInstance().WakeWordInvoke(s_str);
-            });
-        }
-    }
-    const cJSON* sim_mic = cJSON_GetObjectItemCaseSensitive(root, "sim_mic_ms");
-    if (cJSON_IsNumber(sim_mic)) {
-        if (auto* proto = GeminiLiveProtocol::GetActiveInstance()) {
-            proto->SimulateMicUtterance(sim_mic->valueint);
-        }
-    }
     if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "close_channel"))) {
         Application::GetInstance().Schedule([]() {
             if (auto* proto = GeminiLiveProtocol::GetActiveInstance()) {
@@ -753,16 +750,6 @@ esp_err_t HandleControlPost(httpd_req_t* req) {
     }
     if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "reboot"))) {
         Application::GetInstance().Schedule([]() { Application::GetInstance().Reboot(); });
-    }
-    const cJSON* open_kid = cJSON_GetObjectItemCaseSensitive(root, "open_kid");
-    if (cJSON_IsNumber(open_kid)) {
-        int k_idx = open_kid->valueint;
-        Application::GetInstance().Schedule([k_idx]() {
-            if (auto* disp = Board::GetInstance().GetDisplay()) {
-                std::string cmd = "kid:" + std::to_string(k_idx);
-                disp->SetEmotion(cmd.c_str());
-            }
-        });
     }
     if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "reset_usage"))) {
         RobiConfig::GetInstance().ResetDailyUsage();

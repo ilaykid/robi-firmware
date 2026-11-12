@@ -312,8 +312,13 @@ void RobiConfig::TryImportFlashSectorLocked() {
         nvs_close(h);
     }
 
+    uint32_t erase_len = ((16u + json_len + 4095u) / 4096u) * 4096u;
     if (sig == stored_sig) {
-        return;  // Already imported on an earlier boot
+        // Security: wipe legacy leftover ROBICFG1 sector from raw flash 0x010000
+        esp_flash_erase_region(nullptr, kFlashConfigAddr, erase_len);
+        ESP_LOGI(TAG, "Wiped legacy ROBICFG1 staging sector at 0x%06X (%lu bytes)",
+                 static_cast<unsigned>(kFlashConfigAddr), static_cast<unsigned long>(erase_len));
+        return;
     }
 
     ESP_LOGI(TAG, "Importing new WebSerial config from 0x%06X (%lu bytes, seq=%lu)",
@@ -344,12 +349,16 @@ void RobiConfig::TryImportFlashSectorLocked() {
     }
 
     std::string clean_json = SerializeLocked(false);
-    SaveConfigToNvsLocked(clean_json);
-
-    if (nvs_open(kNvsNsCfg, NVS_READWRITE, &h) == ESP_OK) {
-        nvs_set_u32(h, kNvsKeyFlashSig, sig);
-        nvs_commit(h);
-        nvs_close(h);
+    if (SaveConfigToNvsLocked(clean_json)) {
+        if (nvs_open(kNvsNsCfg, NVS_READWRITE, &h) == ESP_OK) {
+            nvs_set_u32(h, kNvsKeyFlashSig, sig);
+            nvs_commit(h);
+            nvs_close(h);
+        }
+        // Security: immediately erase staging sector 0x010000 so plaintext credentials never linger in raw flash
+        esp_flash_erase_region(nullptr, kFlashConfigAddr, erase_len);
+        ESP_LOGI(TAG, "Erased ROBICFG1 staging sector at 0x%06X (%lu bytes) after NVS import",
+                 static_cast<unsigned>(kFlashConfigAddr), static_cast<unsigned long>(erase_len));
     }
 }
 
