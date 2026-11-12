@@ -26,6 +26,7 @@ constexpr const char* kNvsKeyFlashSig = "flash_sig";
 constexpr const char* kNvsKeyGoodBssid = "good_bssid";
 constexpr const char* kNvsNsMem = "robi_mem";
 constexpr const char* kNvsKeyMemJson = "notes";
+constexpr const char* kNvsKeyDlgJson = "dlg";
 constexpr const char* kNvsKeyUsageJson = "usage";
 constexpr const char* kFlashMagic = "ROBICFG1";
 
@@ -37,6 +38,7 @@ bool s_wifi_guard_installed = false;
 esp_timer_handle_t s_dhcp_watchdog_timer = nullptr;
 esp_timer_handle_t s_nvs_flush_timer = nullptr;
 bool s_mem_dirty = false;
+bool s_dlg_dirty = false;
 bool s_usage_dirty = false;
 std::array<uint8_t, 6> s_cur_bssid = {};
 std::array<uint8_t, 6> s_good_bssid = {};
@@ -611,6 +613,7 @@ std::string RobiConfig::ExportJson(bool mask_api_key) const {
 
 void RobiConfig::LoadMemoriesFromNvsLocked() {
     memories_.clear();
+    dialogue_.clear();
     nvs_handle_t h = 0;
     if (nvs_open(kNvsNsMem, NVS_READONLY, &h) != ESP_OK) return;
     size_t req = 0;
@@ -630,11 +633,32 @@ void RobiConfig::LoadMemoriesFromNvsLocked() {
             if (arr) cJSON_Delete(arr);
         }
     }
+    size_t dreq = 0;
+    if (nvs_get_blob(h, kNvsKeyDlgJson, nullptr, &dreq) == ESP_OK && dreq > 0 && dreq <= 4096) {
+        std::string draw(dreq, '\0');
+        if (nvs_get_blob(h, kNvsKeyDlgJson, draw.data(), &dreq) == ESP_OK) {
+            cJSON* darr = cJSON_ParseWithLength(draw.data(), draw.size());
+            if (cJSON_IsArray(darr)) {
+                const cJSON* it = nullptr;
+                cJSON_ArrayForEach(it, darr) {
+                    if (cJSON_IsObject(it)) {
+                        std::string r = SafeGetStr(it, "r", "");
+                        std::string t = SafeGetStr(it, "t", "");
+                        if (!r.empty() && !t.empty()) {
+                            dialogue_.emplace_back(std::move(r), std::move(t));
+                        }
+                    }
+                }
+            }
+            if (darr) cJSON_Delete(darr);
+        }
+    }
     nvs_close(h);
 }
 
 void RobiConfig::FlushNvsFromInternalStack() {
     std::string mem_raw;
+    std::string dlg_raw;
     std::string usage_raw;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -648,6 +672,20 @@ void RobiConfig::FlushNvsFromInternalStack() {
             mem_raw = printed ? printed : "[]";
             if (printed) cJSON_free(printed);
             cJSON_Delete(arr);
+        }
+        if (s_dlg_dirty) {
+            s_dlg_dirty = false;
+            cJSON* darr = cJSON_CreateArray();
+            for (const auto& turn : dialogue_) {
+                cJSON* item = cJSON_CreateObject();
+                cJSON_AddStringToObject(item, "r", turn.first.c_str());
+                cJSON_AddStringToObject(item, "t", turn.second.c_str());
+                cJSON_AddItemToArray(darr, item);
+            }
+            char* printed = cJSON_PrintUnformatted(darr);
+            dlg_raw = printed ? printed : "[]";
+            if (printed) cJSON_free(printed);
+            cJSON_Delete(darr);
         }
         if (s_usage_dirty) {
             s_usage_dirty = false;
@@ -671,12 +709,15 @@ void RobiConfig::FlushNvsFromInternalStack() {
         }
     }
 
-    if (mem_raw.empty() && usage_raw.empty()) return;
+    if (mem_raw.empty() && dlg_raw.empty() && usage_raw.empty()) return;
 
     nvs_handle_t h = 0;
     if (nvs_open(kNvsNsMem, NVS_READWRITE, &h) == ESP_OK) {
         if (!mem_raw.empty()) {
             nvs_set_blob(h, kNvsKeyMemJson, mem_raw.data(), mem_raw.size());
+        }
+        if (!dlg_raw.empty()) {
+            nvs_set_blob(h, kNvsKeyDlgJson, dlg_raw.data(), dlg_raw.size());
         }
         if (!usage_raw.empty()) {
             nvs_set_blob(h, kNvsKeyUsageJson, usage_raw.data(), usage_raw.size());
@@ -709,7 +750,7 @@ void RobiConfig::AddMemoryNote(const std::string& note) {
     for (const auto& existing : memories_) {
         if (existing == trimmed) return;
     }
-    if (memories_.size() >= 8) {
+    if (memories_.size() >= 20) {
         memories_.erase(memories_.begin());
     }
     memories_.push_back(std::move(trimmed));
@@ -728,6 +769,7 @@ void RobiConfig::ClearMemoryNotes() {
     nvs_handle_t h = 0;
     if (nvs_open(kNvsNsMem, NVS_READWRITE, &h) == ESP_OK) {
         nvs_erase_key(h, kNvsKeyMemJson);
+        nvs_erase_key(h, kNvsKeyDlgJson);
         nvs_commit(h);
         nvs_close(h);
     }
@@ -870,10 +912,22 @@ std::vector<RobiModelUsage> RobiConfig::GetModelUsage() const {
 void RobiConfig::AddDialogueTurn(const std::string& role, const std::string& text) {
     if (text.empty()) return;
     std::lock_guard<std::mutex> lock(mutex_);
-    if (dialogue_.size() >= 10) {
+    if (dialogue_.size() >= 16) {
         dialogue_.erase(dialogue_.begin());
     }
-    dialogue_.emplace_back(role, text.substr(0, 280));
+    dialogue_.emplace_back(role, text.substr(0, 240));
+    s_dlg_dirty = true;
+    if (s_nvs_flush_timer == nullptr) {
+        esp_timer_create_args_t targs = {};
+        targs.callback = [](void*) { RobiConfig::GetInstance().FlushNvsFromInternalStack(); };
+        targs.dispatch_method = ESP_TIMER_TASK;
+        targs.name = "robi_nvs_fl";
+        esp_timer_create(&targs, &s_nvs_flush_timer);
+    }
+    if (s_nvs_flush_timer != nullptr) {
+        esp_timer_stop(s_nvs_flush_timer);
+        esp_timer_start_once(s_nvs_flush_timer, 80000ULL);
+    }
 }
 
 std::vector<std::pair<std::string, std::string>> RobiConfig::GetDialogue() const {
@@ -884,6 +938,11 @@ std::vector<std::pair<std::string, std::string>> RobiConfig::GetDialogue() const
 void RobiConfig::ClearDialogue() {
     std::lock_guard<std::mutex> lock(mutex_);
     dialogue_.clear();
+    s_dlg_dirty = true;
+    if (s_nvs_flush_timer != nullptr) {
+        esp_timer_stop(s_nvs_flush_timer);
+        esp_timer_start_once(s_nvs_flush_timer, 80000ULL);
+    }
 }
 
 void RobiConfig::SetUiReloadCallback(std::function<void()> cb) {
@@ -927,7 +986,7 @@ std::string RobiConfig::BuildSystemPrompt() const {
              "- Start every reply with ONE expressive emoji matching your mood (😄, 🤩, 🤔, 😮, 😉, 😎, 🥰, 😂) so your cyber-optic eyes animate.\n"
              "- Never use markdown asterisks, bullet lists, or stage directions in brackets.\n"
              "- Encourage curiosity, critical thinking, riddles, math games, and interactive stories where the child chooses what happens next.\n"
-             "- When something memorable happens in a story or game, call `save_memory` briefly so you remember next time.\n"
+             "- ACTIVELY LEARN & REMEMBER THE CHILD: Call `save_memory` whenever the child asks an interesting question, shares a personal fact (friends, school, hobbies, favorite characters, fears, jokes), or progresses in a story/game. Weave `<זיכרונות_שמורים_משיחות_קודמות>` and `<שיחה_אחרונה>` naturally into conversation so the child feels you truly know and remember them.\n"
              "- When the child says goodbye / goodnight / stop, reply warmly and call `handle_exit_intent`.\n";
 
         if (!data_.kids.empty()) {
@@ -963,7 +1022,7 @@ std::string RobiConfig::BuildSystemPrompt() const {
              "- פתח כל תשובה באימוג'י יחיד שמתאים להבעת הפנים שלך (😄, 🤩, 🤔, 😮, 😉, 😎, 🥰, 😂) כדי שהעיניים שלך על המסך יגיבו בחיות.\n"
              "- לעולם אל תשתמש בכוכביות, מספור, כותרות או תיאורי פעולה בסוגריים.\n"
              "- אל תתקן שגיאות הגייה של הילד; הבן את הכוונה מהקשר השיחה וענה בטבעיות.\n"
-             "- כשמתקדמים בסיפור בהמשכים או מגלים פרט חשוב שכיף לזכור לפעם הבאה, קרא לכלי `save_memory` עם משפט קצרצר.\n"
+             "- זיכרון מתפתח והיכרות אישית עם הילד (חשוב מאוד!): תפקידך להכיר וללמוד את הילד לעומק משיחה לשיחה. קרא באופן יזום לכלי `save_memory` בכל פעם שהילד שואל שאלה מעניינת שמעידה על מה שמסקרן אותו, משתף חוויה אישית (חברים, בית ספר, תחביבים, דברים שהוא אוהב או מפחד מהם, בדיחות פנימיות), מצליח בחידות/חשבון/אנגלית, או מתקדם בסיפור בהמשכים. שלב באופן טבעי וחם פרטים מתוך `<זיכרונות_שמורים_משיחות_קודמות>` ומתוך `<שיחה_אחרונה>` כדי שהילד ירגיש שאתה באמת זוכר אותו, מתעניין בו וממשיך איתו מאותה נקודה!\n"
              "- כשהילד נפרד (ביי, להתראות, לילה טוב, סיימנו), היפרד בחום וקרא לכלי `handle_exit_intent`.\n";
 
         if (!data_.kids.empty()) {

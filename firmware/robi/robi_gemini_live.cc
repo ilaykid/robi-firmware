@@ -379,7 +379,7 @@ std::string GeminiLiveProtocol::BuildSetupJson(const std::string& model_name,
         cJSON_AddStringToObject(fn, "name", "save_memory");
         cJSON_AddStringToObject(
             fn, "description",
-            "Save a short note (up to 180 chars) about an ongoing story, child preference, or milestone so you remember it next time.");
+            "Save a short note (up to 200 chars) in Hebrew or English whenever the child asks an interesting question, reveals a personal detail/friend/hobby/preference, solves a challenge, or progresses in a story so you learn about the child and remember next time.");
         cJSON* params = cJSON_CreateObject();
         cJSON_AddStringToObject(params, "type", "OBJECT");
         cJSON* props = cJSON_CreateObject();
