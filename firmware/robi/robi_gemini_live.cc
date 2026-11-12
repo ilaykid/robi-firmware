@@ -12,6 +12,7 @@
 #include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <esp_timer.h>
+#include <esp_tls.h>
 #include <mbedtls/base64.h>
 #include <wifi_manager.h>
 
@@ -20,6 +21,34 @@
 #include <cstring>
 
 #define TAG "GeminiLive"
+
+extern "C" {
+
+int __real_esp_tls_conn_new_sync(const char* hostname, int hostlen, int port,
+                                 const esp_tls_cfg_t* cfg, esp_tls_t* tls);
+
+int __wrap_esp_tls_conn_new_sync(const char* hostname, int hostlen, int port,
+                                 const esp_tls_cfg_t* cfg, esp_tls_t* tls) {
+    if (cfg != nullptr) {
+        esp_tls_cfg_t patched = *cfg;
+        if (patched.timeout_ms <= 0) {
+            patched.timeout_ms = 8000;
+        }
+        return __real_esp_tls_conn_new_sync(hostname, hostlen, port, &patched, tls);
+    }
+    return __real_esp_tls_conn_new_sync(hostname, hostlen, port, cfg, tls);
+}
+
+ssize_t __real_esp_tls_conn_read(esp_tls_t* tls, void* data, size_t datalen);
+
+ssize_t __wrap_esp_tls_conn_read(esp_tls_t* tls, void* data, size_t datalen) {
+    if (uxTaskPriorityGet(nullptr) < 5) {
+        vTaskPrioritySet(nullptr, 5);
+    }
+    return __real_esp_tls_conn_read(tls, data, datalen);
+}
+
+}  // extern "C"
 
 namespace {
 
@@ -350,6 +379,7 @@ bool GeminiLiveProtocol::TryConnectModel(const std::string& api_key, const std::
     awaiting_response_.store(false);
     awaiting_since_us_.store(0);
     tool_hold_until_us_.store(0);
+    last_rx_audio_us_.store(esp_timer_get_time());
     awaiting_nudges_ = 0;
     idle_farewell_sent_ = false;
     last_activity_us_.store(esp_timer_get_time());
@@ -397,10 +427,18 @@ bool GeminiLiveProtocol::TryConnectModel(const std::string& api_key, const std::
         api_key;
 
     ESP_LOGI(TAG, "Connecting to Gemini Live (%s / %s)...", model_name.c_str(), voice_name.c_str());
-    auto connected = websocket_->Connect(url.c_str());
-    if (!connected) {
-        ESP_LOGW(TAG, "Connect failed (%s): %s", model_name.c_str(),
+    bool ws_ok = false;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        auto connected = websocket_->Connect(url.c_str());
+        if (connected) {
+            ws_ok = true;
+            break;
+        }
+        ESP_LOGW(TAG, "Connect attempt %d failed (%s): %s", attempt + 1, model_name.c_str(),
                  connected.error().ToString().c_str());
+        vTaskDelay(pdMS_TO_TICKS(300));
+    }
+    if (!ws_ok) {
         websocket_.reset();
         return false;
     }
@@ -1099,7 +1137,9 @@ void GeminiLiveProtocol::RxWorkerLoop() {
                             reinterpret_cast<const unsigned char*>(b64_item->valuestring),
                             b64_len) == 0 &&
                         decoded_len >= 2) {
-                        last_activity_us_.store(esp_timer_get_time());
+                        int64_t now_rx_us = esp_timer_get_time();
+                        last_activity_us_.store(now_rx_us);
+                        last_rx_audio_us_.store(now_rx_us);
                         awaiting_response_.store(false);
                         tool_hold_until_us_.store(0);
                         turn_complete_.store(false);
@@ -1230,8 +1270,9 @@ void GeminiLiveProtocol::PlaybackFeederLoop() {
         }
 
         avail = RingAvailable();
+        int64_t idle_rx_us = esp_timer_get_time() - last_rx_audio_us_.load();
         size_t pop_threshold = rebuffer_needed ? kRebufferSamples : kPlaybackFrameSamples;
-        if (avail >= pop_threshold || (turn_complete_.load() && avail > 0)) {
+        if (avail >= pop_threshold || ((turn_complete_.load() || idle_rx_us > 450000LL) && avail > 0)) {
             if (rebuffer_needed) {
                 rebuffer_needed = false;
                 initial_burst_left = 4;  // Preload 200ms after mid-turn rebuffer
@@ -1296,10 +1337,17 @@ void GeminiLiveProtocol::PlaybackFeederLoop() {
         if (!turn_complete_.load()) {
             auto& as = Application::GetInstance().GetAudioService();
             if (as.IsPlaybackIdle()) {
-                // Hardware queue drained mid-turn due to network jitter; accumulate 200ms cushion before resuming
-                rebuffer_needed = true;
+                if (avail == 0 && idle_rx_us > 2200000LL) {
+                    ESP_LOGW(TAG, "Synthesizing turnComplete after 2.2s audio stream idle");
+                    turn_complete_.store(true);
+                } else {
+                    // Hardware queue drained mid-turn due to network jitter; accumulate 200ms cushion before resuming
+                    rebuffer_needed = true;
+                    continue;
+                }
+            } else {
+                continue;
             }
-            continue;
         }
 
         // Turn is complete and ring is completely drained; wait for hardware I2S DMA playback queue to drain

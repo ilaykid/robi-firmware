@@ -65,10 +65,31 @@ must_replace(
     "                        spi_flash\n                        nvs_flash\n"
     "                        esp_http_server\n                        mbedtls\n",
 )
+must_replace(
+    main_cmake,
+    "if(NOT CMAKE_BUILD_EARLY_EXPANSION)\n"
+    "    target_compile_options(${COMPONENT_LIB} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-std=gnu++23>)\n"
+    "endif()\n",
+    "if(NOT CMAKE_BUILD_EARLY_EXPANSION)\n"
+    "    target_compile_options(${COMPONENT_LIB} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-std=gnu++23>)\n"
+    '    target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=esp_tls_conn_new_sync" "-Wl,--wrap=esp_tls_conn_read")\n'
+    "endif()\n",
+)
 
 # 1. sdkconfig additions for standard Waveshare 1.75 build
 cfg = json.loads(board_cfg.read_text(encoding="utf-8"))
-extra = ["CONFIG_LV_USE_BIDI=y", "CONFIG_LV_BIDI_DIR_AUTO=y"]
+extra = [
+    "CONFIG_LV_USE_BIDI=y",
+    "CONFIG_LV_BIDI_DIR_AUTO=y",
+    "CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y",
+    "CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=8",
+    "CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=32",
+    "CONFIG_ESP_WIFI_RX_BA_WIN=16",
+    "CONFIG_LWIP_TCP_WND_DEFAULT=32768",
+    "CONFIG_LWIP_TCP_SND_BUF_DEFAULT=16384",
+    "CONFIG_LWIP_TCP_RECVMBOX_SIZE=32",
+    "CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=32",
+]
 if wake == "heyrobby":
     extra += [
         "CONFIG_USE_CUSTOM_WAKE_WORD=y",
@@ -295,14 +316,29 @@ must_replace(
     "                std::memcpy(task.pcm.data(), packet->payload.data(),\n"
     "                            task.pcm.size() * sizeof(int16_t));\n"
     "                decoded = !task.pcm.empty();\n"
-    "            } else {\n"
-    "                SetDecodeSampleRate(packet->sample_rate, packet->frame_duration);\n"
-    "            }\n"
-    "            if (packet->frame_duration != 0 && opus_decoder_ != nullptr) {\n",
+    "            } else if ((SetDecodeSampleRate(packet->sample_rate, packet->frame_duration),\n"
+    "                        opus_decoder_ != nullptr)) {\n",
 )
 
 # 6. Standalone Application boot (no cloud server activation, start local portal + GeminiLiveProtocol)
 app_cc = fw / "main/application.cc"
+must_replace(
+    app_cc,
+    "        case kDeviceStateSpeaking:\n"
+    "            display->SetStatus(Lang::Strings::SPEAKING);\n\n"
+    "            if (listening_mode_ != kListeningModeRealtime) {\n"
+    "                audio_service_.EnableVoiceProcessing(false);\n"
+    "                // Only AFE wake word can be detected in speaking mode\n"
+    "                audio_service_.EnableWakeWordDetection(audio_service_.IsAfeWakeWord());\n"
+    "            }\n",
+    "        case kDeviceStateSpeaking:\n"
+    "            display->SetStatus(Lang::Strings::SPEAKING);\n\n"
+    "            if (listening_mode_ != kListeningModeRealtime) {\n"
+    "                audio_service_.EnableVoiceProcessing(false);\n"
+    "                // Disable MultiNet7 + FD-AEC while speaking so CPU & WiFi TLS receive are 100% unstarved\n"
+    "                audio_service_.EnableWakeWordDetection(false);\n"
+    "            }\n",
+)
 must_replace(
     app_cc,
     '#include "websocket_protocol.h"\n',

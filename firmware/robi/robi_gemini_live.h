@@ -91,6 +91,7 @@ private:
     std::atomic<bool> awaiting_response_{false};
     std::atomic<int64_t> awaiting_since_us_{0};
     std::atomic<int64_t> tool_hold_until_us_{0};
+    std::atomic<int64_t> last_rx_audio_us_{0};
     std::atomic<uint32_t> turn_gen_{0};
     std::atomic<uint32_t> turns_completed_{0};
     std::atomic<uint32_t> audio_frames_played_{0};
