@@ -343,8 +343,8 @@ async function loadAll(){
 
     document.getElementById('statusBar').innerHTML=`
       <span class="pill">📶 ${esc(st.ssid||'WiFi')} (${st.rssi||0} dBm)</span>
-      <span class="pill">🌐 ${esc(st.ip||'')}</span>
-      <span class="pill">🔋 ${st.battery??100}% ${st.charging?'⚡':''}</span>`;
+      <span class="pill" dir="ltr">🌐 ${esc(st.ip||'robi.local')}</span>
+      <span class="pill" dir="ltr">🔋 ${st.battery??100}% ${st.charging?'⚡':''}</span>`;
     if(st.volume!==undefined){document.getElementById('volRange').value=st.volume;document.getElementById('volLbl').textContent=st.volume;}
     if(st.brightness!==undefined){document.getElementById('briRange').value=st.brightness;document.getElementById('briLbl').textContent=st.brightness;}
     const ml=document.getElementById('memList');

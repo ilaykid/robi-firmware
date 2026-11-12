@@ -329,14 +329,14 @@ private:
             p.mouth_w = 58.0f;
             p.mouth_curve = 5.0f;
         } else if (robi_face_style_ == ROBI_STYLE_VISOR_CYCLOPS) {
-            p.eye_w = 104.0f;
-            p.eye_h = 48.0f;
+            p.eye_w = 114.0f;
+            p.eye_h = 50.0f;
             p.eye_radius = 16.0f;
-            p.pupil_scale = 0.40f;
+            p.pupil_scale = 0.30f;
             p.brow_opa = 0.80f;
             p.brow_y_l = -4.0f;
             p.brow_y_r = -4.0f;
-            p.mouth_w = 64.0f;
+            p.mouth_w = 66.0f;
             p.mouth_curve = 5.0f;
             p.visor_opa = 0.92f;
         } else if (robi_face_style_ == ROBI_STYLE_OWL_MECH) {
@@ -842,10 +842,10 @@ private:
         bool voice_in = (robi_face_mode_ == ROBI_MODE_LISTENING) && Application::GetInstance().IsVoiceDetected();
         bool has_buttons = (robi_profiles_ != nullptr);
 
-        float idle_scale = has_buttons ? 0.94f : 1.04f;
-        float idle_fy = has_buttons ? 206.0f : 230.0f;
+        float idle_scale = has_buttons ? 0.96f : 1.06f;
+        float idle_fy = has_buttons ? 198.0f : 228.0f;
         float tgt_scale = (robi_face_mode_ == ROBI_MODE_IDLE) ? idle_scale : (voice_in ? 1.05f : 1.02f);
-        float tgt_fy = (robi_face_mode_ == ROBI_MODE_IDLE) ? idle_fy : 232.0f;
+        float tgt_fy = (robi_face_mode_ == ROBI_MODE_IDLE) ? idle_fy : 228.0f;
         float tgt_talk = (robi_face_mode_ == ROBI_MODE_SPEAKING) ? 1.0f : 0.0f;
 
         float k_fast = RobiClamp(dt * 14.0f, 0.0f, 1.0f);
@@ -1237,7 +1237,7 @@ private:
 
     void RobiUpdateSetupHintVisibility(bool idle) {
         if (robi_setup_hint_ == nullptr || robi_setup_lbl_ == nullptr) return;
-        if (!idle) {
+        if (!idle || RobiIsAnyMenuOpen()) {
             lv_obj_add_flag(robi_setup_hint_, LV_OBJ_FLAG_HIDDEN);
             return;
         }
@@ -1245,9 +1245,10 @@ private:
         std::string txt = ip.empty() ? "robi.local" : ip;
         if (txt != last_hint_txt_) {
             last_hint_txt_ = txt;
+            lv_obj_set_style_base_dir(robi_setup_lbl_, LV_BASE_DIR_LTR, 0);
             lv_label_set_text(robi_setup_lbl_, txt.c_str());
         }
-        lv_obj_align(robi_setup_hint_, LV_ALIGN_BOTTOM_MID, 0, -10);
+        lv_obj_align(robi_setup_hint_, LV_ALIGN_BOTTOM_MID, 0, -14);
         lv_obj_remove_flag(robi_setup_hint_, LV_OBJ_FLAG_HIDDEN);
     }
 
@@ -1423,6 +1424,7 @@ private:
 
         if (robi_face_ready_) {
             RobiApplyPreset(robi_last_emotion_, false);
+            cur_ = tgt_;
         }
 
         size_t n_kids = std::min<size_t>(cfg.kids.size(), kMaxKids);
@@ -1430,18 +1432,19 @@ private:
         robi_prompt_pool_.reserve(n_kids * 5 + 2);
 
         if (n_kids > 0) {
-            int btn_w = (n_kids == 1) ? 38 : ((n_kids == 2) ? 30 : 24);
-            int btn_h = (n_kids == 3) ? 13 : 14;
+            int btn_w_px = (n_kids == 1) ? 156 : ((n_kids == 2) ? 132 : 98);
+            int btn_h_px = 46;
 
-            robi_profiles_ = RobiBox(lv_screen_active(), 84, LV_FLEX_FLOW_ROW);
-            lv_obj_set_height(robi_profiles_, LV_VER_RES * 15 / 100);
-            lv_obj_set_flex_align(robi_profiles_, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-            lv_obj_align(robi_profiles_, LV_ALIGN_BOTTOM_MID, 0, -(LV_VER_RES * 10 / 100));
+            robi_profiles_ = RobiBox(lv_screen_active(), 82, LV_FLEX_FLOW_ROW);
+            lv_obj_set_height(robi_profiles_, 54);
+            lv_obj_set_flex_align(robi_profiles_, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+            lv_obj_set_style_pad_column(robi_profiles_, (n_kids == 3) ? 8 : 16, 0);
+            lv_obj_align(robi_profiles_, LV_ALIGN_BOTTOM_MID, 0, -56);
 
             for (size_t i = 0; i < n_kids; ++i) {
                 const auto& kid = cfg.kids[i];
-                lv_obj_t* menu = RobiBox(lv_screen_active(), 72, LV_FLEX_FLOW_ROW_WRAP);
-                lv_obj_align(menu, LV_ALIGN_BOTTOM_MID, 0, -(LV_VER_RES * 9 / 100));
+                lv_obj_t* menu = RobiBox(lv_screen_active(), 74, LV_FLEX_FLOW_ROW_WRAP);
+                lv_obj_align(menu, LV_ALIGN_BOTTOM_MID, 0, -48);
 
                 for (size_t a = 0; a < 4 && a < kid.activities.size(); ++a) {
                     std::string full_p =
@@ -1463,7 +1466,8 @@ private:
                 lv_obj_add_flag(menu, LV_OBJ_FLAG_HIDDEN);
                 robi_menus_[i] = menu;
 
-                RobiButton(robi_profiles_, kid.name.c_str(), kid.color_hex, btn_w, btn_h, OnProfile, menu);
+                lv_obj_t* kb = RobiButton(robi_profiles_, kid.name.c_str(), kid.color_hex, 28, 10, OnProfile, menu);
+                lv_obj_set_size(kb, btn_w_px, btn_h_px);
             }
 
             if (Application::GetInstance().GetDeviceState() != kDeviceStateIdle) {
@@ -1471,13 +1475,19 @@ private:
             }
         }
 
-        // Keep tap-to-interrupt overlay on top of any newly created profile/menu widgets
+        // Keep setup hint and tap-to-interrupt overlay on top of newly created profile/menu widgets
+        if (robi_setup_hint_ != nullptr) {
+            lv_obj_move_foreground(robi_setup_hint_);
+        }
         if (robi_tap_ != nullptr) {
             lv_obj_move_foreground(robi_tap_);
         }
 
         bool is_idle = (Application::GetInstance().GetDeviceState() == kDeviceStateIdle);
         RobiUpdateSetupHintVisibility(is_idle);
+        if (robi_face_ready_) {
+            RobiStepFace();
+        }
     }
 
     void RobiSetupUI() {
@@ -1485,22 +1495,24 @@ private:
         RobiConfig::GetInstance().EnsureLoaded();
         SetHideSubtitle(true);
 
-        // First-time setup hint pill shown only if Gemini API key has not been configured yet
+        // Compact bottom status pill showing LAN IP / robi.local in LTR direction
         robi_setup_hint_ = lv_obj_create(lv_screen_active());
         lv_obj_set_size(robi_setup_hint_, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
         lv_obj_set_style_radius(robi_setup_hint_, LV_RADIUS_CIRCLE, 0);
-        lv_obj_set_style_bg_color(robi_setup_hint_, lv_color_hex(0x0F172A), 0);
-        lv_obj_set_style_bg_opa(robi_setup_hint_, LV_OPA_90, 0);
+        lv_obj_set_style_bg_color(robi_setup_hint_, lv_color_hex(0x0B1528), 0);
+        lv_obj_set_style_bg_opa(robi_setup_hint_, LV_OPA_80, 0);
         lv_obj_set_style_border_width(robi_setup_hint_, 1, 0);
-        lv_obj_set_style_border_color(robi_setup_hint_, lv_color_hex(0x00E5FF), 0);
-        lv_obj_set_style_pad_hor(robi_setup_hint_, 14, 0);
-        lv_obj_set_style_pad_ver(robi_setup_hint_, 6, 0);
+        lv_obj_set_style_border_color(robi_setup_hint_, lv_color_hex(0x1E3A5F), 0);
+        lv_obj_set_style_pad_hor(robi_setup_hint_, 12, 0);
+        lv_obj_set_style_pad_ver(robi_setup_hint_, 3, 0);
+        lv_obj_set_style_base_dir(robi_setup_hint_, LV_BASE_DIR_LTR, 0);
         lv_obj_remove_flag(robi_setup_hint_, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_remove_flag(robi_setup_hint_, LV_OBJ_FLAG_SCROLLABLE);
         robi_setup_lbl_ = lv_label_create(robi_setup_hint_);
-        lv_label_set_text(robi_setup_lbl_, "הגדרות: robi.local");
-        lv_obj_set_style_text_color(robi_setup_lbl_, lv_color_hex(0x67E8F9), 0);
-        lv_obj_align(robi_setup_hint_, LV_ALIGN_BOTTOM_MID, 0, -24);
+        lv_obj_set_style_base_dir(robi_setup_lbl_, LV_BASE_DIR_LTR, 0);
+        lv_label_set_text(robi_setup_lbl_, "robi.local");
+        lv_obj_set_style_text_color(robi_setup_lbl_, lv_color_hex(0x94A3B8), 0);
+        lv_obj_align(robi_setup_hint_, LV_ALIGN_BOTTOM_MID, 0, -14);
         lv_obj_add_flag(robi_setup_hint_, LV_OBJ_FLAG_HIDDEN);
 
         robi_tap_ = lv_obj_create(lv_screen_active());
