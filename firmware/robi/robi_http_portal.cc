@@ -126,12 +126,12 @@ button{cursor:pointer;border:none;border-radius:12px;padding:11px 16px;font-weig
   </div>
 
   <div class="card">
-    <h2>📊 מודלי Gemini Live וניצול מכסה יומית</h2>
-    <div id="quotaBox" class="q-box">טוען נתוני שימוש ומכסה יומית...</div>
+    <h2>📊 מודלי Gemini Live ומעקב שימוש מקומי (במכשיר)</h2>
+    <div id="quotaBox" class="q-box">טוען נתוני מעקב שימוש מקומי...</div>
     <div id="modelsList"></div>
     <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px;flex-wrap:wrap;gap:8px">
-      <span style="font-size:.79rem;color:var(--muted)" id="usageDayLbl">מתעדכן אוטומטית כל 5 שניות</span>
-      <button type="button" class="btn-sec" onclick="resetUsage()">🔄 אפס מונה יומי ורענן מודלים</button>
+      <span style="font-size:.79rem;color:var(--muted)" id="usageDayLbl">הערכה מקומית במכשיר • המכסה האמיתית מול Google מתאפסת אוטומטית אצלם אחת ליממה</span>
+      <button type="button" class="btn-sec" onclick="resetUsage()">🔄 רענן מודלים ואפס מונה מקומי (במכשיר בלבד)</button>
     </div>
   </div>
 
@@ -325,7 +325,7 @@ async function clearMem(){
 
 async function resetUsage(){
   await sendCtrl({reset_usage:true});
-  showToast('מונה השימוש היומי אופס והמודלים רועננו');
+  showToast('מונה המעקב המקומי במכשיר אופס וחיבור המודלים רוענן (המכסה בצד של Google אינה מושפעת)');
   refreshStatusOnly();
 }
 
@@ -345,14 +345,14 @@ function renderModelsAndQuota(st){
 
   document.getElementById('quotaBox').innerHTML=`
     <div style="display:flex;justify-content:space-between;font-size:.88rem;font-weight:600">
-      <span>🎙️ זמן שיחה נטו היום: ${fmtAudioSec(q.used_audio_sec)} מתוך ~45 דק' חינם</span>
+      <span>🎙️ זמן שיחה נטו שנמדד במכשיר היום: ${fmtAudioSec(q.used_audio_sec)} (מתוך הערכת ~45 דק' חינם ב-Google)</span>
       <span dir="ltr" style="color:var(--cyan)">${topPct}%</span>
     </div>
     <div class="q-bar"><div class="q-fill" style="width:${Math.max(2,topPct)}%;background:${barCol}"></div></div>
     <div class="m-stats" style="color:#cbd5e1;margin-top:4px">
-      <span>🔌 סשנים שנפתחו: <b>${q.used_sessions} / ${q.max_sessions}</b></span>
+      <span>🔌 סשנים שנמדדו במכשיר: <b>${q.used_sessions} / ${q.max_sessions}</b></span>
       <span>💬 חילופי דברים: <b>${q.used_turns}</b></span>
-      <span>🔢 טוקנים משוערים: <b dir="ltr">${(q.used_tokens||0).toLocaleString()} / 1,000,000</b></span>
+      <span>🔢 טוקנים משוערים (ספירה מקומית): <b dir="ltr">${(q.used_tokens||0).toLocaleString()} / 1,000,000</b></span>
     </div>`;
 
   const META={
@@ -389,7 +389,7 @@ function renderModelsAndQuota(st){
   }).join('');
 
   if(st.usage_day){
-    document.getElementById('usageDayLbl').textContent=`תאריך מונה יומי: ${st.usage_day} • מתעדכן אוטומטית כל 5 שניות`;
+    document.getElementById('usageDayLbl').textContent=`תאריך מונה מקומי במכשיר: ${st.usage_day} • המכסה האמיתית מנוהלת בשרתי Google ומתאפסת אצלם אוטומטית`;
   }
 }
 
@@ -434,6 +434,10 @@ async function refreshStatusOnly(){
       <span class="pill" dir="ltr">🤖 ${esc(actMod)}</span>
       <span class="pill" dir="ltr">🔋 ${st.battery??100}% ${st.charging?'⚡':''}</span>`;
     renderModelsAndQuota(st);
+    const ml=document.getElementById('memList');
+    if(ml){
+      ml.innerHTML=(st.memories&&st.memories.length)?st.memories.map(m=>`<li>${esc(m)}</li>`).join(''):'<li>אין זיכרונות שמורים עדיין</li>';
+    }
   }catch(e){}
 }
 
