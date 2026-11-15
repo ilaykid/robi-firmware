@@ -62,8 +62,8 @@ constexpr EventBits_t kDoneAll = kDoneRx | kDoneTx | kDonePlay;
 
 constexpr size_t kPsramRingSamples = 262144;   // 512 KB = 10.92s @ 24kHz
 constexpr size_t kFallbackRingSamples = 48000;
-constexpr size_t kPreBufferSamples = 7200;     // 300ms @ 24kHz cushion before starting speaker
-constexpr size_t kRebufferSamples = 3600;      // 150ms @ 24kHz cushion if network stalls mid-turn
+constexpr size_t kPreBufferSamples = 9600;     // 400ms @ 24kHz cushion before starting speaker
+constexpr size_t kRebufferSamples = 4800;      // 200ms @ 24kHz cushion if network stalls mid-turn
 constexpr size_t kPlaybackFrameSamples = 1200; // 50ms @ 24kHz (divides 2400/4800/9600 evenly!)
 
 int64_t g_model_cooldown_until_us[3] = {0, 0, 0};
@@ -379,7 +379,7 @@ std::string GeminiLiveProtocol::BuildSetupJson(const std::string& model_name,
         cJSON_AddStringToObject(fn, "name", "save_memory");
         cJSON_AddStringToObject(
             fn, "description",
-            "Save a short note (up to 200 chars) in Hebrew or English whenever the child asks an interesting question, reveals a personal detail/friend/hobby/preference, solves a challenge, or progresses in a story so you learn about the child and remember next time.");
+            "Save a short note (up to 200 chars) ONLY when discovering a meaningful new personal fact about the child (family, friends, hobbies, curiosities, fears) or reaching a story chapter milestone. Do NOT call on routine math/quiz answers. Call AFTER finishing your spoken reply.");
         cJSON* params = cJSON_CreateObject();
         cJSON_AddStringToObject(params, "type", "OBJECT");
         cJSON* props = cJSON_CreateObject();
@@ -423,6 +423,7 @@ bool GeminiLiveProtocol::TryConnectModel(const std::string& api_key, const std::
     speaking_active_.store(false);
     awaiting_since_us_.store(0);
     tool_hold_until_us_.store(0);
+    tool_sent_at_us_.store(0);
     last_rx_audio_us_.store(esp_timer_get_time());
     awaiting_nudges_ = 0;
     idle_farewell_sent_ = false;
@@ -954,6 +955,7 @@ void GeminiLiveProtocol::SendAbortSpeaking(AbortReason reason) {
     awaiting_response_.store(false);
     speaking_active_.store(false);
     tool_hold_until_us_.store(0);
+    tool_sent_at_us_.store(0);
     ClearRing();
     ring_cv_.notify_all();
     Application::GetInstance().GetAudioService().ResetDecoder();
@@ -1269,6 +1271,7 @@ void GeminiLiveProtocol::RxWorkerLoop() {
                         // Keep awaiting_response_ = true until PlaybackFeederLoop sets speaking_active_ = true
                         // so SendAudio() can never open the mic during the pre-buffer window!
                         tool_hold_until_us_.store(0);
+                        tool_sent_at_us_.store(0);
                         turn_complete_.store(false);
                         size_t rx_samples = decoded_len / sizeof(int16_t);
                         turn_downlink_samples_.fetch_add(static_cast<uint32_t>(rx_samples));
@@ -1284,6 +1287,13 @@ void GeminiLiveProtocol::RxWorkerLoop() {
             clause_buf.clear();
             clause_had_emoji = false;
             last_emo.clear();
+
+            // If this turnComplete arrived after Gemini processed our toolResponse, release tool hold immediately!
+            int64_t t_sent = tool_sent_at_us_.load();
+            if (tool_hold_until_us_.load() > 0 && t_sent > 0 &&
+                (esp_timer_get_time() - t_sent) > 150000LL) {
+                tool_hold_until_us_.store(0);
+            }
 
             if (drop_turn_.exchange(false)) {
                 ClearRing();
@@ -1445,24 +1455,22 @@ void GeminiLiveProtocol::PlaybackFeederLoop() {
                 if (initial_burst_left > 0) {
                     --initial_burst_left;
                 } else {
-                    // Feed 50ms frames every 40ms so AudioService queue stays topped up and never underruns
-                    vTaskDelay(pdMS_TO_TICKS(40));
+                    // Feed 50ms frames every 46ms so AudioService stays gently cushioned without draining PSRAM ring
+                    vTaskDelay(pdMS_TO_TICKS(46));
                 }
             }
             continue;
         }
 
-        // If a tool call (like save_memory) was just answered, hold speaking state until post-tool audio arrives!
-        if (esp_timer_get_time() < tool_hold_until_us_.load()) {
-            turn_complete_.store(false);
-            rebuffer_needed = true;
-            continue;
-        }
-
-        // Ring has fewer than kPlaybackFrameSamples
+        // Ring has fewer than kPlaybackFrameSamples (or 0 when drained)
         if (!turn_complete_.load()) {
             auto& as = Application::GetInstance().GetAudioService();
             if (as.IsPlaybackIdle()) {
+                if (esp_timer_get_time() < tool_hold_until_us_.load()) {
+                    // Waiting briefly for post-tool audio after ring + speaker finished cleanly
+                    rebuffer_needed = true;
+                    continue;
+                }
                 if (avail == 0 && idle_rx_us > 1600000LL) {
                     ESP_LOGW(TAG, "Synthesizing turnComplete after 1.6s audio stream idle");
                     turn_complete_.store(true);
@@ -1604,7 +1612,8 @@ void GeminiLiveProtocol::HandleToolCalls(const cJSON* tool_call) {
 
     if (expect_continuation) {
         int64_t now_us = esp_timer_get_time();
-        tool_hold_until_us_.store(now_us + 3500000LL);
+        tool_sent_at_us_.store(now_us);
+        tool_hold_until_us_.store(now_us + 2200000LL);
         awaiting_response_.store(true);
         awaiting_since_us_.store(now_us);
         awaiting_nudges_ = 0;

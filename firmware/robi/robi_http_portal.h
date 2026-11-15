@@ -22,6 +22,8 @@ private:
     std::mutex mutex_;
     httpd_handle_t server_ = nullptr;
     TaskHandle_t mdns_task_ = nullptr;
+    StackType_t* mdns_stack_ = nullptr;
+    StaticTask_t* mdns_tcb_ = nullptr;
     std::atomic<bool> mdns_running_{false};
     int mdns_sock_ = -1;
 };

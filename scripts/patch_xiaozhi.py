@@ -82,13 +82,14 @@ extra = [
     "CONFIG_LV_USE_BIDI=y",
     "CONFIG_LV_BIDI_DIR_AUTO=y",
     "CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y",
-    "CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6",
-    "CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=32",
-    "CONFIG_ESP_WIFI_RX_BA_WIN=12",
-    "CONFIG_LWIP_TCP_WND_DEFAULT=32768",
-    "CONFIG_LWIP_TCP_SND_BUF_DEFAULT=16384",
-    "CONFIG_LWIP_TCP_RECVMBOX_SIZE=32",
-    "CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=32",
+    "CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=4",
+    "CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=8",
+    "CONFIG_ESP_WIFI_RX_BA_WIN=4",
+    "CONFIG_LWIP_MAX_SOCKETS=16",
+    "CONFIG_LWIP_TCP_WND_DEFAULT=24576",
+    "CONFIG_LWIP_TCP_SND_BUF_DEFAULT=12288",
+    "CONFIG_LWIP_TCP_RECVMBOX_SIZE=24",
+    "CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=24",
 ]
 if wake == "heyrobby":
     extra += [
@@ -452,7 +453,7 @@ must_replace(
 must_replace(
     lcd_cc,
     "    port_cfg.task_priority = 1;\n",
-    "    port_cfg.task_priority = 1;\n    port_cfg.task_stack = 24576;\n",
+    "    port_cfg.task_priority = 1;\n    port_cfg.task_stack = 10240;\n",
     count=3,
 )
 

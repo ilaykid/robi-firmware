@@ -599,6 +599,9 @@ esp_err_t HandleStatusGet(httpd_req_t* req) {
                             static_cast<double>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)));
     cJSON_AddNumberToObject(root, "min_sram",
                             static_cast<double>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)));
+    cJSON_AddNumberToObject(
+        root, "largest_dma_sram",
+        static_cast<double>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA)));
     cJSON_AddNumberToObject(root, "free_psram",
                             static_cast<double>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
 
@@ -859,11 +862,11 @@ void RobiHttpPortal::Start() {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
     config.max_uri_handlers = 10;
-    config.max_open_sockets = 7;
-    config.backlog_conn = 6;
+    config.max_open_sockets = 4;
+    config.backlog_conn = 4;
     config.recv_wait_timeout = 5;
     config.send_wait_timeout = 5;
-    config.stack_size = 8192;
+    config.stack_size = 6144;
     config.lru_purge_enable = true;
 
     if (httpd_start(&server_, &config) == ESP_OK) {
@@ -888,12 +891,29 @@ void RobiHttpPortal::Start() {
 
     if (!mdns_running_.load()) {
         mdns_running_.store(true);
-        xTaskCreate(
-            [](void* arg) {
-                static_cast<RobiHttpPortal*>(arg)->MdnsResponderLoop();
-                vTaskDelete(nullptr);
-            },
-            "robi_mdns", 4096, this, 2, &mdns_task_);
+        if (mdns_stack_ == nullptr) {
+            mdns_stack_ = static_cast<StackType_t*>(
+                heap_caps_malloc(4096, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        }
+        if (mdns_tcb_ == nullptr) {
+            mdns_tcb_ = static_cast<StaticTask_t*>(
+                heap_caps_malloc(sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        }
+        if (mdns_stack_ != nullptr && mdns_tcb_ != nullptr) {
+            mdns_task_ = xTaskCreateStatic(
+                [](void* arg) {
+                    static_cast<RobiHttpPortal*>(arg)->MdnsResponderLoop();
+                    vTaskDelete(nullptr);
+                },
+                "robi_mdns", 4096, this, 2, mdns_stack_, mdns_tcb_);
+        } else {
+            xTaskCreate(
+                [](void* arg) {
+                    static_cast<RobiHttpPortal*>(arg)->MdnsResponderLoop();
+                    vTaskDelete(nullptr);
+                },
+                "robi_mdns", 4096, this, 2, &mdns_task_);
+        }
     }
 }
 
