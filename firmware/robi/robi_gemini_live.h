@@ -43,7 +43,8 @@ public:
     uint32_t GetAudioFramesPlayed() const { return audio_frames_played_.load(); }
     size_t GetRingAvailableSamples() const { return RingAvailable(); }
     bool IsAwaitingResponse() const { return awaiting_response_.load(); }
-    bool IsStreamingSpeech() const { return streaming_speech_; }
+    bool IsStreamingSpeech() const { return streaming_speech_.load(); }
+    bool CanExitListeningByTap() const;
     bool CommitListeningUtterance();
     bool InjectUserPromptTurn(const std::string& text);
     bool SimulateMicUtterance(int duration_ms);
@@ -60,7 +61,7 @@ private:
     void StopSessionInternal(bool notify_closed);
     void HandleFatalSocketError(const char* reason);
 
-    void EnqueueTxJson(std::string&& json_str);
+    void EnqueueTxJson(std::string&& json_str, bool is_audio = false);
     void EnqueueClientTextTurn(const std::string& text);
     void EnqueueSilentTurnNudge(const std::string& user_text);
     void EnqueuePcm16k(const uint8_t* pcm_bytes, size_t byte_len);
@@ -98,11 +99,16 @@ private:
     std::atomic<bool> turn_complete_{false};
     std::atomic<bool> close_after_turn_{false};
     std::atomic<bool> awaiting_response_{false};
+    std::atomic<bool> receiving_model_audio_{false};
     std::atomic<bool> speaking_active_{false};
+    std::atomic<bool> streaming_speech_{false};
     std::atomic<bool> user_turn_had_speech_{false};
     std::atomic<bool> silent_nudge_used_{false};
     std::atomic<int> consecutive_timeouts_{0};
     std::atomic<int64_t> awaiting_since_us_{0};
+    std::atomic<int64_t> listen_started_us_{0};
+    std::atomic<int64_t> post_playback_guard_until_us_{0};
+    std::atomic<int64_t> last_input_tr_us_{0};
     std::atomic<int64_t> tool_hold_until_us_{0};
     std::atomic<int64_t> tool_sent_at_us_{0};
     std::atomic<int64_t> last_rx_audio_us_{0};
@@ -117,19 +123,10 @@ private:
 
     ListeningMode listening_mode_ = kListeningModeAutoStop;
 
-    // Uplink VAD & pre-roll state
+    // Uplink continuous stream state
     std::mutex uplink_mutex_;
-    std::deque<std::vector<uint8_t>> pre_roll_;
     std::vector<uint8_t> tx_pcm_batch_;
-    bool streaming_speech_ = false;
-    int onset_frames_ = 0;
-    int onset_score_ = 0;
-    int speech_frames_ = 0;
-    int silence_frames_ = 0;
-    double noise_floor_rms_ = 45.0;
-    double utterance_peak_rms_ = 0.0;
     int awaiting_nudges_ = 0;
-    int64_t listen_started_us_ = 0;
     std::atomic<int64_t> last_activity_us_{0};
     bool idle_farewell_sent_ = false;
 

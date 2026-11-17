@@ -402,7 +402,7 @@ private:
         tremor_shock_ = false;
 
         if (strcmp(name, "listening") == 0) {
-            RobiSetTargetRgb(robi_theme_id_ == ROBI_THEME_CYBER_CYAN ? 0x00FFBF : base_hex);
+            RobiSetTargetRgb(base_hex);
             tgt_.eye_w += 6.0f;
             tgt_.eye_h += 8.0f;
             tgt_.pupil_scale += 0.05f;
@@ -453,7 +453,7 @@ private:
             tgt_.mouth_curve = 32.0f;
             tgt_.cheek_opa = std::max(tgt_.cheek_opa, 0.55f);
         } else if (strcmp(name, "loving") == 0) {
-            RobiSetTargetRgb(0xFF4DA6);
+            RobiSetTargetRgb(base_hex);
             tgt_.eye_w += 6.0f;
             tgt_.eye_h += 6.0f;
             tgt_.pupil_scale = 0.34f;
@@ -468,7 +468,7 @@ private:
             tgt_.mouth_curve = 25.0f;
             tgt_.cheek_opa = 0.88f;
         } else if (strcmp(name, "kissy") == 0) {
-            RobiSetTargetRgb(0xFF6B9D);
+            RobiSetTargetRgb(base_hex);
             tgt_.squint_bot_l = 0.20f;
             tgt_.squint_bot_r = 0.74f;
             tgt_.squint_top_r = 0.18f;
@@ -489,7 +489,7 @@ private:
             tgt_.mouth_w = 26.0f;
             tgt_.mouth_o = 0.92f;
         } else if (strcmp(name, "shocked") == 0) {
-            RobiSetTargetRgb(0xFFB703);
+            RobiSetTargetRgb(base_hex);
             tremor_shock_ = true;
             tgt_.eye_w = 120.0f;
             tgt_.eye_h = 120.0f;
@@ -536,7 +536,7 @@ private:
             tgt_.mouth_curve = 16.0f;
             tgt_.mouth_tilt = 10.0f;
         } else if (strcmp(name, "confused") == 0) {
-            RobiSetTargetRgb(0xFBBF24);
+            RobiSetTargetRgb(base_hex);
             tgt_.gaze_x = -9.0f;
             tgt_.gaze_y = -4.0f;
             tgt_.squint_top_l = 0.32f;
@@ -549,7 +549,7 @@ private:
             tgt_.mouth_curve = -3.0f;
             tgt_.mouth_wave = 6.0f;
         } else if (strcmp(name, "silly") == 0) {
-            RobiSetTargetRgb(0x80ED99);
+            RobiSetTargetRgb(base_hex);
             bounce_laugh_ = true;
             tgt_.gaze_x = 8.0f;
             tgt_.squint_bot_l = 0.56f;
@@ -562,7 +562,7 @@ private:
             tgt_.mouth_wave = 4.5f;
             tgt_.cheek_opa = 0.40f;
         } else if (strcmp(name, "embarrassed") == 0) {
-            RobiSetTargetRgb(0xFB7185);
+            RobiSetTargetRgb(base_hex);
             tgt_.gaze_x = -12.0f;
             tgt_.gaze_y = 9.0f;
             tgt_.squint_bot_l = 0.28f;
@@ -584,7 +584,7 @@ private:
             tgt_.mouth_curve = 20.0f;
             tgt_.cheek_opa = 0.35f;
         } else if (strcmp(name, "sad") == 0) {
-            RobiSetTargetRgb(0x3A86FF);
+            RobiSetTargetRgb(base_hex);
             tgt_.gaze_y = 11.0f;
             tgt_.squint_top_l = 0.34f;
             tgt_.squint_top_r = 0.34f;
@@ -596,7 +596,7 @@ private:
             tgt_.mouth_w = 38.0f;
             tgt_.mouth_curve = -15.0f;
         } else if (strcmp(name, "crying") == 0) {
-            RobiSetTargetRgb(0x38BDF8);
+            RobiSetTargetRgb(base_hex);
             tgt_.gaze_y = 10.0f;
             tgt_.squint_top_l = 0.28f;
             tgt_.squint_top_r = 0.28f;
@@ -609,7 +609,7 @@ private:
             tgt_.mouth_curve = -20.0f;
             tgt_.mouth_wave = 2.5f;
         } else if (strcmp(name, "angry") == 0) {
-            RobiSetTargetRgb(0xFF3366);
+            RobiSetTargetRgb(base_hex);
             tgt_.squint_top_l = 0.34f;
             tgt_.squint_top_r = 0.34f;
             tgt_.squint_bot_l = 0.16f;
@@ -1346,11 +1346,14 @@ private:
         auto& app = Application::GetInstance();
         auto dev_state = app.GetDeviceState();
         if (dev_state == kDeviceStateListening) {
-            app.Schedule([]() {
-                if (auto* proto = GeminiLiveProtocol::GetActiveInstance()) {
-                    proto->CommitListeningUtterance();
+            if (auto* proto = GeminiLiveProtocol::GetActiveInstance()) {
+                if (proto->CanExitListeningByTap()) {
+                    ESP_LOGI(TAG, "Robi face tap in listening: return to standby");
+                    app.ToggleChatState();
                 }
-            });
+            } else {
+                app.ToggleChatState();
+            }
             return;
         }
         if (dev_state != kDeviceStateIdle) return;

@@ -9,7 +9,7 @@ on:
 
 env:
   XIAOZHI_TAG: v2.5.2
-  ROBI_VERSION: 3.0.1
+  ROBI_VERSION: 3.0.2
 
 jobs:
   changes:

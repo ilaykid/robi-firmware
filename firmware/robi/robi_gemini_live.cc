@@ -285,7 +285,9 @@ void GeminiLiveProtocol::StopSessionInternal(bool notify_closed) {
     channel_opened_.store(false);
     ws_connected_.store(false);
     awaiting_response_.store(false);
+    receiving_model_audio_.store(false);
     speaking_active_.store(false);
+    streaming_speech_.store(false);
     user_turn_had_speech_.store(false);
     tool_hold_until_us_.store(0);
     tool_sent_at_us_.store(0);
@@ -331,7 +333,9 @@ void GeminiLiveProtocol::HandleFatalSocketError(const char* reason) {
     ESP_LOGW(TAG, "Closing broken Gemini Live session (%s)", reason ? reason : "socket_error");
     ws_connected_.store(false);
     awaiting_response_.store(false);
+    receiving_model_audio_.store(false);
     speaking_active_.store(false);
+    streaming_speech_.store(false);
     user_turn_had_speech_.store(false);
     tool_hold_until_us_.store(0);
     tool_sent_at_us_.store(0);
@@ -481,11 +485,15 @@ bool GeminiLiveProtocol::TryConnectModel(const std::string& api_key, const std::
     turn_complete_.store(false);
     close_after_turn_.store(false);
     awaiting_response_.store(false);
+    receiving_model_audio_.store(false);
     speaking_active_.store(false);
+    streaming_speech_.store(false);
     user_turn_had_speech_.store(false);
     silent_nudge_used_.store(false);
     consecutive_timeouts_.store(0);
     awaiting_since_us_.store(0);
+    post_playback_guard_until_us_.store(0);
+    last_input_tr_us_.store(0);
     tool_hold_until_us_.store(0);
     tool_sent_at_us_.store(0);
     last_rx_audio_us_.store(esp_timer_get_time());
@@ -525,7 +533,9 @@ bool GeminiLiveProtocol::TryConnectModel(const std::string& api_key, const std::
         ESP_LOGW(TAG, "Gemini Live WebSocket disconnected");
         ws_connected_.store(false);
         awaiting_response_.store(false);
+        receiving_model_audio_.store(false);
         speaking_active_.store(false);
+        streaming_speech_.store(false);
         user_turn_had_speech_.store(false);
         tool_hold_until_us_.store(0);
         tool_sent_at_us_.store(0);
@@ -703,11 +713,14 @@ bool GeminiLiveProtocol::SendText(const std::string& text) {
     return true;
 }
 
-void GeminiLiveProtocol::EnqueueTxJson(std::string&& json_str) {
+void GeminiLiveProtocol::EnqueueTxJson(std::string&& json_str, bool is_audio) {
     if (stopping_.load() || !ws_connected_.load()) return;
     {
         std::lock_guard<std::mutex> lk(tx_mutex_);
-        if (tx_queue_.size() >= 120) {
+        if (is_audio && tx_queue_.size() >= 28) {
+            // Drop oldest audio chunk if WiFi stalls >3.3s so audio latency never snowballs
+            tx_queue_.pop_front();
+        } else if (tx_queue_.size() >= 120) {
             tx_queue_.pop_front();
         }
         tx_queue_.push_back(std::move(json_str));
@@ -727,7 +740,7 @@ void GeminiLiveProtocol::EnqueuePcm16k(const uint8_t* pcm_bytes, size_t byte_len
         msg += "{\"realtimeInput\":{\"audio\":{\"mimeType\":\"audio/pcm;rate=16000\",\"data\":\"";
         msg += b64;
         msg += "\"}}}";
-        EnqueueTxJson(std::move(msg));
+        EnqueueTxJson(std::move(msg), /*is_audio=*/true);
     }
 }
 
@@ -743,16 +756,17 @@ void GeminiLiveProtocol::EnqueueSilence16k(size_t duration_ms) {
 }
 
 void GeminiLiveProtocol::EnqueueAudioStreamEnd() {
-    EnqueueTxJson("{\"realtimeInput\":{\"audioStreamEnd\":true}}");
+    EnqueueTxJson("{\"realtimeInput\":{\"audioStreamEnd\":true}}", /*is_audio=*/false);
+}
+
+bool GeminiLiveProtocol::CanExitListeningByTap() const {
+    int64_t started = listen_started_us_.load();
+    if (started <= 0) return true;
+    return (esp_timer_get_time() - started) > 850000LL;
 }
 
 void GeminiLiveProtocol::FinishSpeechUtterance() {
-    streaming_speech_ = false;
-    onset_frames_ = 0;
-    onset_score_ = 0;
-    speech_frames_ = 0;
-    silence_frames_ = 0;
-    utterance_peak_rms_ = 0.0;
+    streaming_speech_.store(false);
     if (!tx_pcm_batch_.empty()) {
         EnqueuePcm16k(tx_pcm_batch_.data(), tx_pcm_batch_.size());
         tx_pcm_batch_.clear();
@@ -764,147 +778,82 @@ void GeminiLiveProtocol::FinishSpeechUtterance() {
     awaiting_response_.store(true);
     awaiting_since_us_.store(esp_timer_get_time());
     awaiting_nudges_ = 0;
-    EnqueueSilence16k(280);
+    EnqueueSilence16k(240);
     EnqueueAudioStreamEnd();
-    EmitEmotion("thinking");
 }
 
 bool GeminiLiveProtocol::CommitListeningUtterance() {
     std::lock_guard<std::mutex> lk(uplink_mutex_);
     if (!IsAudioChannelOpened()) return false;
-    if (streaming_speech_ && speech_frames_ >= 4) {
-        FinishSpeechUtterance();
-        return true;
-    }
-    return false;
+    FinishSpeechUtterance();
+    return true;
 }
 
 bool GeminiLiveProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
     if (!IsAudioChannelOpened() || !packet || packet->payload.empty()) {
         return false;
     }
-    if (Application::GetInstance().GetDeviceState() != kDeviceStateListening) {
+    auto& app = Application::GetInstance();
+    if (app.GetDeviceState() != kDeviceStateListening) {
         return true;
     }
 
     int64_t now_us = esp_timer_get_time();
-    // Do not record or stream mic audio while waiting for Gemini's response or playing/holding a tool turn
-    if (awaiting_response_.load() || speaking_active_.load() || RingAvailable() > 0 ||
-        now_us < tool_hold_until_us_.load()) {
+    // Hold mic while speaker is playing (e.g. OGG_POPUP chime) + 220ms room echo settle window
+    if (!app.GetAudioService().IsPlaybackIdle()) {
+        post_playback_guard_until_us_.store(now_us + 220000LL);
+        return true;
+    }
+    if (now_us < post_playback_guard_until_us_.load()) {
+        return true;
+    }
+
+    // Hold mic while Gemini is streaming/playing an answer or answering an explicit clientContent/tool turn
+    if (awaiting_response_.load() || receiving_model_audio_.load() || speaking_active_.load() ||
+        RingAvailable() > 0 || now_us < tool_hold_until_us_.load()) {
         return true;
     }
 
     std::lock_guard<std::mutex> lk(uplink_mutex_);
 
-    // Ignore mic input for 160ms right after entering Listening so OGG_POPUP doesn't echo
-    if (listen_started_us_ > 0 && (now_us - listen_started_us_) < 160000) {
-        return true;
-    }
-
-    const auto* samples = reinterpret_cast<const int16_t*>(packet->payload.data());
+    auto* samples = reinterpret_cast<int16_t*>(packet->payload.data());
     size_t sample_count = packet->payload.size() / sizeof(int16_t);
     if (sample_count == 0) return true;
 
-    if (listening_mode_ == kListeningModeManualStop) {
-        if (!streaming_speech_) {
-            streaming_speech_ = true;
-            drop_turn_.store(false);
-            EnqueueSilence16k(180);
-            EmitEmotion("listening");
-        }
-        last_activity_us_.store(now_us);
-        tx_pcm_batch_.insert(tx_pcm_batch_.end(), packet->payload.begin(), packet->payload.end());
-        if (tx_pcm_batch_.size() >= 3840) {
-            EnqueuePcm16k(tx_pcm_batch_.data(), tx_pcm_batch_.size());
-            tx_pcm_batch_.clear();
-        }
-        return true;
-    }
-
-    // Auto-stop turn-based mode: compute DC-removed AC RMS so ES7210 DC bias (~280 LSB)
-    // and WebRTC VAD_MODE_0 ambient noise never false-trigger speech in silence!
+    // Remove ES7210 DC bias (~280 LSB) in-place so Gemini Live's neural VAD gets clean zero-mean 16kHz PCM
     double mean = 0.0;
     for (size_t i = 0; i < sample_count; ++i) {
         mean += static_cast<double>(samples[i]);
     }
     mean /= static_cast<double>(sample_count);
+    int32_t dc_offset = static_cast<int32_t>(std::lround(mean));
 
     double sum_sq = 0.0;
     for (size_t i = 0; i < sample_count; ++i) {
-        double diff = static_cast<double>(samples[i]) - mean;
-        sum_sq += diff * diff;
+        int32_t v = static_cast<int32_t>(samples[i]) - dc_offset;
+        v = std::clamp<int32_t>(v, -32768, 32767);
+        samples[i] = static_cast<int16_t>(v);
+        double dv = static_cast<double>(v);
+        sum_sq += dv * dv;
     }
     double ac_rms = std::sqrt(sum_sq / static_cast<double>(sample_count));
 
-    if (!streaming_speech_) {
-        double onset_thresh = std::clamp(noise_floor_rms_ * 2.8 + 75.0, 165.0, 380.0);
-        bool voice_frame = (ac_rms >= onset_thresh);
-        if (voice_frame) {
-            ++onset_frames_;
-            onset_score_ = std::min(6, onset_score_ + 2);
-        } else {
-            onset_frames_ = 0;
-            onset_score_ = std::max(0, onset_score_ - 1);
-            if (ac_rms < onset_thresh * 0.85) {
-                noise_floor_rms_ = std::clamp(noise_floor_rms_ * 0.96 + ac_rms * 0.04, 25.0, 220.0);
-            }
-        }
-        if (onset_score_ < 4) {
-            if (pre_roll_.size() >= 14) {
-                pre_roll_.pop_front();
-            }
-            pre_roll_.push_back(std::move(packet->payload));
-            return true;
-        }
-        // Speech onset!
-        streaming_speech_ = true;
-        onset_frames_ = 0;
-        onset_score_ = 0;
-        speech_frames_ = 0;
-        silence_frames_ = 0;
-        utterance_peak_rms_ = ac_rms;
+    bool active_voice = app.IsVoiceDetected() || (ac_rms >= 320.0);
+    streaming_speech_.store(active_voice);
+    if (active_voice) {
         idle_farewell_sent_ = false;
-        drop_turn_.store(false);
         last_activity_us_.store(now_us);
-        EmitEmotion("listening");
-
-        EnqueueSilence16k(180);
-        tx_pcm_batch_.clear();
-        for (const auto& old_frame : pre_roll_) {
-            tx_pcm_batch_.insert(tx_pcm_batch_.end(), old_frame.begin(), old_frame.end());
-            if (tx_pcm_batch_.size() >= 3840) {
-                EnqueuePcm16k(tx_pcm_batch_.data(), tx_pcm_batch_.size());
-                tx_pcm_batch_.clear();
-            }
-        }
-        pre_roll_.clear();
+        turn_uplink_pcm_bytes_.fetch_add(static_cast<uint32_t>(packet->payload.size()));
     }
 
-    utterance_peak_rms_ = std::max(utterance_peak_rms_, ac_rms);
-    last_activity_us_.store(now_us);
-    ++speech_frames_;
-    turn_uplink_pcm_bytes_.fetch_add(static_cast<uint32_t>(packet->payload.size()));
+    // Stream continuous 120ms (3840-byte) 16kHz PCM batches directly to Gemini Live's server-side neural VAD!
+    // Never gate or lock the mic on local RMS thresholds — Gemini's automaticActivityDetection (500ms)
+    // detects speech start & end natively on the unbroken stream!
+    drop_turn_.store(false);
     tx_pcm_batch_.insert(tx_pcm_batch_.end(), packet->payload.begin(), packet->payload.end());
     if (tx_pcm_batch_.size() >= 3840) {
         EnqueuePcm16k(tx_pcm_batch_.data(), tx_pcm_batch_.size());
         tx_pcm_batch_.clear();
-    }
-
-    double silence_thresh = std::max(
-        std::clamp(noise_floor_rms_ * 1.8 + 45.0, 120.0, 280.0),
-        std::min(260.0, utterance_peak_rms_ * 0.22));
-    if (ac_rms < silence_thresh) {
-        ++silence_frames_;
-        // 22 frames @ 32ms = ~700ms of post-speech silence so natural word pauses don't cut off speech
-        if (silence_frames_ >= 22) {
-            FinishSpeechUtterance();
-        }
-    } else {
-        silence_frames_ = std::max(0, silence_frames_ - 2);
-        // Safety cap: commit utterance after ~8.0s (250 frames) even in noisy rooms
-        if (speech_frames_ >= 250) {
-            FinishSpeechUtterance();
-        }
     }
 
     return true;
@@ -1052,42 +1001,26 @@ bool GeminiLiveProtocol::SimulateMicUtterance(int duration_ms) {
 void GeminiLiveProtocol::SendStartListening(ListeningMode mode) {
     std::lock_guard<std::mutex> lk(uplink_mutex_);
     listening_mode_ = mode;
-    pre_roll_.clear();
     tx_pcm_batch_.clear();
-    streaming_speech_ = false;
-    onset_frames_ = 0;
-    onset_score_ = 0;
-    speech_frames_ = 0;
-    silence_frames_ = 0;
-    utterance_peak_rms_ = 0.0;
+    streaming_speech_.store(false);
+    receiving_model_audio_.store(false);
     int64_t now_us = esp_timer_get_time();
-    // Do NOT clear awaiting_response_ if a prompt/wake-word turn was just submitted (< 8s ago)!
-    if (!awaiting_response_.load() || (now_us - awaiting_since_us_.load()) > 8000000LL) {
+    // Do NOT clear awaiting_response_ if an activity-button clientContent turn was just submitted (< 4s ago)!
+    if (!awaiting_response_.load() || (now_us - awaiting_since_us_.load()) > 4000000LL) {
         awaiting_response_.store(false);
     }
-    listen_started_us_ = now_us;
+    listen_started_us_.store(now_us);
+    post_playback_guard_until_us_.store(now_us + 220000LL);
     last_activity_us_.store(now_us);
 }
 
 void GeminiLiveProtocol::SendStopListening() {
     std::lock_guard<std::mutex> lk(uplink_mutex_);
-    if (streaming_speech_) {
+    if (listening_mode_ == kListeningModeManualStop) {
         FinishSpeechUtterance();
-    } else if (listening_mode_ == kListeningModeManualStop && !pre_roll_.empty()) {
-        EnqueueSilence16k(180);
-        for (const auto& f : pre_roll_) {
-            EnqueuePcm16k(f.data(), f.size());
-        }
-        pre_roll_.clear();
-        turn_downlink_samples_.store(0);
-        user_turn_had_speech_.store(true);
-        silent_nudge_used_.store(false);
-        awaiting_response_.store(true);
-        awaiting_since_us_.store(esp_timer_get_time());
-        awaiting_nudges_ = 0;
-        EnqueueSilence16k(280);
-        EnqueueAudioStreamEnd();
-        EmitEmotion("thinking");
+    } else if (!tx_pcm_batch_.empty()) {
+        EnqueuePcm16k(tx_pcm_batch_.data(), tx_pcm_batch_.size());
+        tx_pcm_batch_.clear();
     }
 }
 
@@ -1097,7 +1030,9 @@ void GeminiLiveProtocol::SendAbortSpeaking(AbortReason reason) {
     drop_turn_.store(true);
     turn_complete_.store(false);
     awaiting_response_.store(false);
+    receiving_model_audio_.store(false);
     speaking_active_.store(false);
+    streaming_speech_.store(false);
     user_turn_had_speech_.store(false);
     tool_hold_until_us_.store(0);
     tool_sent_at_us_.store(0);
@@ -1234,8 +1169,34 @@ void GeminiLiveProtocol::TxWorkerLoop() {
 
         int64_t now_us = esp_timer_get_time();
 
-        // While awaiting Gemini's response after an utterance, flush audioStreamEnd once if slow,
-        // and recover cleanly if the socket or turn timed out.
+        // 1. Proactive-silence auto-recovery during continuous streaming:
+        //    If Gemini transcribed user speech (inputTranscription) and then stayed silent for >1.4s
+        //    with zero downlink audio (e.g. gemini-3.8-live Proactive Audio co-listener silence),
+        //    flush audioStreamEnd and nudge an immediate spoken reply!
+        if (!awaiting_response_.load() && !receiving_model_audio_.load() &&
+            !speaking_active_.load() && RingAvailable() == 0 &&
+            user_turn_had_speech_.load() && !silent_nudge_used_.load() && !stopping_.load()) {
+            int64_t tr_age_us = now_us - last_input_tr_us_.load();
+            if (last_input_tr_us_.load() > 0 && tr_age_us > 1400000LL) {
+                std::string peek_tr;
+                {
+                    std::lock_guard<std::mutex> lk(transcript_mutex_);
+                    peek_tr = CleanTranscriptText(pending_user_transcript_);
+                }
+                if (HasMeaningfulSpeechText(peek_tr) && !silent_nudge_used_.exchange(true)) {
+                    user_turn_had_speech_.store(false);
+                    FlushPendingTranscripts();
+                    ESP_LOGW(TAG, "Proactive silence 1.4s after '%s' — forcing spoken reply",
+                             peek_tr.c_str());
+                    EnqueueAudioStreamEnd();
+                    EnqueueSilentTurnNudge(peek_tr);
+                } else {
+                    user_turn_had_speech_.store(false);
+                }
+            }
+        }
+
+        // 2. Timeout recovery for explicit clientContent / manual turns
         if (awaiting_response_.load() && RingAvailable() == 0 && !stopping_.load()) {
             int64_t waited_us = now_us - awaiting_since_us_.load();
             if (waited_us > 4200000LL) {
@@ -1251,28 +1212,6 @@ void GeminiLiveProtocol::TxWorkerLoop() {
                 if (Application::GetInstance().GetDeviceState() == kDeviceStateListening) {
                     EmitEmotion("listening");
                 }
-            } else if (waited_us > 1700000LL &&
-                       turn_downlink_samples_.load() == 0 &&
-                       !speaking_active_.load() &&
-                       user_turn_had_speech_.load() &&
-                       !silent_nudge_used_.load()) {
-                std::string peek_tr;
-                {
-                    std::lock_guard<std::mutex> lk(transcript_mutex_);
-                    peek_tr = CleanTranscriptText(pending_user_transcript_);
-                }
-                if (HasMeaningfulSpeechText(peek_tr) && !silent_nudge_used_.exchange(true)) {
-                    user_turn_had_speech_.store(false);
-                    FlushPendingTranscripts();
-                    ESP_LOGW(TAG, "Proactive silence after 1.7s for '%s' — forcing spoken reply",
-                             peek_tr.c_str());
-                    EnqueueSilentTurnNudge(peek_tr);
-                } else if (awaiting_nudges_ < 2) {
-                    awaiting_nudges_ = 2;
-                }
-            } else if (waited_us > 1200000LL && awaiting_nudges_ == 0) {
-                awaiting_nudges_ = 1;
-                EnqueueAudioStreamEnd();
             }
         }
 
@@ -1375,9 +1314,19 @@ void GeminiLiveProtocol::RxWorkerLoop() {
         const cJSON* in_tr = cJSON_GetObjectItemCaseSensitive(sc, "inputTranscription");
         if (cJSON_IsObject(in_tr)) {
             const cJSON* t = cJSON_GetObjectItemCaseSensitive(in_tr, "text");
-            if (cJSON_IsString(t) && t->valuestring != nullptr) {
-                std::lock_guard<std::mutex> lk(transcript_mutex_);
-                pending_user_transcript_ += t->valuestring;
+            if (cJSON_IsString(t) && t->valuestring != nullptr && t->valuestring[0] != '\0') {
+                int64_t now_tr_us = esp_timer_get_time();
+                {
+                    std::lock_guard<std::mutex> lk(transcript_mutex_);
+                    if (pending_user_transcript_.empty()) {
+                        // Fresh user utterance starting: re-arm single-shot silent-turn recovery
+                        silent_nudge_used_.store(false);
+                    }
+                    pending_user_transcript_ += t->valuestring;
+                }
+                last_input_tr_us_.store(now_tr_us);
+                last_activity_us_.store(now_tr_us);
+                user_turn_had_speech_.store(true);
             }
         }
 
@@ -1443,8 +1392,11 @@ void GeminiLiveProtocol::RxWorkerLoop() {
                         int64_t now_rx_us = esp_timer_get_time();
                         last_activity_us_.store(now_rx_us);
                         last_rx_audio_us_.store(now_rx_us);
-                        // Keep awaiting_response_ = true until PlaybackFeederLoop sets speaking_active_ = true
-                        // so SendAudio() can never open the mic during the pre-buffer window!
+                        receiving_model_audio_.store(true);
+                        {
+                            std::lock_guard<std::mutex> ulk(uplink_mutex_);
+                            tx_pcm_batch_.clear();
+                        }
                         tool_hold_until_us_.store(0);
                         tool_sent_at_us_.store(0);
                         user_turn_had_speech_.store(false);
@@ -1479,6 +1431,7 @@ void GeminiLiveProtocol::RxWorkerLoop() {
 
             if (drop_turn_.exchange(false)) {
                 ClearRing();
+                receiving_model_audio_.store(false);
                 user_turn_had_speech_.store(false);
                 turn_complete_.store(false);
             } else if (user_turn_had_speech_.exchange(false) &&
@@ -1490,6 +1443,7 @@ void GeminiLiveProtocol::RxWorkerLoop() {
                        !silent_nudge_used_.exchange(true)) {
                 ESP_LOGW(TAG, "Silent turnComplete after user said '%s' — nudging spoken reply",
                          peek_user_tr.c_str());
+                EnqueueAudioStreamEnd();
                 EnqueueSilentTurnNudge(peek_user_tr);
             } else {
                 turn_complete_.store(true);
@@ -1528,6 +1482,7 @@ void GeminiLiveProtocol::PlaybackFeederLoop() {
         if (stopping_.load() || !ws_connected_.load()) break;
 
         if (drop_turn_.exchange(false)) {
+            receiving_model_audio_.store(false);
             if (speaking_active) {
                 EmitEmotion("v:0");
                 EmitTtsState("stop");
@@ -1572,6 +1527,7 @@ void GeminiLiveProtocol::PlaybackFeederLoop() {
                     (turn_complete_.load() || hold_expired)) {
                     FlushPendingTranscripts();
                     turn_complete_.store(false);
+                    receiving_model_audio_.store(false);
                     awaiting_response_.store(false);
                     if (Application::GetInstance().GetDeviceState() == kDeviceStateListening) {
                         EmitEmotion("listening");
@@ -1582,6 +1538,7 @@ void GeminiLiveProtocol::PlaybackFeederLoop() {
         }
 
         if (active_gen != turn_gen_.load() || drop_turn_.exchange(false)) {
+            receiving_model_audio_.store(false);
             EmitEmotion("v:0");
             EmitTtsState("stop");
             speaking_active = false;
@@ -1704,6 +1661,7 @@ void GeminiLiveProtocol::PlaybackFeederLoop() {
 
         FlushPendingTranscripts();
         turn_complete_.store(false);
+        receiving_model_audio_.store(false);
         speaking_active = false;
         speaking_active_.store(false);
         rebuffer_needed = false;
@@ -1721,8 +1679,10 @@ void GeminiLiveProtocol::PlaybackFeederLoop() {
             }
             RobiConfig::GetInstance().RecordModelTurn(GetActiveModel(), audio_sec_delta, srv_tok);
             awaiting_response_.store(false);
+            int64_t end_us = esp_timer_get_time();
+            post_playback_guard_until_us_.store(end_us + 220000LL);
             EmitEmotion("v:0");
-            last_activity_us_.store(esp_timer_get_time());
+            last_activity_us_.store(end_us);
             EmitTtsState("stop");
 
             if (close_after_turn_.exchange(false)) {
