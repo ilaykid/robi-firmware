@@ -1,4 +1,5 @@
 #include "robi_config.h"
+#include "robi_utf8.h"
 
 #include <cJSON.h>
 #include <esp_event.h>
@@ -57,7 +58,6 @@ void InstallSmartWifiDhcpGuard() {
     if (s_wifi_guard_installed) return;
     s_wifi_guard_installed = true;
 
-    // Load last known DHCP-working BSSID from NVS
     nvs_handle_t h = 0;
     if (nvs_open(kNvsNsCfg, NVS_READONLY, &h) == ESP_OK) {
         size_t len = 6;
@@ -70,7 +70,7 @@ void InstallSmartWifiDhcpGuard() {
         nvs_close(h);
     }
 
-    esp_event_loop_create_default();  // Safe no-op if already created
+    esp_event_loop_create_default();
 
     esp_timer_create_args_t targs = {};
     targs.callback = [](void*) {
@@ -99,7 +99,7 @@ void InstallSmartWifiDhcpGuard() {
                     ESP_LOGW(TAG, "Fast-skipping dead DHCP BSSID %02x:%02x:%02x:%02x:%02x:%02x",
                              s_cur_bssid[0], s_cur_bssid[1], s_cur_bssid[2],
                              s_cur_bssid[3], s_cur_bssid[4], s_cur_bssid[5]);
-                    esp_timer_start_once(s_dhcp_watchdog_timer, 25000ULL);  // 25ms
+                    esp_timer_start_once(s_dhcp_watchdog_timer, 25000ULL);
                     return;
                 }
                 if (s_good_bssid_valid && s_cur_bssid != s_good_bssid && s_fast_skip_count < 6) {
@@ -110,10 +110,10 @@ void InstallSmartWifiDhcpGuard() {
                     ESP_LOGI(TAG, "Fast-skipping non-preferred BSSID %02x:%02x:%02x:%02x:%02x:%02x (%d/6) to reach good router",
                              s_cur_bssid[0], s_cur_bssid[1], s_cur_bssid[2],
                              s_cur_bssid[3], s_cur_bssid[4], s_cur_bssid[5], s_fast_skip_count);
-                    esp_timer_start_once(s_dhcp_watchdog_timer, 25000ULL);  // 25ms
+                    esp_timer_start_once(s_dhcp_watchdog_timer, 25000ULL);
                     return;
                 }
-                esp_timer_start_once(s_dhcp_watchdog_timer, 4500000ULL);  // 4.5s for DHCP
+                esp_timer_start_once(s_dhcp_watchdog_timer, 4500000ULL);
             } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
                 if (s_dhcp_watchdog_timer != nullptr) {
                     esp_timer_stop(s_dhcp_watchdog_timer);
@@ -267,7 +267,7 @@ void RobiConfig::EnsureLoaded() {
     }
     InstallSmartWifiDhcpGuard();
 
-    // 3. Load persistent memories and daily model usage
+    // 3. Load persistent memories and daily model usage (with UTF-8 self-healing)
     LoadMemoriesFromNvsLocked();
     LoadUsageFromNvsLocked();
 
@@ -316,7 +316,6 @@ void RobiConfig::TryImportFlashSectorLocked() {
 
     uint32_t erase_len = ((16u + json_len + 4095u) / 4096u) * 4096u;
     if (sig == stored_sig) {
-        // Security: wipe legacy leftover ROBICFG1 sector from raw flash 0x010000
         esp_flash_erase_region(nullptr, kFlashConfigAddr, erase_len);
         ESP_LOGI(TAG, "Wiped legacy ROBICFG1 staging sector at 0x%06X (%lu bytes)",
                  static_cast<unsigned>(kFlashConfigAddr), static_cast<unsigned long>(erase_len));
@@ -357,7 +356,6 @@ void RobiConfig::TryImportFlashSectorLocked() {
             nvs_commit(h);
             nvs_close(h);
         }
-        // Security: immediately erase staging sector 0x010000 so plaintext credentials never linger in raw flash
         esp_flash_erase_region(nullptr, kFlashConfigAddr, erase_len);
         ESP_LOGI(TAG, "Erased ROBICFG1 staging sector at 0x%06X (%lu bytes) after NVS import",
                  static_cast<unsigned>(kFlashConfigAddr), static_cast<unsigned long>(erase_len));
@@ -376,8 +374,9 @@ bool RobiConfig::ParseIntoLocked(const std::string& json_str, bool keep_existing
 
     RobiConfigData next = data_;
 
-    std::string bot_name = SafeGetStr(root, "bot_name", SafeGetStr(root, "robot_name", next.bot_name));
-    if (!bot_name.empty() && bot_name.size() <= 48) {
+    std::string bot_name = robi::Utf8SafeTruncate(
+        SafeGetStr(root, "bot_name", SafeGetStr(root, "robot_name", next.bot_name)), 48);
+    if (!bot_name.empty()) {
         next.bot_name = bot_name;
     }
 
@@ -387,7 +386,7 @@ bool RobiConfig::ParseIntoLocked(const std::string& json_str, bool keep_existing
             !cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "clear_key"))) {
             // Keep existing key
         } else if (k.size() <= 160) {
-            next.gemini_key = k;
+            next.gemini_key = robi::Utf8Sanitize(k);
         }
     }
 
@@ -430,8 +429,8 @@ bool RobiConfig::ParseIntoLocked(const std::string& json_str, bool keep_existing
         cJSON_ArrayForEach(t_item, topics_arr) {
             if (next.custom_topics.size() >= 16) break;
             if (cJSON_IsString(t_item) && t_item->valuestring != nullptr) {
-                std::string s(t_item->valuestring);
-                if (!s.empty() && s.size() <= 120) {
+                std::string s = robi::Utf8SafeTruncate(t_item->valuestring, 120);
+                if (!s.empty()) {
                     next.custom_topics.push_back(std::move(s));
                 }
             }
@@ -439,13 +438,10 @@ bool RobiConfig::ParseIntoLocked(const std::string& json_str, bool keep_existing
     }
 
     if (cJSON_HasObjectItem(root, "custom_prompt")) {
-        std::string cp = SafeGetStr(root, "custom_prompt", "");
-        if (cp.size() <= 1200) {
-            next.custom_prompt = cp;
-        }
+        next.custom_prompt = robi::Utf8SafeTruncate(SafeGetStr(root, "custom_prompt", ""), 1200);
     }
 
-    wifi_ssid_out = SafeGetStr(root, "wifi_ssid", "");
+    wifi_ssid_out = robi::Utf8SafeTruncate(SafeGetStr(root, "wifi_ssid", ""), 64);
     wifi_pass_out = SafeGetStr(root, "wifi_pass", "");
 
     const cJSON* kids_arr = cJSON_GetObjectItemCaseSensitive(root, "kids");
@@ -457,18 +453,15 @@ bool RobiConfig::ParseIntoLocked(const std::string& json_str, bool keep_existing
         cJSON_ArrayForEach(k_item, kids_arr) {
             if (idx >= 3) break;
             if (!cJSON_IsObject(k_item)) continue;
-            std::string name = SafeGetStr(k_item, "name", "");
-            if (name.empty() || name.size() > 36) continue;
+            std::string name = robi::Utf8SafeTruncate(SafeGetStr(k_item, "name", ""), 36);
+            if (name.empty()) continue;
 
             RobiKid kid;
-            kid.name = name;
+            kid.name = std::move(name);
             kid.age = std::clamp(SafeGetInt(k_item, "age", 8), 3, 18);
             kid.color = SafeGetStr(k_item, "color", kFallbackColors[idx]);
             kid.color_hex = ParseHexColor(kid.color, ParseHexColor(kFallbackColors[idx]));
-            kid.interests = SafeGetStr(k_item, "interests", "");
-            if (kid.interests.size() > 300) {
-                kid.interests.resize(300);
-            }
+            kid.interests = robi::Utf8SafeTruncate(SafeGetStr(k_item, "interests", ""), 300);
 
             const cJSON* acts = cJSON_GetObjectItemCaseSensitive(k_item, "activities");
             if (cJSON_IsArray(acts)) {
@@ -476,10 +469,10 @@ bool RobiConfig::ParseIntoLocked(const std::string& json_str, bool keep_existing
                 cJSON_ArrayForEach(a_item, acts) {
                     if (kid.activities.size() >= 4) break;
                     if (!cJSON_IsObject(a_item)) continue;
-                    std::string lbl = SafeGetStr(a_item, "label", "");
-                    std::string prm = SafeGetStr(a_item, "prompt", "");
-                    if (!lbl.empty() && lbl.size() <= 32 && !prm.empty() && prm.size() <= 240) {
-                        kid.activities.push_back({lbl, prm});
+                    std::string lbl = robi::Utf8SafeTruncate(SafeGetStr(a_item, "label", ""), 32);
+                    std::string prm = robi::Utf8SafeTruncate(SafeGetStr(a_item, "prompt", ""), 240);
+                    if (!lbl.empty() && !prm.empty()) {
+                        kid.activities.push_back({std::move(lbl), std::move(prm)});
                     }
                 }
             }
@@ -587,13 +580,17 @@ bool RobiConfig::HasKids() const {
 }
 
 bool RobiConfig::UpdateFromJson(const std::string& json_str, bool from_flash_sector,
-                                std::string& err_out) {
+                                std::string& err_out, bool* session_params_changed_out) {
     std::function<void()> reload_cb;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        RobiConfigData before = data_;
         std::string wifi_ssid, wifi_pass;
         if (!ParseIntoLocked(json_str, !from_flash_sector, wifi_ssid, wifi_pass, err_out)) {
             return false;
+        }
+        if (session_params_changed_out != nullptr) {
+            *session_params_changed_out = !before.HasSameSessionParams(data_);
         }
         if (!wifi_ssid.empty()) {
             SsidManager::GetInstance().AddSsid(wifi_ssid, wifi_pass);
@@ -616,9 +613,25 @@ std::string RobiConfig::ExportJson(bool mask_api_key) const {
     return SerializeLocked(mask_api_key);
 }
 
+void RobiConfig::ScheduleNvsFlushLocked() {
+    if (s_nvs_flush_timer == nullptr) {
+        esp_timer_create_args_t targs = {};
+        targs.callback = [](void*) { RobiConfig::GetInstance().FlushNvsFromInternalStack(); };
+        targs.dispatch_method = ESP_TIMER_TASK;
+        targs.name = "robi_nvs_fl";
+        esp_timer_create(&targs, &s_nvs_flush_timer);
+    }
+    if (s_nvs_flush_timer != nullptr) {
+        esp_timer_stop(s_nvs_flush_timer);
+        esp_timer_start_once(s_nvs_flush_timer, 80000ULL);  // 80ms debounce on Internal SRAM timer task
+    }
+}
+
 void RobiConfig::LoadMemoriesFromNvsLocked() {
     memories_.clear();
     dialogue_.clear();
+    bool healed_utf8 = false;
+
     nvs_handle_t h = 0;
     if (nvs_open(kNvsNsMem, NVS_READONLY, &h) != ESP_OK) return;
     size_t req = 0;
@@ -631,7 +644,12 @@ void RobiConfig::LoadMemoriesFromNvsLocked() {
                 cJSON_ArrayForEach(it, arr) {
                     if (cJSON_IsString(it) && it->valuestring != nullptr &&
                         it->valuestring[0] != '\0') {
-                        memories_.emplace_back(it->valuestring);
+                        std::string orig(it->valuestring);
+                        std::string clean = robi::Utf8SafeTruncate(orig, 220);
+                        if (clean != orig) healed_utf8 = true;
+                        if (!clean.empty()) {
+                            memories_.push_back(std::move(clean));
+                        }
                     }
                 }
             }
@@ -647,8 +665,10 @@ void RobiConfig::LoadMemoriesFromNvsLocked() {
                 const cJSON* it = nullptr;
                 cJSON_ArrayForEach(it, darr) {
                     if (cJSON_IsObject(it)) {
-                        std::string r = SafeGetStr(it, "r", "");
-                        std::string t = SafeGetStr(it, "t", "");
+                        std::string r = robi::Utf8SafeTruncate(SafeGetStr(it, "r", ""), 16);
+                        std::string orig_t = SafeGetStr(it, "t", "");
+                        std::string t = robi::Utf8SafeTruncate(orig_t, 240);
+                        if (t != orig_t) healed_utf8 = true;
                         if (!r.empty() && !t.empty()) {
                             dialogue_.emplace_back(std::move(r), std::move(t));
                         }
@@ -659,6 +679,13 @@ void RobiConfig::LoadMemoriesFromNvsLocked() {
         }
     }
     nvs_close(h);
+
+    if (healed_utf8) {
+        ESP_LOGW(TAG, "Healed truncated UTF-8 bytes in NVS memory/dialogue history");
+        s_mem_dirty = true;
+        s_dlg_dirty = true;
+        ScheduleNvsFlushLocked();
+    }
 }
 
 void RobiConfig::FlushNvsFromInternalStack() {
@@ -734,24 +761,13 @@ void RobiConfig::FlushNvsFromInternalStack() {
 
 void RobiConfig::SaveMemoriesToNvsLocked() {
     s_mem_dirty = true;
-    if (s_nvs_flush_timer == nullptr) {
-        esp_timer_create_args_t targs = {};
-        targs.callback = [](void*) { RobiConfig::GetInstance().FlushNvsFromInternalStack(); };
-        targs.dispatch_method = ESP_TIMER_TASK;
-        targs.name = "robi_nvs_fl";
-        esp_timer_create(&targs, &s_nvs_flush_timer);
-    }
-    if (s_nvs_flush_timer != nullptr) {
-        esp_timer_stop(s_nvs_flush_timer);
-        esp_timer_start_once(s_nvs_flush_timer, 80000ULL);  // 80ms debounce on Internal SRAM timer task
-    }
+    ScheduleNvsFlushLocked();
 }
 
 void RobiConfig::AddMemoryNote(const std::string& note) {
-    if (note.empty()) return;
+    std::string trimmed = robi::Utf8SafeTruncate(note, 220);
+    if (trimmed.empty()) return;
     std::lock_guard<std::mutex> lock(mutex_);
-    std::string trimmed = note.substr(0, 220);
-    // Avoid exact duplicate
     for (const auto& existing : memories_) {
         if (existing == trimmed) return;
     }
@@ -771,6 +787,8 @@ void RobiConfig::ClearMemoryNotes() {
     std::lock_guard<std::mutex> lock(mutex_);
     memories_.clear();
     dialogue_.clear();
+    s_mem_dirty = false;
+    s_dlg_dirty = false;
     nvs_handle_t h = 0;
     if (nvs_open(kNvsNsMem, NVS_READWRITE, &h) == ESP_OK) {
         nvs_erase_key(h, kNvsKeyMemJson);
@@ -799,8 +817,8 @@ void RobiConfig::LoadUsageFromNvsLocked() {
         if (nvs_get_blob(h, kNvsKeyUsageJson, raw.data(), &req) == ESP_OK) {
             cJSON* obj = cJSON_ParseWithLength(raw.data(), raw.size());
             if (cJSON_IsObject(obj)) {
-                std::string day = SafeGetStr(obj, "day", "today");
-                if (!day.empty() && day.size() <= 16) {
+                std::string day = robi::Utf8SafeTruncate(SafeGetStr(obj, "day", "today"), 16);
+                if (!day.empty()) {
                     usage_day_ = day;
                 }
                 const cJSON* models_arr = cJSON_GetObjectItemCaseSensitive(obj, "models");
@@ -826,17 +844,7 @@ void RobiConfig::LoadUsageFromNvsLocked() {
 
 void RobiConfig::SaveUsageToNvsLocked() {
     s_usage_dirty = true;
-    if (s_nvs_flush_timer == nullptr) {
-        esp_timer_create_args_t targs = {};
-        targs.callback = [](void*) { RobiConfig::GetInstance().FlushNvsFromInternalStack(); };
-        targs.dispatch_method = ESP_TIMER_TASK;
-        targs.name = "robi_nvs_fl";
-        esp_timer_create(&targs, &s_nvs_flush_timer);
-    }
-    if (s_nvs_flush_timer != nullptr) {
-        esp_timer_stop(s_nvs_flush_timer);
-        esp_timer_start_once(s_nvs_flush_timer, 80000ULL);  // 80ms debounce on Internal SRAM timer task
-    }
+    ScheduleNvsFlushLocked();
 }
 
 RobiModelUsage& RobiConfig::FindOrCreateModelUsageLocked(const std::string& model_id) {
@@ -856,12 +864,10 @@ void RobiConfig::SyncUsageDay(const std::string& client_day_iso) {
         return;
     }
     if (usage_day_ == "today" || usage_day_.empty()) {
-        // First time syncing calendar date on this day: adopt calendar date without zeroing today's counters
         usage_day_ = client_day_iso;
         SaveUsageToNvsLocked();
         return;
     }
-    // New calendar day! Reset daily counters
     ESP_LOGI(TAG, "New calendar day detected (%s -> %s): resetting daily model quota counters",
              usage_day_.c_str(), client_day_iso.c_str());
     usage_day_ = client_day_iso;
@@ -915,24 +921,17 @@ std::vector<RobiModelUsage> RobiConfig::GetModelUsage() const {
 }
 
 void RobiConfig::AddDialogueTurn(const std::string& role, const std::string& text) {
-    if (text.empty()) return;
+    std::string safe_role = robi::Utf8SafeTruncate(role, 16);
+    std::string safe_text = robi::Utf8SafeTruncate(text, 240);
+    if (safe_role.empty() || safe_text.empty()) return;
+
     std::lock_guard<std::mutex> lock(mutex_);
     if (dialogue_.size() >= 16) {
         dialogue_.erase(dialogue_.begin());
     }
-    dialogue_.emplace_back(role, text.substr(0, 240));
+    dialogue_.emplace_back(std::move(safe_role), std::move(safe_text));
     s_dlg_dirty = true;
-    if (s_nvs_flush_timer == nullptr) {
-        esp_timer_create_args_t targs = {};
-        targs.callback = [](void*) { RobiConfig::GetInstance().FlushNvsFromInternalStack(); };
-        targs.dispatch_method = ESP_TIMER_TASK;
-        targs.name = "robi_nvs_fl";
-        esp_timer_create(&targs, &s_nvs_flush_timer);
-    }
-    if (s_nvs_flush_timer != nullptr) {
-        esp_timer_stop(s_nvs_flush_timer);
-        esp_timer_start_once(s_nvs_flush_timer, 80000ULL);
-    }
+    ScheduleNvsFlushLocked();
 }
 
 std::vector<std::pair<std::string, std::string>> RobiConfig::GetDialogue() const {
@@ -944,10 +943,7 @@ void RobiConfig::ClearDialogue() {
     std::lock_guard<std::mutex> lock(mutex_);
     dialogue_.clear();
     s_dlg_dirty = true;
-    if (s_nvs_flush_timer != nullptr) {
-        esp_timer_stop(s_nvs_flush_timer);
-        esp_timer_start_once(s_nvs_flush_timer, 80000ULL);
-    }
+    ScheduleNvsFlushLocked();
 }
 
 void RobiConfig::SetUiReloadCallback(std::function<void()> cb) {
@@ -1080,5 +1076,5 @@ std::string RobiConfig::BuildSystemPrompt() const {
         p += "</שיחה_אחרונה>\n";
     }
 
-    return p;
+    return robi::Utf8Sanitize(p);
 }

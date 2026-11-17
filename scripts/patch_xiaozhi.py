@@ -5,14 +5,16 @@ Usage:
 
 Key features:
 - 100% Zero-Server standalone architecture: connects directly from ESP32-S3 over TLS WebSocket
-  to Google Gemini Live API (BidiGenerateContent) with uncompressed 16kHz in / 24kHz out PCM
-  and a 512 KB PSRAM jitter ring buffer.
+  to Google Gemini Live API (BidiGenerateContent) with uncompressed 16kHz in / 24kHz out PCM,
+  TCP_NODELAY + WMM QoS low-latency socket tuning, and a sample-synced 512 KB PSRAM jitter ring.
 - On-device configuration via NVS ("robi_cfg") + WebSerial flash sector 0x010000 ("ROBICFG1"),
   so a single pre-built firmware binary works for everyone without compiling C++.
 - Built-in local Hebrew RTL Parent Management Portal (http://robi.local + LAN IP) with hot-reload
-  for 5 Face Design Themes, Voices, Language lock, and 0..3 Child Profiles & Activity Menus.
+  for 5 Face Design Themes x 5 Styles, Voices, Language lock, and 0..3 Child Profiles & Menus.
 - Rebrands WiFi setup hotspot from Xiaozhi-XXXX to Robi-XXXX and skips cloud activation.
-- Hardware fixes for Waveshare ESP32-S3-Touch-AMOLED-1.75 (SKU 31261):
+- Hardware & synchronization fixes for Waveshare ESP32-S3-Touch-AMOLED-1.75 (SKU 31261):
+  - Race-free Speaking transition (`ResetDecoder` -> `NotifySpeakingAudioReady` -> `SetStatus`).
+  - Zero-delay turn-around mic activation when ES7210 ADC is already running.
   - PowerSaveTimer disabled on USB power; battery dim at 180s / shutdown at 1800s.
   - CST9217 touch controller 100kHz I2C bus + RF TX burst transient error absorber.
 """
@@ -148,11 +150,12 @@ must_replace(
     board_cc,
     "#include <lvgl.h>\n",
     "#include <lvgl.h>\n"
-    "#include <algorithm>\n#include <cmath>\n#include <cstdint>\n#include <cstdlib>\n"
-    "#include <cstring>\n#include <string>\n#include <vector>\n"
+    "#include <algorithm>\n#include <cmath>\n#include <cstdint>\n#include <cstdio>\n"
+    "#include <cstdlib>\n#include <cstring>\n#include <string>\n#include <vector>\n"
     "#include <esp_timer.h>\n#include <wifi_manager.h>\n"
     '#include "assets/lang_config.h"\n'
     '#include "robi/robi_config.h"\n'
+    '#include "robi/robi_face_math.h"\n'
     '#include "robi/robi_gemini_live.h"\n',
 )
 robi_ui = (Path(__file__).resolve().parent / "robi_ui.inc").read_text(encoding="utf-8")
@@ -161,7 +164,7 @@ must_replace(
     "        lv_display_add_event_cb(display_, rounder_event_cb, LV_EVENT_INVALIDATE_AREA, NULL);\n    }\n};\n",
     "        lv_display_add_event_cb(display_, rounder_event_cb, LV_EVENT_INVALIDATE_AREA, NULL);\n"
     "        RobiSetupUI();\n"
-    "    }\n" + robi_ui + "};\n",
+    "    }\n" + robi_ui + "\n};\n",
 )
 
 must_replace(
@@ -276,7 +279,7 @@ must_replace(
     "    WifiManager::GetInstance().SetPowerSaveLevel(WifiPowerSaveLevel::PERFORMANCE);\n",
 )
 
-# 5. AudioService raw PCM fast-path (16kHz mic -> Gemini Live, 24kHz Gemini Live -> speaker)
+# 5. AudioService raw PCM fast-path + zero-stall turn-around when ES7210 ADC is already active
 audio_h = fw / "main/audio/audio_service.h"
 must_replace(
     audio_h,
@@ -331,8 +334,13 @@ must_replace(
     "            } else if ((SetDecodeSampleRate(packet->sample_rate, packet->frame_duration),\n"
     "                        opus_decoder_ != nullptr)) {\n",
 )
+must_replace(
+    audio_cc,
+    "        ResetDecoder();\n        audio_input_need_warmup_ = true;\n",
+    "        ResetDecoder();\n        audio_input_need_warmup_ = !codec_->input_enabled();\n",
+)
 
-# 6. Standalone Application boot (no cloud server activation, start local portal + GeminiLiveProtocol)
+# 6. Standalone Application boot & race-free Speaking handshake
 app_cc = fw / "main/application.cc"
 must_replace(
     app_cc,
@@ -366,14 +374,21 @@ must_replace(
     "                audio_service_.EnableVoiceProcessing(false);\n"
     "                // Only AFE wake word can be detected in speaking mode\n"
     "                audio_service_.EnableWakeWordDetection(audio_service_.IsAfeWakeWord());\n"
-    "            }\n",
+    "            }\n"
+    "            audio_service_.ResetDecoder();\n",
     "        case kDeviceStateSpeaking:\n"
-    "            display->SetStatus(Lang::Strings::SPEAKING);\n\n"
     "            if (listening_mode_ != kListeningModeRealtime) {\n"
     "                audio_service_.EnableVoiceProcessing(false);\n"
     "                // Disable MultiNet7 + FD-AEC while speaking so CPU & WiFi TLS receive are 100% unstarved\n"
     "                audio_service_.EnableWakeWordDetection(false);\n"
-    "            }\n",
+    "            }\n"
+    "            // Reset decoder BEFORE signalingPlaybackFeederLoop and BEFORE acquiring DisplayLockGuard,\n"
+    "            // eliminating the 300ms opening-audio wipe race!\n"
+    "            audio_service_.ResetDecoder();\n"
+    "            if (auto* gp = GeminiLiveProtocol::GetActiveInstance()) {\n"
+    "                gp->NotifySpeakingAudioReady();\n"
+    "            }\n"
+    "            display->SetStatus(Lang::Strings::SPEAKING);\n",
 )
 must_replace(
     app_cc,
@@ -442,7 +457,7 @@ must_replace(
     "    SetListeningMode(GetDefaultListeningMode());\n",
 )
 
-# 7. Dark AMOLED theme + black boot fill + 24KB LVGL task stack
+# 7. Dark AMOLED theme + black boot fill + 14KB LVGL task stack
 lcd_cc = fw / "main/display/lcd_display.cc"
 must_replace(lcd_cc, 'settings.GetString("theme", "light")', 'settings.GetString("theme", "dark")')
 must_replace(
@@ -459,7 +474,7 @@ must_replace(
 )
 
 # 8. Firmware version
-version = os.environ.get("ROBI_VERSION", "3.0.2")
+version = os.environ.get("ROBI_VERSION", "3.1.0")
 must_replace(fw / "CMakeLists.txt", 'set(PROJECT_VER "2.5.2")', f'set(PROJECT_VER "{version}")')
 
 print("HeyRobi standalone patch completed successfully!")

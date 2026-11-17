@@ -94,13 +94,19 @@
 ```text
 robi-firmware/
 ├── docs/                        # אשף ההתקנה האינטראקטיבי בדפדפן + צורב WebSerial (GitHub Pages)
-├── firmware/robi/               # מודולי הליבה העצמאיים של HeyRobi ב-C++:
-│   ├── robi_config.{h,cc}       # ניהול הגדרות NVS + ייבוא ומחיקת 0x010000 + זיכרון שיחה ומכסת מודלים
-│   ├── robi_gemini_live.{h,cc}  # לקוח WebSocket ישיר מול Google Gemini Live + באפר PSRAM 512KB
-│   └── robi_http_portal.{h,cc}  # פורטל ניהול להורים בפורט 80 מוגן CSRF + משיב mDNS עבור robi.local
+├── firmware/robi/               # מודולי הליבה המודולריים של HeyRobi ב-C++:
+│   ├── robi_config.{h,cc}       # ניהול הגדרות NVS + ריפוי וחיתוך UTF-8 תקני + זיכרון שיחה ומכסת מודלים
+│   ├── robi_gemini_live.{h,cc}  # לקוח WebSocket ישיר מול Google Gemini Live + סנכרון דיבור בתקורה נמוכה
+│   ├── robi_audio_sync.h        # באפר טבעתי מסונכרן-דגימה (512KB PSRAM), עיבוד DSP ומעקב סיום דיבור אדפטיבי
+│   ├── robi_face_math.h         # מתמטיקת פנים פרוצדורלית, 5 סגנונות פנים × 5 ערכות צבעים והבעות רגש
+│   ├── robi_display_ui.h        # בקר תצוגת LVGL למסך AMOLED העגול + סינכרון שפתיים ב-20Hz ללא נעילות
+│   ├── robi_http_portal.{h,cc}  # שרת ניהול להורים בפורט 80 מוגן CSRF ורענון סשן חי
+│   ├── robi_portal_html.h       # תבנית ממשק ההורים הרספונסיבי בעברית (RTL)
+│   ├── robi_mdns.h              # מפענח ובונה חבילות mDNS + NSEC תקני (RFC 6762) עבור robi.local
+│   └── robi_utf8.h              # אימות וחיתוך בטוח של מחרוזות UTF-8 בעברית ואימוג'ים
 ├── scripts/
 │   ├── patch_xiaozhi.py         # סקריפט הזרקת השינויים מעל xiaozhi-esp32 v2.5.2 וניקוי ענן חיצוני
-│   └── robi_ui.inc              # מנוע הפנים Cyber-Optic LVGL עם 5 ערכות עיצוב וכפתורי ילדים דינמיים
+│   └── robi_ui.inc              # נקודת הכללה נקייה אל robi_display_ui.h עבור לוח ה-Waveshare
 ├── assets/                      # גופן Noto Sans Hebrew + סמלי הבעות
 ├── case/Robi_v4/                # קבצי הדפסה תלת-ממדית (STL + OpenSCAD) והוראות הרכבה
 └── .github/workflows/build.yml  # בניית קושחה אוטומטית (ESP-IDF v6.1) + פריסת אשף ההתקנה ל-GitHub Pages

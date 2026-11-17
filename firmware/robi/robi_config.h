@@ -11,6 +11,10 @@
 struct RobiActivity {
     std::string label;
     std::string prompt;
+
+    bool operator==(const RobiActivity& o) const {
+        return label == o.label && prompt == o.prompt;
+    }
 };
 
 struct RobiKid {
@@ -20,6 +24,11 @@ struct RobiKid {
     uint32_t color_hex = 0x0284C7;
     std::string interests;
     std::vector<RobiActivity> activities;
+
+    bool HasSamePromptProfile(const RobiKid& o) const {
+        return name == o.name && age == o.age && interests == o.interests &&
+               activities == o.activities;
+    }
 };
 
 struct RobiModelUsage {
@@ -43,6 +52,19 @@ struct RobiConfigData {
     std::vector<std::string> custom_topics;
     std::string custom_prompt;
     std::vector<RobiKid> kids;
+
+    bool HasSameSessionParams(const RobiConfigData& o) const {
+        if (bot_name != o.bot_name || gemini_key != o.gemini_key ||
+            preferred_model != o.preferred_model || voice != o.voice ||
+            language != o.language || custom_topics != o.custom_topics ||
+            custom_prompt != o.custom_prompt || kids.size() != o.kids.size()) {
+            return false;
+        }
+        for (size_t i = 0; i < kids.size(); ++i) {
+            if (!kids[i].HasSamePromptProfile(o.kids[i])) return false;
+        }
+        return true;
+    }
 };
 
 class RobiConfig {
@@ -60,7 +82,8 @@ public:
     bool HasApiKey() const;
     bool HasKids() const;
 
-    bool UpdateFromJson(const std::string& json_str, bool from_flash_sector, std::string& err_out);
+    bool UpdateFromJson(const std::string& json_str, bool from_flash_sector, std::string& err_out,
+                        bool* session_params_changed_out = nullptr);
     std::string ExportJson(bool mask_api_key) const;
 
     // Persistent short-term memory notes stored in NVS ("robi_mem")
@@ -104,6 +127,7 @@ private:
     void SaveMemoriesToNvsLocked();
     void LoadUsageFromNvsLocked();
     void SaveUsageToNvsLocked();
+    void ScheduleNvsFlushLocked();
     void FlushNvsFromInternalStack();
     RobiModelUsage& FindOrCreateModelUsageLocked(const std::string& model_id);
     void TryImportFlashSectorLocked();

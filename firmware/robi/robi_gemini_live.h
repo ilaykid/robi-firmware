@@ -2,6 +2,7 @@
 #define ROBI_GEMINI_LIVE_H_
 
 #include "protocol.h"
+#include "robi_audio_sync.h"
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
@@ -33,6 +34,13 @@ public:
     void SendStopListening() override;
     void SendAbortSpeaking(AbortReason reason) override;
 
+    // Called by Application::HandleStateChangedEvent right after ResetDecoder() completes
+    // when entering kDeviceStateSpeaking, guaranteeing 0 dropped opening PCM frames.
+    void NotifySpeakingAudioReady();
+
+    // Lock-free 20Hz lip-sync voice envelope (0..100, or -1 if inactive/stale)
+    int GetLiveVoiceLevel(int64_t now_us) const;
+
     // Live diagnostics & hardware stress-test control hooks
     static GeminiLiveProtocol* GetActiveInstance();
     std::string GetActiveModel() const;
@@ -41,7 +49,7 @@ public:
     static void ResetModelCooldowns();
     uint32_t GetTurnsCompleted() const { return turns_completed_.load(); }
     uint32_t GetAudioFramesPlayed() const { return audio_frames_played_.load(); }
-    size_t GetRingAvailableSamples() const { return RingAvailable(); }
+    size_t GetRingAvailableSamples() const { return jitter_ring_.Available(); }
     bool IsAwaitingResponse() const { return awaiting_response_.load(); }
     bool IsStreamingSpeech() const { return streaming_speech_.load(); }
     bool CanExitListeningByTap() const;
@@ -58,8 +66,10 @@ private:
                          bool include_lang_code);
     std::string BuildSetupJson(const std::string& model_name, const std::string& voice_name,
                                const std::string& lang_code, bool include_lang_code) const;
+    static std::string BuildClientTurnJson(const std::string& text);
     void StopSessionInternal(bool notify_closed);
     void HandleFatalSocketError(const char* reason);
+    void ResetTurnRuntimeFlags();
 
     void EnqueueTxJson(std::string&& json_str, bool is_audio = false);
     void EnqueueClientTextTurn(const std::string& text);
@@ -73,20 +83,13 @@ private:
     void TxWorkerLoop();
     void PlaybackFeederLoop();
 
-    void HandleGeminiJson(const char* data, size_t len);
     void HandleToolCalls(const cJSON* tool_call);
     void FlushPendingTranscripts();
 
-    void PushPcm24kToRing(const int16_t* samples, size_t count);
-    size_t PopPcm24kFromRing(int16_t* out_samples, size_t max_count);
-    size_t RingAvailable() const;
-    void ClearRing();
-
+    void ClearLiveVoiceLevel();
     void EmitLocalJson(const std::string& json_str);
     void EmitEmotion(const std::string& emotion);
     void EmitTtsState(const char* state);
-
-    static int ComputeVoiceLevel(const int16_t* samples, size_t count);
 
     EventGroupHandle_t event_group_ = nullptr;
     EventGroupHandle_t worker_done_group_ = nullptr;
@@ -101,10 +104,14 @@ private:
     std::atomic<bool> awaiting_response_{false};
     std::atomic<bool> receiving_model_audio_{false};
     std::atomic<bool> speaking_active_{false};
+    std::atomic<bool> speaking_audio_ready_{false};
     std::atomic<bool> streaming_speech_{false};
     std::atomic<bool> user_turn_had_speech_{false};
     std::atomic<bool> silent_nudge_used_{false};
     std::atomic<int> consecutive_timeouts_{0};
+    std::atomic<int> awaiting_nudges_{0};
+    std::atomic<int> live_voice_level_{0};
+    std::atomic<int64_t> live_voice_updated_us_{0};
     std::atomic<int64_t> awaiting_since_us_{0};
     std::atomic<int64_t> listen_started_us_{0};
     std::atomic<int64_t> post_playback_guard_until_us_{0};
@@ -126,7 +133,9 @@ private:
     // Uplink continuous stream state
     std::mutex uplink_mutex_;
     std::vector<uint8_t> tx_pcm_batch_;
-    int awaiting_nudges_ = 0;
+    robi::AdaptiveSpeechTracker speech_tracker_;
+    std::mutex client_turn_mutex_;
+    std::string last_client_turn_text_;
     std::atomic<int64_t> last_activity_us_{0};
     bool idle_farewell_sent_ = false;
 
@@ -145,15 +154,9 @@ private:
     std::condition_variable tx_cv_;
     std::deque<std::string> tx_queue_;
 
-    // 24kHz PCM PSRAM jitter ring buffer (262,144 samples = 512 KB = 10.9s)
-    mutable std::mutex ring_mutex_;
-    std::condition_variable ring_cv_;
-    int16_t* pcm_ring_ = nullptr;
-    size_t ring_capacity_ = 0;
-    size_t ring_head_ = 0;
-    size_t ring_tail_ = 0;
-    size_t ring_count_ = 0;
-    std::deque<std::string> pending_emotions_;
+    // Sample-accurate 24kHz PCM PSRAM jitter ring buffer (262,144 samples = 512 KB = 10.92s)
+    int16_t* pcm_ring_mem_ = nullptr;
+    robi::SampleSyncedJitterRing jitter_ring_;
 
     TaskHandle_t rx_task_ = nullptr;
     TaskHandle_t tx_task_ = nullptr;
