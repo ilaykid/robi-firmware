@@ -77,6 +77,7 @@ const state = {
   kids: structuredClone(DEFAULT_KIDS),
   wifi_ssid: "",
   wifi_pass: "",
+  board: "waveshare175",
   wake_variant: "heyrobby",
   customBinFile: null,
 };
@@ -102,6 +103,7 @@ function loadDraft() {
     if (Array.isArray(saved.custom_topics)) state.custom_topics = saved.custom_topics.slice(0, 16);
     if (typeof saved.custom_prompt === "string") state.custom_prompt = saved.custom_prompt;
     if (Array.isArray(saved.kids)) state.kids = saved.kids.slice(0, 3);
+    if (saved.board === "waveshare175" || saved.board === "spotpear128") state.board = saved.board;
     if (saved.wake_variant) state.wake_variant = saved.wake_variant;
     // Security: scrub any legacy plaintext secrets from localStorage immediately
     if (saved.gemini_key !== undefined || saved.wifi_pass !== undefined || saved.wifi_ssid !== undefined) {
@@ -128,6 +130,7 @@ function saveDraft() {
       custom_topics: state.custom_topics,
       custom_prompt: state.custom_prompt,
       kids: state.kids,
+      board: state.board,
       wake_variant: state.wake_variant,
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(safeCopy));
@@ -658,10 +661,16 @@ async function fetchFirmwareBytes({ appOnly = false } = {}) {
   }
   const variant = state.wake_variant === "hiesp" ? "hiesp" : "heyrobby";
   const prefix = appOnly ? "robi-app" : "robi-full";
-  const url = `./firmware/${prefix}-${variant}.bin`;
+  const boardTag = state.board === "spotpear128" ? "-spotpear128" : "";
+  const url = `./firmware/${prefix}${boardTag}-${variant}.bin`;
   appendLog(`Downloading pre-built firmware: ${url} ...`);
   const res = await fetch(`${url}?t=${Date.now()}`, { cache: "no-store" });
   if (!res.ok) {
+    if (state.board === "spotpear128") {
+      throw new Error(
+        `קובץ הקושחה הניסיוני עבור Spotpear 1.28" (${url}) אינו זמין עדיין בשרת זה (HTTP ${res.status}). עבור לוח Waveshare 1.75" בחרו בדגם הראשי, או טענו קובץ .bin מקומי מתחת לכפתור.`
+      );
+    }
     throw new Error(
       `קובץ הקושחה (${url}) לא נמצא בשרת זה (HTTP ${res.status}). ניתן לבחור קובץ .bin מקומי מתחת לכפתור או להשתמש באתר GitHub Pages הרשמי.`
     );
@@ -861,6 +870,10 @@ function hydrateInputs() {
   document.getElementById("txtCustomPrompt").value = state.custom_prompt;
   document.getElementById("inpWifiSsid").value = state.wifi_ssid;
   document.getElementById("inpWifiPass").value = state.wifi_pass;
+  const selBoard = document.getElementById("selBoard");
+  if (selBoard) selBoard.value = state.board || "waveshare175";
+  const expNote = document.getElementById("boardExperimentalNote");
+  if (expNote) expNote.style.display = state.board === "spotpear128" ? "block" : "none";
   document.getElementById("selWakeVariant").value = state.wake_variant;
 }
 
@@ -964,6 +977,15 @@ window.addEventListener("DOMContentLoaded", () => {
     state.wifi_pass = e.target.value;
     saveDraft();
   });
+  const selBoard = document.getElementById("selBoard");
+  if (selBoard) {
+    selBoard.addEventListener("change", (e) => {
+      state.board = e.target.value;
+      const expNote = document.getElementById("boardExperimentalNote");
+      if (expNote) expNote.style.display = state.board === "spotpear128" ? "block" : "none";
+      saveDraft();
+    });
+  }
   document.getElementById("selWakeVariant").addEventListener("change", (e) => {
     state.wake_variant = e.target.value;
     saveDraft();
