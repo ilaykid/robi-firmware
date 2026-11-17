@@ -130,6 +130,9 @@
         } else if (std::strcmp(emotion, "thinking") == 0 &&
                    robi_face_mode_ != robi::ROBI_MODE_SPEAKING) {
             robi_face_mode_ = robi::ROBI_MODE_THINKING;
+        } else if (std::strcmp(emotion, "listening") == 0 &&
+                   robi_face_mode_ != robi::ROBI_MODE_SPEAKING) {
+            robi_face_mode_ = robi::ROBI_MODE_LISTENING;
         }
         RobiApplyPreset(mapped, true);
     }
@@ -514,8 +517,12 @@ private:
             RobiUpdateSetupHintVisibility(robi_face_mode_ == robi::ROBI_MODE_IDLE);
         }
 
-        bool voice_in = (robi_face_mode_ == robi::ROBI_MODE_LISTENING) &&
-                        Application::GetInstance().IsVoiceDetected();
+        bool voice_in = false;
+        if (robi_face_mode_ == robi::ROBI_MODE_LISTENING) {
+            if (auto* proto = GeminiLiveProtocol::GetActiveInstance()) {
+                voice_in = proto->IsStreamingSpeech();
+            }
+        }
         bool has_buttons = (robi_profiles_ != nullptr);
         bool menu_open = RobiIsAnyMenuOpen();
 

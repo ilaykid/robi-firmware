@@ -49,6 +49,10 @@ public:
     static void ResetModelCooldowns();
     uint32_t GetTurnsCompleted() const { return turns_completed_.load(); }
     uint32_t GetAudioFramesPlayed() const { return audio_frames_played_.load(); }
+    uint32_t GetTxAudioPackets() const { return tx_audio_packets_.load(); }
+    uint32_t GetRxWsMessages() const { return rx_ws_msgs_.load(); }
+    int GetLastMicRms() const { return last_mic_rms_.load(std::memory_order_relaxed); }
+    int GetNoiseFloorRms() const { return last_noise_floor_rms_.load(std::memory_order_relaxed); }
     size_t GetRingAvailableSamples() const { return jitter_ring_.Available(); }
     bool IsAwaitingResponse() const { return awaiting_response_.load(); }
     bool IsStreamingSpeech() const { return streaming_speech_.load(); }
@@ -67,6 +71,7 @@ private:
     std::string BuildSetupJson(const std::string& model_name, const std::string& voice_name,
                                const std::string& lang_code, bool include_lang_code) const;
     static std::string BuildClientTurnJson(const std::string& text);
+    static void CooldownModelByName(const std::string& model_name, int64_t cooldown_sec);
     void StopSessionInternal(bool notify_closed);
     void HandleFatalSocketError(const char* reason);
     void ResetTurnRuntimeFlags();
@@ -122,6 +127,10 @@ private:
     std::atomic<uint32_t> turn_gen_{0};
     std::atomic<uint32_t> turns_completed_{0};
     std::atomic<uint32_t> audio_frames_played_{0};
+    std::atomic<uint32_t> tx_audio_packets_{0};
+    std::atomic<uint32_t> rx_ws_msgs_{0};
+    std::atomic<int> last_mic_rms_{0};
+    std::atomic<int> last_noise_floor_rms_{220};
     std::atomic<uint32_t> turn_uplink_pcm_bytes_{0};
     std::atomic<uint32_t> turn_downlink_samples_{0};
     std::atomic<uint32_t> turn_server_tokens_{0};
@@ -130,8 +139,9 @@ private:
 
     ListeningMode listening_mode_ = kListeningModeAutoStop;
 
-    // Uplink continuous stream state
+    // Uplink turn-framed stream state
     std::mutex uplink_mutex_;
+    std::deque<std::vector<uint8_t>> pre_roll_;
     std::vector<uint8_t> tx_pcm_batch_;
     robi::AdaptiveSpeechTracker speech_tracker_;
     std::mutex client_turn_mutex_;

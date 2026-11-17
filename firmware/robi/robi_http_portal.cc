@@ -177,7 +177,12 @@ esp_err_t HandleStatusGet(httpd_req_t* req) {
         cJSON_AddBoolToObject(root, "channel_open", open);
         cJSON_AddNumberToObject(root, "turns_completed", proto->GetTurnsCompleted());
         cJSON_AddNumberToObject(root, "audio_frames_played", proto->GetAudioFramesPlayed());
+        cJSON_AddNumberToObject(root, "tx_audio_packets", proto->GetTxAudioPackets());
+        cJSON_AddNumberToObject(root, "rx_ws_msgs", proto->GetRxWsMessages());
+        cJSON_AddNumberToObject(root, "mic_rms", proto->GetLastMicRms());
+        cJSON_AddNumberToObject(root, "noise_floor_rms", proto->GetNoiseFloorRms());
         cJSON_AddNumberToObject(root, "ring_avail", static_cast<double>(proto->GetRingAvailableSamples()));
+        cJSON_AddBoolToObject(root, "playback_idle", app.GetAudioService().IsPlaybackIdle());
         cJSON_AddBoolToObject(root, "awaiting_response", proto->IsAwaitingResponse());
         cJSON_AddBoolToObject(root, "streaming_speech", proto->IsStreamingSpeech());
         if (open) {

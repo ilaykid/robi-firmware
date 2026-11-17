@@ -169,29 +169,89 @@ void TestConcurrentRingWrapAround() {
 }
 
 void TestAdaptiveSpeechTracker() {
+    // 1. Waveshare ES7210 +30dB idle self-noise (~250..295 RMS on 60ms AFE frames) must NEVER false-trigger
     robi::AdaptiveSpeechTracker tracker;
-
-    // 1. Brief 64ms click should never trigger soft stream end
-    for (int i = 0; i < 2; ++i) {
-        auto d = tracker.OnFrame(600.0f, false, 32);
-        assert(d.active_voice && !d.should_send_soft_stream_end);
-    }
-    for (int i = 0; i < 50; ++i) {
-        auto d = tracker.OnFrame(60.0f, false, 32);
-        assert(!d.should_send_soft_stream_end);
+    tracker.ResetSession();
+    for (int i = 0; i < 100; ++i) {
+        float idle_rms = (i % 5 == 0) ? 295.0f : 250.0f;
+        auto d = tracker.OnFrame(idle_rms, 60);
+        assert(!d.start_utterance && !d.in_speech && !d.commit_utterance);
     }
 
-    // 2. Real speech (12 * 32ms = 384ms) followed by noisy-room hum (120 RMS) triggers soft flush once
-    for (int i = 0; i < 12; ++i) {
-        auto d = tracker.OnFrame(900.0f, true, 32);
-        assert(d.active_voice && !d.should_send_soft_stream_end);
+    // 2. Single 60ms click/pop (700 RMS) must NOT trigger speech onset
+    {
+        auto d1 = tracker.OnFrame(700.0f, 60);
+        assert(!d1.start_utterance && !d1.in_speech);
+        for (int i = 0; i < 20; ++i) {
+            auto d2 = tracker.OnFrame(250.0f, 60);
+            assert(!d2.start_utterance && !d2.in_speech && !d2.commit_utterance);
+        }
     }
-    int flush_count = 0;
-    for (int i = 0; i < 60; ++i) {
-        auto d = tracker.OnFrame(120.0f, false, 32);
-        if (d.should_send_soft_stream_end) ++flush_count;
+
+    // 3. Normal speech with mid-sentence 300ms pause, returning to 260 RMS board noise -> commits at 600ms!
+    {
+        auto f1 = tracker.OnFrame(1600.0f, 60);  // 60ms (< 120ms)
+        assert(!f1.start_utterance && !f1.in_speech);
+        auto f2 = tracker.OnFrame(1800.0f, 60);  // 120ms -> ONSET!
+        assert(f2.start_utterance && f2.in_speech && !f2.commit_utterance);
+
+        for (int i = 0; i < 6; ++i) {
+            auto d = tracker.OnFrame(1500.0f, 60);
+            assert(d.in_speech && !d.commit_utterance);
+        }
+        // 300ms word pause (5 * 60ms < 600ms) must NOT prematurely cut off the child
+        for (int i = 0; i < 5; ++i) {
+            auto d = tracker.OnFrame(260.0f, 60);
+            assert(d.in_speech && !d.commit_utterance);
+        }
+        // Second word resumes -> resets silence accumulator cleanly
+        for (int i = 0; i < 5; ++i) {
+            auto d = tracker.OnFrame(1700.0f, 60);
+            assert(d.in_speech && !d.commit_utterance);
+        }
+        // Post-speech return to 260 RMS board noise -> commits on 10th frame (600ms)
+        int commits = 0;
+        for (int i = 0; i < 10; ++i) {
+            auto d = tracker.OnFrame(260.0f, 60);
+            if (i < 9) {
+                assert(d.in_speech && !d.commit_utterance);
+            } else {
+                assert(d.commit_utterance);
+                ++commits;
+            }
+        }
+        assert(commits == 1);
+        assert(!tracker.in_speech());
     }
-    assert(flush_count == 1);
+
+    // 4. Quiet bedroom (75 RMS) adapts noise floor down rapidly so soft child whisper (390 RMS) triggers cleanly
+    {
+        tracker.ResetSession();
+        for (int i = 0; i < 8; ++i) {
+            auto d = tracker.OnFrame(75.0f, 60);
+            assert(!d.in_speech);
+        }
+        assert(tracker.noise_floor_rms() < 115.0f);
+        auto w1 = tracker.OnFrame(390.0f, 60);
+        assert(!w1.start_utterance);
+        auto w2 = tracker.OnFrame(390.0f, 60);
+        assert(w2.start_utterance && w2.in_speech);
+        bool committed = false;
+        for (int i = 0; i < 12; ++i) {
+            if (tracker.OnFrame(80.0f, 60).commit_utterance) committed = true;
+        }
+        assert(committed);
+    }
+
+    // 5. Extreme continuous background shouting (1800 RMS non-stop) hits 9.0s safety cap instead of hanging forever
+    {
+        tracker.ResetSession();
+        int cap_commits = 0;
+        for (int i = 0; i < 160; ++i) {  // 160 * 60ms = 9.6s
+            if (tracker.OnFrame(1800.0f, 60).commit_utterance) ++cap_commits;
+        }
+        assert(cap_commits == 1);
+    }
 }
 
 void TestThemeColorPreservationAcrossAllEmotions() {
