@@ -645,14 +645,20 @@ function setProgress(pct) {
   bar.style.width = `${Math.max(0, Math.min(100, pct))}%`;
 }
 
-async function fetchFirmwareBytes() {
+async function fetchFirmwareBytes({ appOnly = false } = {}) {
   if (state.customBinFile) {
     appendLog(`Loading local firmware file: ${state.customBinFile.name}`);
     const ab = await state.customBinFile.arrayBuffer();
-    return new Uint8Array(ab);
+    const raw = new Uint8Array(ab);
+    if (appOnly && raw.length > 0x500000) {
+      appendLog("Extracting app partition (0x20000) from merged binary to preserve NVS memories...");
+      return raw.subarray(0x20000, Math.min(raw.length, 0x410000));
+    }
+    return raw;
   }
   const variant = state.wake_variant === "hiesp" ? "hiesp" : "heyrobby";
-  const url = `./firmware/robi-full-${variant}.bin`;
+  const prefix = appOnly ? "robi-app" : "robi-full";
+  const url = `./firmware/${prefix}-${variant}.bin`;
   appendLog(`Downloading pre-built firmware: ${url} ...`);
   const res = await fetch(`${url}?t=${Date.now()}`, { cache: "no-store" });
   if (!res.ok) {
@@ -664,7 +670,7 @@ async function fetchFirmwareBytes() {
   return new Uint8Array(ab);
 }
 
-async function runUsbFlash({ configOnly = false }) {
+async function runUsbFlash({ configOnly = false, upgradeOnly = false }) {
   if (!("serial" in navigator)) {
     setStatus(
       "flashStatus",
@@ -674,7 +680,7 @@ async function runUsbFlash({ configOnly = false }) {
     return;
   }
 
-  if (!state.gemini_key.trim()) {
+  if (!upgradeOnly && !state.gemini_key.trim()) {
     const ok = window.confirm(
       "לא הזנתם מפתח Gemini בשלב 1. רובי יידלק אך יבקש מכם להגדיר מפתח דרך http://robi.local לפני שיוכל לדבר. להמשיך בצריבה?"
     );
@@ -682,28 +688,40 @@ async function runUsbFlash({ configOnly = false }) {
   }
 
   const btnFull = document.getElementById("btnFlashFull");
+  const btnUpg = document.getElementById("btnFlashUpgradeOnly");
   const btnCfg = document.getElementById("btnFlashConfigOnly");
   btnFull.disabled = true;
+  if (btnUpg) btnUpg.disabled = true;
   btnCfg.disabled = true;
   document.getElementById("flashConsole").textContent = "";
 
   let transport = null;
   try {
-    const cfgObj = buildConfigObject({ includeSecrets: true });
-    const cfgSector = buildRobiCfgSectorBytes(cfgObj);
-
     const fileArray = [];
-    if (!configOnly) {
-      setStatus("flashStatus", "מוריד את קובץ המערכת של HeyRobi...", "warn");
+    if (upgradeOnly) {
+      setStatus("flashStatus", "מוריד עדכון קושחה של HeyRobi (ללא נגיעה בזיכרונות ובהגדרות)...", "warn");
       setProgress(4);
-      const fwBytes = await fetchFirmwareBytes();
-      if (fwBytes.length < 200000 || fwBytes[0] !== 0xe9) {
-        throw new Error("קובץ הקושחה שהתקבל אינו תמונת ESP32 תקינה (חסר magic 0xE9).");
+      const appBytes = await fetchFirmwareBytes({ appOnly: true });
+      if (appBytes.length < 200000 || appBytes[0] !== 0xe9) {
+        throw new Error("קובץ עדכון הקושחה שהתקבל אינו תמונת ESP32 תקינה (חסר magic 0xE9).");
       }
-      appendLog(`Firmware loaded (${(fwBytes.length / (1024 * 1024)).toFixed(2)} MB)`);
-      fileArray.push({ data: fwBytes, address: 0x0 });
+      appendLog(`Upgrade app loaded (${(appBytes.length / (1024 * 1024)).toFixed(2)} MB -> 0x20000, NVS 0x9000 untouched)`);
+      fileArray.push({ data: appBytes, address: 0x20000 });
+    } else {
+      const cfgObj = buildConfigObject({ includeSecrets: true });
+      const cfgSector = buildRobiCfgSectorBytes(cfgObj);
+      if (!configOnly) {
+        setStatus("flashStatus", "מוריד את קובץ המערכת של HeyRobi...", "warn");
+        setProgress(4);
+        const fwBytes = await fetchFirmwareBytes({ appOnly: false });
+        if (fwBytes.length < 200000 || fwBytes[0] !== 0xe9) {
+          throw new Error("קובץ הקושחה שהתקבל אינו תמונת ESP32 תקינה (חסר magic 0xE9).");
+        }
+        appendLog(`Firmware loaded (${(fwBytes.length / (1024 * 1024)).toFixed(2)} MB)`);
+        fileArray.push({ data: fwBytes, address: 0x0 });
+      }
+      fileArray.push({ data: cfgSector, address: 0x010000 });
     }
-    fileArray.push({ data: cfgSector, address: 0x010000 });
 
     setStatus("flashStatus", "בחרו את רובי בחלון ה-USB שנפתח (USB JTAG/serial debug unit)...", "warn");
     const port = await navigator.serial.requestPort({
@@ -739,7 +757,9 @@ async function runUsbFlash({ configOnly = false }) {
       "flashStatus",
       configOnly
         ? "מעדכן הגדרות בזיכרון של רובי (שנייה אחת)..."
-        : "צורב את מערכת HeyRobi וההגדרות האישיות שלכם (כ-45–90 שניות, נא לא לנתק את הכבל)...",
+        : upgradeOnly
+          ? "משדרג קושחה בלבד ושומר על כל הזיכרונות וההגדרות (כ-15–25 שניות, נא לא לנתק)..."
+          : "צורב את מערכת HeyRobi וההגדרות האישיות שלכם (כ-45–90 שניות, נא לא לנתק את הכבל)...",
       "warn"
     );
 
@@ -767,7 +787,9 @@ async function runUsbFlash({ configOnly = false }) {
 
     setStatus(
       "flashStatus",
-      "הצריבה הושלמה בהצלחה! רובי מתעורר עכשיו ויתחבר אוטומטית ל-WiFi הביתי שלכם 🎉",
+      upgradeOnly
+        ? "השדרוג הושלם בהצלחה! כל הזיכרונות, ה-WiFi וההגדרות שלך נשמרו במלואם 🎉"
+        : "הצריבה הושלמה בהצלחה! רובי מתעורר עכשיו ויתחבר אוטומטית ל-WiFi הביתי שלכם 🎉",
       "ok"
     );
   } catch (e) {
@@ -778,6 +800,7 @@ async function runUsbFlash({ configOnly = false }) {
       try { await transport.disconnect(); } catch (_) {}
     }
     btnFull.disabled = false;
+    if (btnUpg) btnUpg.disabled = false;
     btnCfg.disabled = false;
   }
 }
@@ -954,10 +977,16 @@ window.addEventListener("DOMContentLoaded", () => {
   });
 
   document.getElementById("btnFlashFull").addEventListener("click", () =>
-    runUsbFlash({ configOnly: false })
+    runUsbFlash({ configOnly: false, upgradeOnly: false })
   );
+  const btnFlashUpg = document.getElementById("btnFlashUpgradeOnly");
+  if (btnFlashUpg) {
+    btnFlashUpg.addEventListener("click", () =>
+      runUsbFlash({ configOnly: false, upgradeOnly: true })
+    );
+  }
   document.getElementById("btnFlashConfigOnly").addEventListener("click", () =>
-    runUsbFlash({ configOnly: true })
+    runUsbFlash({ configOnly: true, upgradeOnly: false })
   );
 
   document.getElementById("btnExportJson").addEventListener("click", exportJsonFile);

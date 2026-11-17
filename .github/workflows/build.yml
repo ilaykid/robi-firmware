@@ -116,9 +116,13 @@ jobs:
           if [[ "${{ needs.build.result }}" == "success" ]]; then
             cp artifacts/heyrobi-firmware-heyrobby/robi-full-heyrobby.bin _site/firmware/
             cp artifacts/heyrobi-firmware-hiesp/robi-full-hiesp.bin _site/firmware/
-            cat artifacts/heyrobi-firmware-*/SHA256SUMS-*.txt > _site/firmware/SHA256SUMS.txt
+            cp "artifacts/heyrobi-firmware-heyrobby/robi-app-heyrobby_${ROBI_VERSION}.bin" _site/firmware/robi-app-heyrobby.bin
+            cp "artifacts/heyrobi-firmware-hiesp/robi-app-hiesp_${ROBI_VERSION}.bin" _site/firmware/robi-app-hiesp.bin
+            (cd _site/firmware && sha256sum *.bin > SHA256SUMS.txt)
           else
-            gh release download "v${ROBI_VERSION}" --pattern "robi-full-*.bin" --dir _site/firmware
+            gh release download "v${ROBI_VERSION}" --pattern "robi-*.bin" --dir _site/firmware
+            mv "_site/firmware/robi-app-heyrobby_${ROBI_VERSION}.bin" _site/firmware/robi-app-heyrobby.bin
+            mv "_site/firmware/robi-app-hiesp_${ROBI_VERSION}.bin" _site/firmware/robi-app-hiesp.bin
             (cd _site/firmware && sha256sum *.bin > SHA256SUMS.txt)
           fi
           touch _site/.nojekyll
