@@ -152,7 +152,8 @@ must_replace(
     "#include <cstring>\n#include <string>\n#include <vector>\n"
     "#include <esp_timer.h>\n#include <wifi_manager.h>\n"
     '#include "assets/lang_config.h"\n'
-    '#include "robi/robi_config.h"\n',
+    '#include "robi/robi_config.h"\n'
+    '#include "robi/robi_gemini_live.h"\n',
 )
 robi_ui = (Path(__file__).resolve().parent / "robi_ui.inc").read_text(encoding="utf-8")
 must_replace(
@@ -453,12 +454,12 @@ must_replace(
 must_replace(
     lcd_cc,
     "    port_cfg.task_priority = 1;\n",
-    "    port_cfg.task_priority = 1;\n    port_cfg.task_stack = 10240;\n",
+    "    port_cfg.task_priority = 1;\n    port_cfg.task_stack = 14336;\n",
     count=3,
 )
 
 # 8. Firmware version
-version = os.environ.get("ROBI_VERSION", "3.0.0")
+version = os.environ.get("ROBI_VERSION", "3.0.1")
 must_replace(fw / "CMakeLists.txt", 'set(PROJECT_VER "2.5.2")', f'set(PROJECT_VER "{version}")')
 
 print("HeyRobi standalone patch completed successfully!")

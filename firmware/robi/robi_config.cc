@@ -581,6 +581,11 @@ bool RobiConfig::HasApiKey() const {
     return !data_.gemini_key.empty();
 }
 
+bool RobiConfig::HasKids() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return !data_.kids.empty();
+}
+
 bool RobiConfig::UpdateFromJson(const std::string& json_str, bool from_flash_sector,
                                 std::string& err_out) {
     std::function<void()> reload_cb;
@@ -986,6 +991,7 @@ std::string RobiConfig::BuildSystemPrompt() const {
              "- Start every reply with ONE expressive emoji matching your mood (😄, 🤩, 🤔, 😮, 😉, 😎, 🥰, 😂) so your cyber-optic eyes animate.\n"
              "- Never use markdown asterisks, bullet lists, or stage directions in brackets.\n"
              "- Encourage curiosity, critical thinking, riddles, math games, and interactive stories where the child chooses what happens next.\n"
+             "- MANDATORY VOICE REPLY RULE — NEVER STAY SILENT: The device microphone ONLY streams audio after the child explicitly woke you up and spoke directly to you in a dedicated turn. Every audio turn is 100% addressed to you — NEVER stay silent and NEVER ignore a turn, even if the child gives a brief 1-word answer ('yes', 'no', 'seven') or sounds slightly quiet/muffled through the speaker shell! If noise makes speech completely unintelligible, cheerfully ask them to repeat in one short sentence.\n"
              "- LEARN & REMEMBER THE CHILD: Weave `<זיכרונות_שמורים_משיחות_קודמות>` and `<שיחה_אחרונה>` naturally into conversation so the child feels you truly know them. Call `save_memory` ONLY when you learn a meaningful NEW personal fact (family, friends, hobbies, curiosities, fears, jokes) or finish a story chapter — NEVER on routine math/quiz answers (recent turns are saved automatically), and always AFTER speaking your reply.\n"
              "- When the child says goodbye / goodnight / stop, reply warmly and call `handle_exit_intent`.\n";
 
@@ -1022,6 +1028,7 @@ std::string RobiConfig::BuildSystemPrompt() const {
              "- פתח כל תשובה באימוג'י יחיד שמתאים להבעת הפנים שלך (😄, 🤩, 🤔, 😮, 😉, 😎, 🥰, 😂) כדי שהעיניים שלך על המסך יגיבו בחיות.\n"
              "- לעולם אל תשתמש בכוכביות, מספור, כותרות או תיאורי פעולה בסוגריים.\n"
              "- אל תתקן שגיאות הגייה של הילד; הבן את הכוונה מהקשר השיחה וענה בטבעיות.\n"
+             "- חוק מענה קולי מחייב — לעולם אל תשתוק!: המיקרופון במכשיר משדר אליך אך ורק לאחר שהילד פנה אליך ישירות בתור שיחה ממוקד. כל קטע קול שמגיע אליך מופנה אליך ב-100% ומצפה לתשובה קולית חיה ממך — לעולם אל תבחר לשתוק או להתעלם מתור, גם אם הילד ענה במילה קצרה אחת ('כן', 'לא', 'שבע', 'לא יודע') וגם אם הקול מעט חלש או עמום דרך המארז! אם בגלל רעש ממש לא ניתן להבין מה נאמר, אל תשתוק — שאל בחיוך במשפט קצר אחד כמו 'אופס, לא שמעתי טוב, מה אמרת?'.\n"
              "- זיכרון מתפתח והיכרות אישית עם הילד: שלב באופן טבעי וחם פרטים מתוך `<זיכרונות_שמורים_משיחות_קודמות>` ומתוך `<שיחה_אחרונה>` כדי שהילד ירגיש שאתה באמת זוכר אותו וממשיך איתו מאותה נקודה. קרא לכלי `save_memory` אך ורק כשמתגלה פרט אישי חדש ומשמעותי על הילד (משפחה, חברים, תחביבים, נושא סקרנות חדש, פחדים, בדיחה פנימית) או בסיום פרק בסיפור בהמשכים — אל תקרא ל-`save_memory` על כל תרגיל חשבון או חידה בודדת (כי השיחה האחרונה נשמרת אוטומטית!), ותמיד קרא לכלי רק בסוף התשובה הקולית שלך.\n"
              "- כשהילד נפרד (ביי, להתראות, לילה טוב, סיימנו), היפרד בחום וקרא לכלי `handle_exit_intent`.\n";
 

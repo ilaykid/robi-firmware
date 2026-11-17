@@ -58,6 +58,7 @@ public:
 
     RobiConfigData Get() const;
     bool HasApiKey() const;
+    bool HasKids() const;
 
     bool UpdateFromJson(const std::string& json_str, bool from_flash_sector, std::string& err_out);
     std::string ExportJson(bool mask_api_key) const;

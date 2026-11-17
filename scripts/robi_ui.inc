@@ -61,7 +61,13 @@
                     RobiApplyPreset("listening", false);
                 }
             } else if (speaking) {
-                robi_face_mode_ = ROBI_MODE_SPEAKING;
+                if (robi_face_mode_ != ROBI_MODE_SPEAKING) {
+                    robi_face_mode_ = ROBI_MODE_SPEAKING;
+                    if (strcmp(robi_last_emotion_, "thinking") == 0 ||
+                        strcmp(robi_last_emotion_, "listening") == 0) {
+                        RobiApplyPreset("happy", false);
+                    }
+                }
             } else {
                 robi_face_mode_ = ROBI_MODE_THINKING;
             }
@@ -407,7 +413,7 @@ private:
             tgt_.mouth_w = 36.0f;
             tgt_.mouth_curve = 9.0f;
         } else if (strcmp(name, "thinking") == 0) {
-            RobiSetTargetRgb(0xA78BFA);
+            RobiSetTargetRgb(base_hex);
             tgt_.eye_w -= 2.0f;
             tgt_.eye_h -= 4.0f;
             tgt_.gaze_x = 15.0f;
@@ -590,7 +596,7 @@ private:
             tgt_.mouth_w = 38.0f;
             tgt_.mouth_curve = -15.0f;
         } else if (strcmp(name, "crying") == 0) {
-            RobiSetTargetRgb(0x4361EE);
+            RobiSetTargetRgb(0x38BDF8);
             tgt_.gaze_y = 10.0f;
             tgt_.squint_top_l = 0.28f;
             tgt_.squint_top_r = 0.28f;
@@ -616,7 +622,7 @@ private:
             tgt_.mouth_w = 40.0f;
             tgt_.mouth_curve = -12.0f;
         } else if (strcmp(name, "sleepy") == 0) {
-            RobiSetTargetRgb(0x6366F1);
+            RobiSetTargetRgb(base_hex);
             tgt_.gaze_y = 6.0f;
             tgt_.squint_top_l = 0.72f;
             tgt_.squint_top_r = 0.72f;
@@ -1201,7 +1207,7 @@ private:
         lv_obj_set_style_bg_grad_color(visor_bar_, lv_color_hex(0x0A1931), 0);
         lv_obj_set_style_bg_grad_dir(visor_bar_, LV_GRAD_DIR_VER, 0);
         lv_obj_set_style_border_width(visor_bar_, 3, 0);
-        lv_obj_set_style_border_color(visor_bar_, lv_color_hex(0xA855F7), 0);
+        lv_obj_set_style_border_color(visor_bar_, lv_color_hex(RobiThemeBaseHex()), 0);
         lv_obj_set_style_radius(visor_bar_, 22, 0);
         lv_obj_add_flag(visor_bar_, LV_OBJ_FLAG_HIDDEN);
 
@@ -1258,7 +1264,7 @@ private:
 
     void RobiUpdateSetupHintVisibility(bool idle) {
         if (robi_setup_hint_ == nullptr || robi_setup_lbl_ == nullptr) return;
-        bool has_kids = !RobiConfig::GetInstance().Get().kids.empty();
+        bool has_kids = RobiConfig::GetInstance().HasKids();
         if (!idle || RobiIsAnyMenuOpen()) {
             lv_obj_add_flag(robi_setup_hint_, LV_OBJ_FLAG_HIDDEN);
             return;
@@ -1338,7 +1344,16 @@ private:
         auto* self = robi_self_;
         if (self == nullptr) return;
         auto& app = Application::GetInstance();
-        if (app.GetDeviceState() != kDeviceStateIdle) return;
+        auto dev_state = app.GetDeviceState();
+        if (dev_state == kDeviceStateListening) {
+            app.Schedule([]() {
+                if (auto* proto = GeminiLiveProtocol::GetActiveInstance()) {
+                    proto->CommitListeningUtterance();
+                }
+            });
+            return;
+        }
+        if (dev_state != kDeviceStateIdle) return;
 
         if (self->RobiIsAnyMenuOpen()) {
             self->RobiStopMenuTimer();
