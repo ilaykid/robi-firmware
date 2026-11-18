@@ -539,11 +539,28 @@ std::string GeminiLiveProtocol::BuildSetupJson(const std::string& model_name,
         cJSON_AddItemToArray(fdecls, fn);
     }
 
-    if (include_google_search) {
-        cJSON* gs_obj = cJSON_CreateObject();
-        cJSON_AddItemToObject(gs_obj, "googleSearch", cJSON_CreateObject());
-        cJSON_AddItemToArray(tools_arr, gs_obj);
+    {
+        cJSON* fn = cJSON_CreateObject();
+        cJSON_AddStringToObject(fn, "name", "web_search");
+        cJSON_AddStringToObject(
+            fn, "description",
+            "Search Google in real time for live weather, sports scores, current events, dates, holidays, prices, or up-to-date facts.");
+        cJSON* params = cJSON_CreateObject();
+        cJSON_AddStringToObject(params, "type", "OBJECT");
+        cJSON* props = cJSON_CreateObject();
+        cJSON* q_prop = cJSON_CreateObject();
+        cJSON_AddStringToObject(q_prop, "type", "STRING");
+        cJSON_AddStringToObject(q_prop, "description", "Focused Google search query");
+        cJSON_AddItemToObject(props, "query", q_prop);
+        cJSON_AddItemToObject(params, "properties", props);
+        cJSON* req = cJSON_CreateArray();
+        cJSON_AddItemToArray(req, cJSON_CreateString("query"));
+        cJSON_AddItemToObject(params, "required", req);
+        cJSON_AddItemToObject(fn, "parameters", params);
+        cJSON_AddItemToArray(fdecls, fn);
     }
+
+    (void)include_google_search;
     cJSON_AddItemToObject(tools_obj, "functionDeclarations", fdecls);
     cJSON_AddItemToArray(tools_arr, tools_obj);
     cJSON_AddItemToObject(setup, "tools", tools_arr);
@@ -805,11 +822,7 @@ bool GeminiLiveProtocol::OpenAudioChannel() {
             continue;
         }
         tried_in_first_pass[c.idx] = true;
-        auto res = TryConnectModel(cfg.gemini_key, c.model, cfg.voice, cfg.language, c.with_lang, true);
-        if (res == ConnectResult::kSetupRejected && IsWifiOnlineWithIp()) {
-            ESP_LOGW(TAG, "Retrying %s without googleSearch grounding tool", c.model);
-            res = TryConnectModel(cfg.gemini_key, c.model, cfg.voice, cfg.language, c.with_lang, false);
-        }
+        auto res = TryConnectModel(cfg.gemini_key, c.model, cfg.voice, cfg.language, c.with_lang, false);
         if (res == ConnectResult::kConnected) {
             g_model_cooldown_until_us[c.idx].store(0, std::memory_order_relaxed);
             return true;
@@ -836,10 +849,7 @@ bool GeminiLiveProtocol::OpenAudioChannel() {
         for (const auto& c : ordered) {
             if (tried_in_first_pass[c.idx]) continue;
             g_model_cooldown_until_us[c.idx].store(0, std::memory_order_relaxed);
-            auto res = TryConnectModel(cfg.gemini_key, c.model, cfg.voice, cfg.language, c.with_lang, true);
-            if (res == ConnectResult::kSetupRejected && IsWifiOnlineWithIp()) {
-                res = TryConnectModel(cfg.gemini_key, c.model, cfg.voice, cfg.language, c.with_lang, false);
-            }
+            auto res = TryConnectModel(cfg.gemini_key, c.model, cfg.voice, cfg.language, c.with_lang, false);
             if (res == ConnectResult::kConnected) {
                 return true;
             }
@@ -2046,6 +2056,99 @@ void GeminiLiveProtocol::HandleToolCalls(const cJSON* tool_call) {
             } else if (name == "get_device_status") {
                 std::string st = Board::GetInstance().GetDeviceStatusJson();
                 cJSON_AddStringToObject(res_obj, "status", st.c_str());
+            } else if (name == "web_search") {
+                EmitEmotion("thinking");
+                const cJSON* q_it = args ? cJSON_GetObjectItemCaseSensitive(args, "query") : nullptr;
+                std::string query = (cJSON_IsString(q_it) && q_it->valuestring != nullptr)
+                                        ? robi::Utf8SafeTruncate(q_it->valuestring, 180)
+                                        : "";
+                std::string answer;
+                auto cfg = RobiConfig::GetInstance().Get();
+                if (!query.empty() && !cfg.gemini_key.empty() && IsWifiOnlineWithIp()) {
+                    const char* search_models[2] = {"gemini-2.5-flash", "gemini-2.0-flash"};
+                    for (int m_idx = 0; m_idx < 2 && answer.empty(); ++m_idx) {
+                        cJSON* s_root = cJSON_CreateObject();
+                        cJSON* contents = cJSON_CreateArray();
+                        cJSON* c0 = cJSON_CreateObject();
+                        cJSON* parts = cJSON_CreateArray();
+                        cJSON* p0 = cJSON_CreateObject();
+                        std::string full_q =
+                            (cfg.language == "en-US")
+                                ? (query + " (Give a concise, factual, up-to-date summary in 2-3 sentences.)")
+                                : (query + " (תן סיכום עובדתי עדכני, מדויק וקצר בעברית ב-2 עד 3 משפטים.)");
+                        cJSON_AddStringToObject(p0, "text", full_q.c_str());
+                        cJSON_AddItemToArray(parts, p0);
+                        cJSON_AddItemToObject(c0, "parts", parts);
+                        cJSON_AddItemToArray(contents, c0);
+                        cJSON_AddItemToObject(s_root, "contents", contents);
+
+                        cJSON* s_tools = cJSON_CreateArray();
+                        cJSON* gs = cJSON_CreateObject();
+                        cJSON_AddItemToObject(gs, "google_search", cJSON_CreateObject());
+                        cJSON_AddItemToArray(s_tools, gs);
+                        cJSON_AddItemToObject(s_root, "tools", s_tools);
+
+                        cJSON* gcfg = cJSON_CreateObject();
+                        cJSON_AddNumberToObject(gcfg, "maxOutputTokens", 280);
+                        cJSON_AddNumberToObject(gcfg, "temperature", 0.1);
+                        if (m_idx == 0) {
+                            cJSON* tcfg = cJSON_CreateObject();
+                            cJSON_AddNumberToObject(tcfg, "thinkingBudget", 0);
+                            cJSON_AddItemToObject(gcfg, "thinkingConfig", tcfg);
+                        }
+                        cJSON_AddItemToObject(s_root, "generationConfig", gcfg);
+
+                        char* req_str = cJSON_PrintUnformatted(s_root);
+                        std::string req_body = req_str ? req_str : "{}";
+                        if (req_str) cJSON_free(req_str);
+                        cJSON_Delete(s_root);
+
+                        auto network = Board::GetInstance().GetNetwork();
+                        auto http = network ? network->CreateHttp(0) : nullptr;
+                        if (http) {
+                            http->SetHeader("Content-Type", "application/json");
+                            http->SetContent(std::move(req_body));
+                            std::string url =
+                                std::string("https://generativelanguage.googleapis.com/v1beta/models/") +
+                                search_models[m_idx] + ":generateContent?key=" + cfg.gemini_key;
+                            if (auto opened = http->Open("POST", url); opened) {
+                                auto sc = http->GetStatusCode();
+                                if (sc && *sc == 200) {
+                                    std::string resp_raw = http->ReadAll();
+                                    cJSON* rj = cJSON_ParseWithLength(resp_raw.data(), resp_raw.size());
+                                    if (rj) {
+                                        const cJSON* cands = cJSON_GetObjectItemCaseSensitive(rj, "candidates");
+                                        const cJSON* cand0 = cJSON_IsArray(cands) ? cJSON_GetArrayItem(cands, 0) : nullptr;
+                                        const cJSON* cont = cand0 ? cJSON_GetObjectItemCaseSensitive(cand0, "content") : nullptr;
+                                        const cJSON* rparts = cont ? cJSON_GetObjectItemCaseSensitive(cont, "parts") : nullptr;
+                                        if (cJSON_IsArray(rparts)) {
+                                            const cJSON* rp = nullptr;
+                                            cJSON_ArrayForEach(rp, rparts) {
+                                                const cJSON* txt = cJSON_GetObjectItemCaseSensitive(rp, "text");
+                                                if (cJSON_IsString(txt) && txt->valuestring != nullptr) {
+                                                    answer += txt->valuestring;
+                                                }
+                                            }
+                                        }
+                                        cJSON_Delete(rj);
+                                    }
+                                } else {
+                                    ESP_LOGW(TAG, "web_search HTTP status=%d on %s",
+                                             sc ? *sc : -1, search_models[m_idx]);
+                                }
+                                http->Close();
+                            }
+                        }
+                    }
+                }
+                answer = robi::Utf8SafeTruncate(answer, 900);
+                if (!answer.empty()) {
+                    ESP_LOGI(TAG, "web_search OK (%u bytes)", static_cast<unsigned>(answer.size()));
+                    cJSON_AddStringToObject(res_obj, "search_results", answer.c_str());
+                } else {
+                    cJSON_AddStringToObject(res_obj, "search_results",
+                                            "Live search unavailable right now; answer briefly from general knowledge.");
+                }
             } else {
                 cJSON_AddStringToObject(res_obj, "result", "unknown_tool");
             }
