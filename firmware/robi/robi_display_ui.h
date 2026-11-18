@@ -46,8 +46,11 @@
                 robi_voice_env_ = 0.0f;
                 RobiApplyPreset("neutral", false);
             }
-            if (!RobiIsAnyMenuOpen() && !RobiIsArcadeOrGameOpen() && robi_profiles_ != nullptr) {
-                RobiSetHidden(robi_profiles_, false);
+            if (!RobiIsAnyMenuOpen() && !RobiIsArcadeOrGameOpen()) {
+                if (robi_profiles_ != nullptr) {
+                    RobiSetHidden(robi_profiles_, false);
+                }
+                RobiSetHidden(robi_games_home_btn_, false);
             }
         } else {
             if (listening) {
@@ -78,6 +81,7 @@
                 robi_face_mode_ = robi::ROBI_MODE_THINKING;
             }
             RobiSetHidden(robi_profiles_, true);
+            RobiSetHidden(robi_games_home_btn_, true);
             RobiHideAllMenus();
             RobiStopMenuTimer();
         }
@@ -900,7 +904,9 @@ private:
         lv_obj_remove_flag(emoji_box_, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_flag(emoji_box_, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_event_cb(emoji_box_, OnTouchGestureTrack, LV_EVENT_PRESSED, nullptr);
+        lv_obj_add_event_cb(emoji_box_, OnTouchGestureTrack, LV_EVENT_PRESSING, nullptr);
         lv_obj_add_event_cb(emoji_box_, OnTouchGestureTrack, LV_EVENT_RELEASED, nullptr);
+        lv_obj_add_event_cb(emoji_box_, OnTouchGestureTrack, LV_EVENT_PRESS_LOST, nullptr);
         lv_obj_add_event_cb(emoji_box_, OnFaceTap, LV_EVENT_CLICKED, nullptr);
 
         hud_track_ = RobiPlainObj(emoji_box_);
@@ -1031,6 +1037,7 @@ private:
             }
         }
         RobiSetHidden(self->robi_profiles_, true);
+        RobiSetHidden(self->robi_games_home_btn_, true);
         RobiSetHidden(menu, false);
         self->RobiUpdateSetupHintVisibility(true);
         self->RobiStopMenuTimer();
@@ -1045,8 +1052,13 @@ private:
         self->robi_menu_timer_ = nullptr;
         self->RobiHideAllMenus();
         bool is_idle = (Application::GetInstance().GetDeviceState() == kDeviceStateIdle);
-        if (is_idle && self->robi_profiles_ != nullptr) {
-            RobiSetHidden(self->robi_profiles_, false);
+        if (is_idle) {
+            if (self->robi_profiles_ != nullptr) {
+                RobiSetHidden(self->robi_profiles_, false);
+            }
+            if (!self->RobiIsArcadeOrGameOpen()) {
+                RobiSetHidden(self->robi_games_home_btn_, false);
+            }
         }
         self->RobiUpdateSetupHintVisibility(is_idle);
     }
@@ -1101,6 +1113,7 @@ private:
             self->RobiStopMenuTimer();
             self->RobiHideAllMenus();
             RobiSetHidden(self->robi_profiles_, false);
+            RobiSetHidden(self->robi_games_home_btn_, false);
             self->RobiUpdateSetupHintVisibility(true);
             return;
         }
@@ -1263,6 +1276,12 @@ private:
             }
         }
 
+        if (robi_games_home_btn_ != nullptr) {
+            lv_obj_move_foreground(robi_games_home_btn_);
+            bool show_games_btn = (Application::GetInstance().GetDeviceState() == kDeviceStateIdle) &&
+                                  !RobiIsAnyMenuOpen() && !RobiIsArcadeOrGameOpen() && !imu_sleeping_;
+            RobiSetHidden(robi_games_home_btn_, !show_games_btn);
+        }
         if (robi_setup_hint_ != nullptr) {
             lv_obj_move_foreground(robi_setup_hint_);
         }

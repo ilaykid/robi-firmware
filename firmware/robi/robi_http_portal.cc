@@ -132,11 +132,17 @@ esp_err_t HandleConfigPost(httpd_req_t* req) {
 }
 
 esp_err_t HandleStatusGet(httpd_req_t* req) {
+    bool include_ui = false;
     char query_buf[64] = {};
     if (httpd_req_get_url_query_str(req, query_buf, sizeof(query_buf)) == ESP_OK) {
         char day_buf[16] = {};
         if (httpd_query_key_value(query_buf, "day", day_buf, sizeof(day_buf)) == ESP_OK) {
             RobiConfig::GetInstance().SyncUsageDay(day_buf);
+        }
+        char ui_buf[8] = {};
+        if (httpd_query_key_value(query_buf, "ui", ui_buf, sizeof(ui_buf)) == ESP_OK &&
+            ui_buf[0] == '1') {
+            include_ui = true;
         }
     }
 
@@ -282,6 +288,14 @@ esp_err_t HandleStatusGet(httpd_req_t* req) {
     cJSON_AddNumberToObject(imu_obj, "ay", std::round(samp.ay * 100.0f) / 100.0f);
     cJSON_AddNumberToObject(imu_obj, "az", std::round(samp.az * 100.0f) / 100.0f);
     cJSON_AddItemToObject(root, "imu", imu_obj);
+
+    if (include_ui) {
+        std::string ui_raw = RobiConfig::GetInstance().GetUiStatusJson();
+        cJSON* ui_obj = cJSON_ParseWithLength(ui_raw.data(), ui_raw.size());
+        if (ui_obj != nullptr) {
+            cJSON_AddItemToObject(root, "ui", ui_obj);
+        }
+    }
 
     char* s = cJSON_PrintUnformatted(root);
     std::string out = s ? s : "{}";

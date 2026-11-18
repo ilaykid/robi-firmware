@@ -12,6 +12,7 @@
         kTriviaH2H = 2,
     };
 
+    lv_obj_t* robi_games_home_btn_ = nullptr;
     lv_obj_t* robi_arcade_scr_ = nullptr;
     lv_obj_t* robi_arcade_title_ = nullptr;
     lv_obj_t* robi_arcade_btn_hu_ = nullptr;
@@ -63,6 +64,9 @@
 
     int32_t touch_press_x_ = 0;
     int32_t touch_press_y_ = 0;
+    int32_t touch_last_x_ = 0;
+    int32_t touch_last_y_ = 0;
+    bool touch_swipe_latched_ = false;
     int64_t swipe_guard_until_us_ = 0;
 
     int64_t dizzy_until_us_ = 0;
@@ -165,6 +169,7 @@
         const bool en = (cfg.language == "en-US");
 
         lv_label_set_text(robi_arcade_title_, en ? "Robi Games" : "משחקי רובי");
+        SetButtonLabelText(robi_games_home_btn_, en ? "Games" : "משחקים");
         SetButtonLabelText(robi_arcade_btn_hu_, en ? "Heads Up! (Tilt Game)" : "נחש מה על המצח!");
         SetButtonLabelText(robi_arcade_btn_tr1_, en ? "Live Screen Trivia" : "טריוויה חיה — יחיד");
         if (cfg.kids.size() >= 2) {
@@ -224,6 +229,9 @@
             if (robi_profiles_ != nullptr) {
                 RobiSetHidden(robi_profiles_, false);
             }
+            if (!RobiIsAnyMenuOpen()) {
+                RobiSetHidden(robi_games_home_btn_, false);
+            }
             RobiUpdateSetupHintVisibility(true);
         }
     }
@@ -252,6 +260,9 @@
             if (robi_profiles_ != nullptr) {
                 RobiSetHidden(robi_profiles_, false);
             }
+            if (!RobiIsAnyMenuOpen()) {
+                RobiSetHidden(robi_games_home_btn_, false);
+            }
             RobiUpdateSetupHintVisibility(true);
         }
     }
@@ -260,6 +271,7 @@
         RobiStopMenuTimer();
         RobiHideAllMenus();
         RobiHideTriviaOverlayLocked(true, false);
+        RobiSetHidden(robi_games_home_btn_, true);
         RobiSetHidden(robi_profiles_, true);
         RobiSetHidden(robi_setup_hint_, true);
         RobiSetHidden(robi_hu_menu_, true);
@@ -641,6 +653,55 @@
 #endif
     }
 
+    void RobiTriggerHorizontalSwipeLocked() {
+        int64_t now_us = esp_timer_get_time();
+        if (now_us < swipe_guard_until_us_) {
+            return;
+        }
+        swipe_guard_until_us_ = now_us + 450000LL;
+        RobiWakePowerSave();
+        if (heads_up_.IsActive() || trivia_.IsActive()) {
+            return;
+        }
+        auto dev_state = Application::GetInstance().GetDeviceState();
+        if (dev_state != kDeviceStateIdle && dev_state != kDeviceStateListening) {
+            return;
+        }
+        if (dev_state == kDeviceStateListening) {
+            // User swiped while Robi was waiting in Listening -> close voice channel & open Games!
+            Application::GetInstance().Schedule([]() {
+                if (auto* proto = GeminiLiveProtocol::GetActiveInstance()) {
+                    proto->CancelPendingTurnAudio();
+                    if (proto->IsAudioChannelOpened()) {
+                        proto->CloseAudioChannel(false);
+                    }
+                }
+            });
+        }
+        if (RobiIsArcadeOrGameOpen()) {
+            RobiCloseAllGameScreensLocked(true);
+        } else {
+            RobiOpenArcadeMenuLocked();
+        }
+#ifdef ESP_PLATFORM
+        Application::GetInstance().Schedule([]() {
+            robi::PlayRobiSfx(robi::RobiSfxId::kUiPop, false);
+        });
+#endif
+    }
+
+    static void OnScreenGesture(lv_event_t*) {
+        auto* self = robi_self_;
+        if (self == nullptr) return;
+        lv_indev_t* indev = lv_indev_active();
+        if (indev == nullptr) return;
+        lv_dir_t dir = lv_indev_get_gesture_dir(indev);
+        if (dir == LV_DIR_LEFT || dir == LV_DIR_RIGHT) {
+            self->touch_swipe_latched_ = true;
+            self->RobiTriggerHorizontalSwipeLocked();
+        }
+    }
+
     static void OnTouchGestureTrack(lv_event_t* e) {
         auto* self = robi_self_;
         if (self == nullptr) return;
@@ -653,41 +714,55 @@
         if (code == LV_EVENT_PRESSED) {
             self->touch_press_x_ = pt.x;
             self->touch_press_y_ = pt.y;
+            self->touch_last_x_ = pt.x;
+            self->touch_last_y_ = pt.y;
+            self->touch_swipe_latched_ = false;
 #ifdef ESP_PLATFORM
             robi::RobiImuService::GetInstance().NotifyScreenTouched();
 #endif
             return;
         }
 
-        if (code == LV_EVENT_RELEASED) {
-            int32_t dx = pt.x - self->touch_press_x_;
-            int32_t dy = pt.y - self->touch_press_y_;
-            if (std::abs(dx) >= 68 && std::abs(dx) * 10 > std::abs(dy) * 12) {
-                self->swipe_guard_until_us_ = esp_timer_get_time() + 300000LL;
-                RobiWakePowerSave();
-                if (self->heads_up_.IsActive() || self->trivia_.IsActive()) {
-                    return;
+        if (code == LV_EVENT_PRESSING) {
+            // Note: esp_lvgl_port zeroes data->point to (0,0) on LV_EVENT_RELEASED,
+            // so real finger drag coordinates MUST be sampled during LV_EVENT_PRESSING!
+            if (pt.x != 0 || pt.y != 0) {
+                self->touch_last_x_ = pt.x;
+                self->touch_last_y_ = pt.y;
+            }
+            if (!self->touch_swipe_latched_) {
+                int32_t dx = self->touch_last_x_ - self->touch_press_x_;
+                int32_t dy = self->touch_last_y_ - self->touch_press_y_;
+                if (std::abs(dx) >= 56 && std::abs(dx) * 10 > std::abs(dy) * 12) {
+                    self->touch_swipe_latched_ = true;
+                    self->RobiTriggerHorizontalSwipeLocked();
                 }
-                if (Application::GetInstance().GetDeviceState() != kDeviceStateIdle) {
-                    return;
-                }
-                if (self->RobiIsArcadeOrGameOpen()) {
-                    self->RobiCloseAllGameScreensLocked(true);
-#ifdef ESP_PLATFORM
-                    Application::GetInstance().Schedule([]() {
-                        robi::PlayRobiSfx(robi::RobiSfxId::kUiPop, false);
-                    });
-#endif
-                } else {
-                    self->RobiOpenArcadeMenuLocked();
-#ifdef ESP_PLATFORM
-                    Application::GetInstance().Schedule([]() {
-                        robi::PlayRobiSfx(robi::RobiSfxId::kUiPop, false);
-                    });
-#endif
+            }
+            return;
+        }
+
+        if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+            if (!self->touch_swipe_latched_) {
+                int32_t dx = self->touch_last_x_ - self->touch_press_x_;
+                int32_t dy = self->touch_last_y_ - self->touch_press_y_;
+                if (std::abs(dx) >= 56 && std::abs(dx) * 10 > std::abs(dy) * 12) {
+                    self->touch_swipe_latched_ = true;
+                    self->RobiTriggerHorizontalSwipeLocked();
                 }
             }
         }
+    }
+
+    static void OnHomeOpenArcadeBtn(lv_event_t*) {
+        RobiWakePowerSave();
+        auto* self = robi_self_;
+        if (self == nullptr) return;
+        self->RobiOpenArcadeMenuLocked();
+#ifdef ESP_PLATFORM
+        Application::GetInstance().Schedule([]() {
+            robi::PlayRobiSfx(robi::RobiSfxId::kUiPop, false);
+        });
+#endif
     }
 
     static void OnArcadeBtnHeadsUp(lv_event_t*) {
@@ -868,6 +943,12 @@
     void RobiInitArcadeWidgets() {
         lv_obj_t* scr = lv_screen_active();
         if (scr == nullptr) return;
+        lv_obj_add_event_cb(scr, OnScreenGesture, LV_EVENT_GESTURE, nullptr);
+
+        // 0. Home Screen Quick "משחקים" (Games) Pill Button at top center
+        robi_games_home_btn_ = RobiPillBtnPx(scr, "משחקים", 0x10B981, 132, 40,
+                                             OnHomeOpenArcadeBtn, nullptr);
+        lv_obj_align(robi_games_home_btn_, LV_ALIGN_TOP_MID, 0, 18);
 
         // 1. Robi Arcade Main Menu (466x466 circular layout)
         robi_arcade_scr_ = lv_obj_create(scr);
@@ -881,7 +962,9 @@
         lv_obj_set_style_pad_all(robi_arcade_scr_, 0, 0);
         lv_obj_remove_flag(robi_arcade_scr_, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_event_cb(robi_arcade_scr_, OnTouchGestureTrack, LV_EVENT_PRESSED, nullptr);
+        lv_obj_add_event_cb(robi_arcade_scr_, OnTouchGestureTrack, LV_EVENT_PRESSING, nullptr);
         lv_obj_add_event_cb(robi_arcade_scr_, OnTouchGestureTrack, LV_EVENT_RELEASED, nullptr);
+        lv_obj_add_event_cb(robi_arcade_scr_, OnTouchGestureTrack, LV_EVENT_PRESS_LOST, nullptr);
 
         robi_arcade_title_ = lv_label_create(robi_arcade_scr_);
         lv_obj_set_style_text_color(robi_arcade_title_, lv_color_hex(0x00E5FF), 0);
@@ -1182,6 +1265,7 @@
 
         if (imu_ev.enter_face_down_sleep && !imu_sleeping_) {
             imu_sleeping_ = true;
+            RobiSetHidden(robi_games_home_btn_, true);
             RobiCloseAllGameScreensLocked(false);
             RobiHideTriviaOverlayLocked(true, false);
             RobiApplyPreset("sleepy", false);
@@ -1209,8 +1293,13 @@
             imu_sleeping_ = false;
             int restore_b = pre_sleep_bri_;
             RobiApplyPreset("happy", true);
-            if (dev_state == kDeviceStateIdle && robi_profiles_ != nullptr && !RobiIsArcadeOrGameOpen()) {
-                RobiSetHidden(robi_profiles_, false);
+            if (dev_state == kDeviceStateIdle && !RobiIsArcadeOrGameOpen()) {
+                if (robi_profiles_ != nullptr) {
+                    RobiSetHidden(robi_profiles_, false);
+                }
+                if (!RobiIsAnyMenuOpen()) {
+                    RobiSetHidden(robi_games_home_btn_, false);
+                }
             }
             Application::GetInstance().Schedule([restore_b]() {
                 if (auto* bl = Board::GetInstance().GetBacklight()) {
