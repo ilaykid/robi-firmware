@@ -7,8 +7,6 @@
 
 # Robi – 3D-Printable Enclosure for Waveshare ESP32-S3-Touch-AMOLED-1.75 (v4, "Sturdy Robi")
 
-![HeyRobi 3D Enclosure](robi_front.png)
-
 A 3D-printable desktop enclosure for the **standard bare Waveshare ESP32-S3-Touch-AMOLED-1.75 board (no metal case, SKU 31261)**.  
 It keeps the same friendly character and board clearances as v3.1 (touchscreen, PWR, BOOT, USB-C, microSD, dual microphones), rebuilt from the ground up to survive everyday handling by kids.  
 Board dimensions were taken from Waveshare's mechanical drawing and should be test-fitted on your printer first — print `robi_fit_test.stl` and the two head halves before printing the rest.

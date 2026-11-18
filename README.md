@@ -7,7 +7,9 @@
 
 # HeyRobi 🤖 — Open-Source Zero-Server AI Voice Robot for Kids
 
-![HeyRobi 3D Enclosure](case/Robi_v4/robi_front.png)
+<p align="center">
+  <img src="docs/hero-preview.jpg" alt="HeyRobi Round Touch AMOLED Face" width="480" />
+</p>
 
 **HeyRobi** turns a `Waveshare ESP32-S3-Touch-AMOLED-1.75` round touchscreen board and a 3D-printable desktop enclosure into a smart, kid-safe, personalized AI voice companion — **connecting directly to Google Gemini Live (`Gemini 3.8 Live`) over home WiFi, with zero server, zero Docker, and zero PC required!**
 
