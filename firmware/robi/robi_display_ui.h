@@ -46,7 +46,7 @@
                 robi_voice_env_ = 0.0f;
                 RobiApplyPreset("neutral", false);
             }
-            if (!RobiIsAnyMenuOpen() && robi_profiles_ != nullptr) {
+            if (!RobiIsAnyMenuOpen() && !RobiIsArcadeOrGameOpen() && robi_profiles_ != nullptr) {
                 RobiSetHidden(robi_profiles_, false);
             }
         } else {
@@ -81,7 +81,7 @@
             RobiHideAllMenus();
             RobiStopMenuTimer();
         }
-        RobiSetHidden(robi_tap_, !speaking);
+        RobiSetHidden(robi_tap_, !speaking || trivia_visible_);
     }
 
     virtual void SetEmotion(const char* emotion) override {
@@ -97,11 +97,26 @@
         if (emotion == nullptr || emotion[0] == '\0' || !robi_face_ready_) {
             return;
         }
+        if (std::strcmp(emotion, "arcade:open") == 0) {
+            RobiOpenArcadeMenuLocked();
+            return;
+        }
+        if (std::strcmp(emotion, "arcade:close") == 0) {
+            RobiCloseAllGameScreensLocked(true);
+            RobiHideTriviaOverlayLocked();
+            return;
+        }
+        if (std::strncmp(emotion, "headsup:", 8) == 0) {
+            int c_idx = std::atoi(emotion + 8);
+            RobiStartOfflineHeadsUpLocked(c_idx);
+            return;
+        }
         if (std::strncmp(emotion, "kid:", 4) == 0) {
             int k_idx = std::atoi(emotion + 4);
             RobiStopMenuTimer();
             RobiHideAllMenus();
             if (k_idx >= 0 && k_idx < kMaxKids && robi_menus_[k_idx] != nullptr) {
+                RobiConfig::GetInstance().ActivateKidScope(static_cast<size_t>(k_idx));
                 RobiSetHidden(robi_profiles_, true);
                 RobiSetHidden(robi_menus_[k_idx], false);
                 RobiUpdateSetupHintVisibility(true);
@@ -512,6 +527,11 @@ private:
         dt = robi::RobiClamp(dt, 0.010f, 0.090f);
         phase_t_ += dt;
 
+        RobiStepArcadeAndImuLocked(now_us, dt);
+        if (imu_sleeping_ || heads_up_.IsActive()) {
+            return;
+        }
+
         if (++hint_poll_div_ >= 50) {
             hint_poll_div_ = 0;
             RobiUpdateSetupHintVisibility(robi_face_mode_ == robi::ROBI_MODE_IDLE);
@@ -692,10 +712,22 @@ private:
         float sq_top_r = std::max(cur_.squint_top_r, blink_amt);
         float scan_norm = 0.5f + 0.46f * std::sin(phase_t_ * 1.65f);
 
+        float gx_l = gx;
+        float gy_l = gy;
+        float gx_r = gx;
+        float gy_r = gy;
+        if (dizzy_until_us_ > now_us) {
+            float spin = phase_t_ * 11.5f;
+            gx_l += std::cos(spin) * 18.0f * face_scale_;
+            gy_l += std::sin(spin) * 18.0f * face_scale_;
+            gx_r -= std::cos(spin) * 18.0f * face_scale_;
+            gy_r += std::sin(spin) * 18.0f * face_scale_;
+        }
+
         RobiRenderEye(eye_l_, cx_mid - sep, cy_eyes, ew, eh, rad, cur_.pupil_scale,
-                      gx, gy, sq_top_l, cur_.squint_bot_l, scan_norm, c_hi, c_mid, color_dirty);
+                      gx_l, gy_l, sq_top_l, cur_.squint_bot_l, scan_norm, c_hi, c_mid, color_dirty);
         RobiRenderEye(eye_r_, cx_mid + sep, cy_eyes, ew, eh, rad, cur_.pupil_scale,
-                      gx, gy, sq_top_r, cur_.squint_bot_r, scan_norm, c_hi, c_mid, color_dirty);
+                      gx_r, gy_r, sq_top_r, cur_.squint_bot_r, scan_norm, c_hi, c_mid, color_dirty);
 
         float brow_offset = full_visor ? (48.0f * face_scale_) : (eh * 0.5f + 18.0f * face_scale_);
         float brow_base_y = cy_eyes - brow_offset - robi_voice_smooth_ * 4.0f;
@@ -852,6 +884,8 @@ private:
         lv_obj_set_scrollbar_mode(emoji_box_, LV_SCROLLBAR_MODE_OFF);
         lv_obj_remove_flag(emoji_box_, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_flag(emoji_box_, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(emoji_box_, OnTouchGestureTrack, LV_EVENT_PRESSED, nullptr);
+        lv_obj_add_event_cb(emoji_box_, OnTouchGestureTrack, LV_EVENT_RELEASED, nullptr);
         lv_obj_add_event_cb(emoji_box_, OnFaceTap, LV_EVENT_CLICKED, nullptr);
 
         hud_track_ = RobiPlainObj(emoji_box_);
@@ -943,8 +977,9 @@ private:
 
     void RobiUpdateSetupHintVisibility(bool idle) {
         if (robi_setup_hint_ == nullptr || robi_setup_lbl_ == nullptr) return;
-        bool has_kids = RobiConfig::GetInstance().HasKids();
-        if (!idle || RobiIsAnyMenuOpen()) {
+        bool has_kids = (RobiConfig::GetInstance().Get().persona_mode != "assistant") &&
+                        RobiConfig::GetInstance().HasKids();
+        if (!idle || RobiIsAnyMenuOpen() || RobiIsArcadeOrGameOpen()) {
             RobiSetHidden(robi_setup_hint_, true);
             return;
         }
@@ -974,6 +1009,12 @@ private:
         lv_obj_t* menu = static_cast<lv_obj_t*>(lv_event_get_user_data(e));
         auto* self = robi_self_;
         if (self == nullptr || menu == nullptr) return;
+        for (int i = 0; i < kMaxKids; ++i) {
+            if (self->robi_menus_[i] == menu) {
+                RobiConfig::GetInstance().ActivateKidScope(static_cast<size_t>(i));
+                break;
+            }
+        }
         RobiSetHidden(self->robi_profiles_, true);
         RobiSetHidden(menu, false);
         self->RobiUpdateSetupHintVisibility(true);
@@ -1018,6 +1059,9 @@ private:
         RobiWakePowerSave();
         auto* self = robi_self_;
         if (self == nullptr) return;
+        if (esp_timer_get_time() < self->swipe_guard_until_us_) {
+            return;
+        }
         auto& app = Application::GetInstance();
         auto dev_state = app.GetDeviceState();
         if (dev_state == kDeviceStateListening) {
@@ -1045,7 +1089,9 @@ private:
             self->RobiUpdateSetupHintVisibility(true);
             return;
         }
-        ESP_LOGI(TAG, "Robi face tap: start listening");
+        RobiConfig::GetInstance().ActivateDefaultWakeScope();
+        ESP_LOGI(TAG, "Robi face tap: start listening (scope=%s)",
+                 RobiConfig::GetInstance().GetActiveScope().c_str());
         app.ToggleChatState();
     }
 
@@ -1150,8 +1196,11 @@ private:
             cur_ = tgt_;
         }
 
-        size_t n_kids = std::min<size_t>(cfg.kids.size(), kMaxKids);
+        size_t n_kids = (cfg.persona_mode == "assistant")
+                            ? 0
+                            : std::min<size_t>(cfg.kids.size(), kMaxKids);
         robi_prompt_pool_.reserve(n_kids * 5 + 2);
+        RobiRefreshGameLocaleLocked();
 
         if (n_kids > 0) {
             int btn_w_px = (n_kids == 1) ? 156 : ((n_kids == 2) ? 132 : 98);
@@ -1248,6 +1297,7 @@ private:
         lv_obj_add_flag(robi_tap_, LV_OBJ_FLAG_HIDDEN);
 
         RobiInitCyberFace();
+        RobiInitArcadeWidgets();
         RobiRebuildDynamicConfigLocked();
 
         RobiConfig::GetInstance().SetUiReloadCallback([]() {
@@ -1310,7 +1360,12 @@ private:
         if (open_menu >= 0) {
             out += ",\"active_menu\":" + rect_str(robi_menus_[open_menu]);
         }
+        out += ",\"arcade_open\":" + std::string(RobiIsArcadeOrGameOpen() ? "true" : "false");
+        out += ",\"headsup_phase\":" + std::to_string(static_cast<int>(heads_up_.phase()));
+        out += ",\"trivia_visible\":" + std::string(trivia_visible_ ? "true" : "false");
         out += "}";
         return out;
     }
+
+#include "robi/robi_arcade_ui.h"
     // ===================== end OpenRobi UI =====================

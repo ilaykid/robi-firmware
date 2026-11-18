@@ -64,6 +64,7 @@ const state = {
   step: 1,
   gemini_key: "",
   preferred_model: "auto",
+  persona_mode: "hybrid",
   keyVerified: false,
   robot_name: "רובי",
   language: "he-IL",
@@ -93,6 +94,9 @@ function loadDraft() {
     if (!raw) return;
     const saved = JSON.parse(raw);
     if (saved.preferred_model) state.preferred_model = saved.preferred_model;
+    if (saved.persona_mode === "kids" || saved.persona_mode === "assistant" || saved.persona_mode === "hybrid") {
+      state.persona_mode = saved.persona_mode;
+    }
     if (saved.robot_name) state.robot_name = saved.robot_name;
     if (saved.language) state.language = saved.language;
     if (saved.voice) state.voice = saved.voice;
@@ -120,6 +124,7 @@ function saveDraft() {
     // Security: never store gemini_key, wifi_ssid, or wifi_pass in persistent browser localStorage
     const safeCopy = {
       preferred_model: state.preferred_model,
+      persona_mode: state.persona_mode,
       robot_name: state.robot_name,
       language: state.language,
       voice: state.voice,
@@ -144,7 +149,7 @@ function syncSimulator() {
     styleId: state.face_style,
     themeId: state.face_theme,
     robotName: state.robot_name,
-    kids: state.kids,
+    kids: state.persona_mode === "assistant" ? [] : state.kids,
   });
 }
 
@@ -585,6 +590,7 @@ export function buildConfigObject({ includeSecrets = true } = {}) {
     bot_name: rName,
     robot_name: rName,
     preferred_model: state.preferred_model || "auto",
+    persona_mode: state.persona_mode || "hybrid",
     voice: state.voice || "Puck",
     language: state.language || "he-IL",
     theme: fTheme,
@@ -832,6 +838,9 @@ function importJsonFile(file) {
     try {
       const data = JSON.parse(String(reader.result));
       if (data.preferred_model) state.preferred_model = data.preferred_model;
+      if (data.persona_mode === "kids" || data.persona_mode === "assistant" || data.persona_mode === "hybrid") {
+        state.persona_mode = data.persona_mode;
+      }
       if (data.robot_name || data.bot_name) state.robot_name = data.robot_name || data.bot_name;
       if (data.language) state.language = data.language;
       if (data.voice) state.voice = data.voice;
@@ -858,10 +867,20 @@ function importJsonFile(file) {
   reader.readAsText(file);
 }
 
+function syncKidsSectionVisibility() {
+  const wrap = document.getElementById("kidsSectionWrap");
+  if (wrap) {
+    wrap.style.display = state.persona_mode === "assistant" ? "none" : "block";
+  }
+}
+
 function hydrateInputs() {
   document.getElementById("inpGeminiKey").value = state.gemini_key;
   const selMod = document.getElementById("selPreferredModel");
   if (selMod) selMod.value = state.preferred_model || "auto";
+  const selPm = document.getElementById("selPersonaMode");
+  if (selPm) selPm.value = state.persona_mode || "hybrid";
+  syncKidsSectionVisibility();
   document.getElementById("inpRobotName").value = state.robot_name;
   document.getElementById("selLanguage").value = state.language;
   document.getElementById("rngVolume").value = state.volume;
@@ -917,6 +936,14 @@ window.addEventListener("DOMContentLoaded", () => {
   if (selMod) {
     selMod.addEventListener("change", (e) => {
       state.preferred_model = e.target.value;
+      saveDraft();
+    });
+  }
+  const selPm = document.getElementById("selPersonaMode");
+  if (selPm) {
+    selPm.addEventListener("change", (e) => {
+      state.persona_mode = e.target.value;
+      syncKidsSectionVisibility();
       saveDraft();
     });
   }

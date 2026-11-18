@@ -1,6 +1,9 @@
 #include "../firmware/robi/robi_audio_sync.h"
 #include "../firmware/robi/robi_face_math.h"
+#include "../firmware/robi/robi_games.h"
+#include "../firmware/robi/robi_imu.h"
 #include "../firmware/robi/robi_mdns.h"
+#include "../firmware/robi/robi_sfx.h"
 #include "../firmware/robi/robi_utf8.h"
 
 #include <cassert>
@@ -353,6 +356,158 @@ void TestMdnsParserAndNsecBuilder() {
     assert(!robi::ParseMdnsRobiLocalQuery(loop_pkt, sizeof(loop_pkt), qtype));
 }
 
+void TestImuGesturesAndForeheadTilt() {
+    robi::ImuGestureTracker trk;
+    trk.Reset();
+    trk.SetZFrontSign(-1.0f);  // Test inverted back-mounted PCB sign (`az = -1g` when screen faces sky)
+
+    // 1. Desk bump / speaker bass vibration WITHOUT gyro rotation must NEVER false-trigger dizzy!
+    for (int i = 0; i < 30; ++i) {
+        robi::ImuSample bump = {(i % 2 == 0) ? 1.9f : -1.9f, 0.0f, -0.95f, 15.0f, 10.0f, 5.0f};
+        auto ev = trk.Step(bump, 40);
+        assert(!ev.shake_dizzy && !ev.enter_face_down_sleep);
+    }
+
+    // 2. Deliberate in-hand shake (alternating linear g + >165 dps gyro) triggers shake_dizzy once!
+    bool got_dizzy = false;
+    for (int i = 0; i < 8; ++i) {
+        float dir = (i % 2 == 0) ? 1.0f : -1.0f;
+        robi::ImuSample shake = {2.1f * dir, 0.2f, -0.3f, 0.0f, 220.0f * dir, 90.0f};
+        auto ev = trk.Step(shake, 40);
+        if (ev.shake_dizzy) {
+            assert(!got_dizzy);  // Cooldown prevents immediate duplicate trigger
+            got_dizzy = true;
+        }
+    }
+    assert(got_dizzy);
+
+    // 3. Flipping flat face-down (`az = +0.96g` -> `screen_z = -0.96g`) enters sleep after 650ms,
+    //    and lifting back up exits sleep cleanly!
+    bool entered_sleep = false;
+    for (int i = 0; i < 20; ++i) {
+        robi::ImuSample face_down = {0.05f, -0.04f, 0.96f, 2.0f, 1.0f, 0.0f};
+        auto ev = trk.Step(face_down, 40);
+        if (ev.enter_face_down_sleep) entered_sleep = true;
+    }
+    assert(entered_sleep && trk.is_face_down());
+
+    bool exited_sleep = false;
+    for (int i = 0; i < 8; ++i) {
+        robi::ImuSample picked_up = {0.0f, 0.92f, -0.35f, 25.0f, 0.0f, 0.0f};
+        auto ev = trk.Step(picked_up, 40);
+        if (ev.exit_face_down_sleep) exited_sleep = true;
+    }
+    assert(exited_sleep && !trk.is_face_down());
+
+    // 4. Forehead game ("נחש מה על המצח"): works at ANY 360-degree roll of the round screen!
+    trk.SetForeheadMode(true);
+    // Wait out initial 300ms refractory + arm upright at rotated 60-degree grip (`ax=0.85, ay=0.50, az=0.0`)
+    for (int i = 0; i < 16; ++i) {
+        auto ev = trk.Step({0.85f, 0.50f, 0.02f, 5.0f, 5.0f, 5.0f}, 40);
+        assert(ev.forehead_action == robi::ForeheadAction::kNone);
+    }
+    assert(trk.is_forehead_armed());
+
+    // Nod glass toward floor (`screen_z = -0.82g` -> `az = +0.82g` since z_front_sign == -1) -> kCorrectDown!
+    int correct_hits = 0;
+    for (int i = 0; i < 6; ++i) {
+        auto ev = trk.Step({0.45f, 0.25f, 0.82f, 60.0f, 0.0f, 0.0f}, 40);
+        if (ev.forehead_action == robi::ForeheadAction::kCorrectDown) ++correct_hits;
+        assert(ev.forehead_action != robi::ForeheadAction::kSkipUp);
+    }
+    assert(correct_hits == 1);
+
+    // Immediate rebound overshoot upward within 650ms refractory must NOT false-trigger kSkipUp!
+    for (int i = 0; i < 10; ++i) {
+        auto ev = trk.Step({0.45f, 0.25f, -0.85f, -80.0f, 0.0f, 0.0f}, 40);
+        assert(ev.forehead_action == robi::ForeheadAction::kNone);
+    }
+
+    // Re-arm neutral upright, then tilt glass toward ceiling (`az = -0.80g` -> `screen_z = +0.80g`) -> kSkipUp!
+    for (int i = 0; i < 15; ++i) {
+        trk.Step({-0.50f, 0.85f, -0.05f, 3.0f, 3.0f, 3.0f}, 40);
+    }
+    assert(trk.is_forehead_armed());
+    int skip_hits = 0;
+    for (int i = 0; i < 6; ++i) {
+        auto ev = trk.Step({-0.30f, 0.45f, -0.80f, -55.0f, 0.0f, 0.0f}, 40);
+        if (ev.forehead_action == robi::ForeheadAction::kSkipUp) ++skip_hits;
+    }
+    assert(skip_hits == 1);
+}
+
+void TestSfxSynthAndGamesEngine() {
+    // 1. Verify all 8 procedural SFX IDs produce non-empty, click-free, non-clipping 24kHz PCM
+    for (int id = 0; id <= 7; ++id) {
+        auto pcm = robi::SynthesizeSfxPcm(static_cast<robi::RobiSfxId>(id), 24000);
+        assert(pcm.size() >= 1200 && pcm.size() <= 24000);
+        int max_abs = 0;
+        for (int16_t s : pcm) {
+            max_abs = std::max(max_abs, std::abs(static_cast<int>(s)));
+        }
+        assert(max_abs > 2000 && max_abs <= 28000);
+        assert(pcm.back() == 0);  // Trailing zero settle sample
+    }
+
+    // 2. Verify every built-in Hebrew & English word across all 5 categories is strict valid UTF-8
+    for (const auto& cat : robi::kHeadsUpCategories) {
+        assert(IsStrictlyValidUtf8(cat.title_he));
+        assert(cat.count_he >= 30 && cat.count_en >= 20);
+        for (size_t i = 0; i < cat.count_he; ++i) {
+            assert(std::strlen(cat.words_he[i]) > 0);
+            assert(IsStrictlyValidUtf8(cat.words_he[i]));
+        }
+        for (size_t i = 0; i < cat.count_en; ++i) {
+            assert(std::strlen(cat.words_en[i]) > 0);
+            assert(IsStrictlyValidUtf8(cat.words_en[i]));
+        }
+    }
+
+    // 3. Test HeadsUpEngine full lifecycle (3s countdown -> play -> flash -> summary)
+    robi::HeadsUpEngine hu;
+    hu.SeedRng(42);
+    hu.StartOfflineRound(-1, false, 20);
+    assert(hu.phase() == robi::HeadsUpEngine::Phase::kCountdown);
+    assert(hu.countdown_sec() == 3);
+
+    bool started = false;
+    for (int i = 0; i < 32; ++i) {
+        auto ev = hu.Step(100);
+        if (ev.round_started) started = true;
+    }
+    assert(started && hu.phase() == robi::HeadsUpEngine::Phase::kPlaying);
+    std::string w1 = hu.CurrentWord();
+    assert(!w1.empty() && IsStrictlyValidUtf8(w1));
+
+    assert(hu.MarkCorrect());
+    assert(hu.phase() == robi::HeadsUpEngine::Phase::kFlashCorrect);
+    assert(hu.correct_count() == 1);
+    for (int i = 0; i < 10; ++i) hu.Step(100);
+    assert(hu.phase() == robi::HeadsUpEngine::Phase::kPlaying);
+    assert(hu.CurrentWord() != w1);
+
+    // 4. Test RobiGameHub thread-safe Trivia & Custom Heads-Up queues + emotion aliases
+    robi::TriviaCardPayload card;
+    card.question = "כמה רגליים יש לתמנון?";
+    card.options = {"שש", "שמונה", "עשר"};
+    card.correct_index = 99;  // Out-of-bounds index must clamp safely to 2
+    card.player_turn = "אורי";
+    card.score_summary = "לביא: 2 | אורי: 3";
+    robi::RobiGameHub::GetInstance().QueueTriviaCard(card);
+
+    robi::TriviaCardPayload popped;
+    assert(robi::RobiGameHub::GetInstance().PopPendingTriviaCard(popped));
+    assert(popped.correct_index == 2);
+    assert(popped.options.size() == 3);
+    assert(!robi::RobiGameHub::GetInstance().PopPendingTriviaCard(popped));
+
+    auto dizzy_res = robi::RobiComputePresetParams("dizzy", robi::ROBI_THEME_CYBER_CYAN,
+                                                   robi::ROBI_STYLE_CYBER_VISOR);
+    assert(dizzy_res.tremor_shock);
+    assert(std::strcmp(robi::RobiNormalizeEmotionName("wink"), "winking") == 0);
+    assert(std::strcmp(robi::RobiNormalizeEmotionName("love"), "loving") == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -363,6 +518,8 @@ int main() {
     TestAdaptiveSpeechTracker();
     TestThemeColorPreservationAcrossAllEmotions();
     TestMdnsParserAndNsecBuilder();
-    std::printf("ALL ROBI SYNC & LATENCY UNIT TESTS PASSED!\n");
+    TestImuGesturesAndForeheadTilt();
+    TestSfxSynthAndGamesEngine();
+    std::printf("ALL ROBI v3.2 SYNC, IMU, SFX & GAMES UNIT TESTS PASSED!\n");
     return 0;
 }

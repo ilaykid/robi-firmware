@@ -187,10 +187,20 @@
 
         <!-- STEP 4 -->
         <div class="step-pane" data-pane="4">
-          <h2 class="pane-title">שלב 4 — נושאי שיחה אישיים ופרופילי ילדים</h2>
+          <h2 class="pane-title">שלב 4 — מצב הפעלה (ילדים / עוזר אישי / משולב) ופרופילים</h2>
           <p class="pane-sub">
-            הזינו חופשי כל נושא שיחה משלכם שתרצו שרובי ישלב בשיחות, והגדירו עד 3 ילדים עם כפתורי נושאים מותאמים אישית על המסך!
+            בחרו האם רובי ישמש כחבר ומשחקייה לילדים, כעוזר אישי שולחני חכם למבוגר (עם חיפוש חי בגוגל), או במצב משולב לשניהם יחד!
           </p>
+
+          <div class="field">
+            <label for="selPersonaMode">מצב הפעלה של רובי</label>
+            <select id="selPersonaMode">
+              <option value="hybrid">משולב למשפחה — לחיצה על הפנים = עוזר אישי למבוגר, לחיצה על שם ילד = מצב ילדים (מומלץ!)</option>
+              <option value="kids">חבר ומשחקייה אינטראקטיבית לילדים בלבד</option>
+              <option value="assistant">עוזר אישי שולחני למבוגר בלבד (ללא כפתורי ילדים על המסך)</option>
+            </select>
+            <small>💡 בכל המצבים החלקה הצידה על המסך העגול של רובי פותחת את משחקיית המגע וחיישן התנועה (כולל <strong>נחש מה על המצח</strong> שעובד גם ללא אינטרנט, ו<strong>טריוויה חיה על המסך</strong>)!</small>
+          </div>
 
           <div class="topics-box">
             <label for="inpNewTopic" style="font-weight:700;color:#ecfeff;margin-bottom:6px;display:block;">
@@ -211,10 +221,12 @@
             <div id="customTopicsList" class="topic-tags"></div>
           </div>
 
-          <div id="kidsContainer"></div>
+          <div id="kidsSectionWrap">
+            <div id="kidsContainer"></div>
 
-          <div style="margin-bottom:18px;">
-            <button type="button" id="btnAddKid" class="btn btn-accent">+ הוספת ילד/ה (עד 3)</button>
+            <div style="margin-bottom:18px;">
+              <button type="button" id="btnAddKid" class="btn btn-accent">+ הוספת ילד/ה (עד 3)</button>
+            </div>
           </div>
 
           <div class="field">
