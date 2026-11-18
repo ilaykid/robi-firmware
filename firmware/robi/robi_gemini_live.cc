@@ -81,9 +81,11 @@ constexpr EventBits_t kDoneAll = kDoneRx | kDoneTx | kDonePlay;
 
 constexpr size_t kPsramRingSamples = 262144;    // 512 KB = 10.92s @ 24kHz
 constexpr size_t kFallbackRingSamples = 48000;
-constexpr size_t kPreBufferSamples = 4800;      // 200ms @ 24kHz cushion before starting speaker
-constexpr size_t kRebufferSamples = 4800;       // 200ms @ 24kHz cushion if network stalls mid-turn
-constexpr size_t kPlaybackFrameSamples = 1200;  // 50ms @ 24kHz (divides 2400/4800 evenly)
+constexpr size_t kPreBufferStrongSamples = 10800;  // 450ms @ 24kHz cushion on good WiFi
+constexpr size_t kPreBufferWeakSamples = 16800;    // 700ms @ 24kHz cushion on weak WiFi (<-76 dBm)
+constexpr size_t kRebufferStrongSamples = 9600;    // 400ms @ 24kHz recovery cushion
+constexpr size_t kRebufferWeakSamples = 14400;     // 600ms @ 24kHz recovery cushion on weak WiFi
+constexpr size_t kPlaybackFrameSamples = 1200;     // 50ms @ 24kHz (divides 2400/4800/9600 evenly)
 constexpr size_t kUplinkBatchBytes = 2048;      // 64ms @ 16kHz int16
 constexpr int64_t kPostPlaybackGuardUs = 180000LL;  // 180ms OGG_POPUP / speaker room-reverb settle
 
@@ -573,7 +575,7 @@ GeminiLiveProtocol::ConnectResult GeminiLiveProtocol::TryConnectModel(
             xEventGroupSetBits(self->worker_done_group_, kDoneRx);
             vTaskDelete(nullptr);
         },
-        "gemini_rx", 16384, this, 3, rx_stack_, rx_tcb_);
+        "gemini_rx", 16384, this, 5, rx_stack_, rx_tcb_);
 
     tx_task_ = xTaskCreateStatic(
         [](void* arg) {
@@ -582,7 +584,7 @@ GeminiLiveProtocol::ConnectResult GeminiLiveProtocol::TryConnectModel(
             xEventGroupSetBits(self->worker_done_group_, kDoneTx);
             vTaskDelete(nullptr);
         },
-        "gemini_tx", 10240, this, 3, tx_stack_, tx_tcb_);
+        "gemini_tx", 10240, this, 4, tx_stack_, tx_tcb_);
 
     play_task_ = xTaskCreateStatic(
         [](void* arg) {
@@ -591,7 +593,7 @@ GeminiLiveProtocol::ConnectResult GeminiLiveProtocol::TryConnectModel(
             xEventGroupSetBits(self->worker_done_group_, kDonePlay);
             vTaskDelete(nullptr);
         },
-        "gemini_play", 10240, this, 4, play_stack_, play_tcb_);
+        "gemini_play", 10240, this, 6, play_stack_, play_tcb_);
 
     std::string setup_msg = BuildSetupJson(model_name, voice_name, lang_code, include_lang_code);
     if (!websocket_->Send(setup_msg)) {
@@ -824,9 +826,10 @@ void GeminiLiveProtocol::FinishSpeechUtterance() {
     awaiting_response_.store(true);
     awaiting_since_us_.store(esp_timer_get_time());
     awaiting_nudges_.store(0);
-    // Feed 450ms of pure zero-PCM digital silence (3 compact 150ms frames), followed at 550ms
-    // wall-clock time by audioStreamEnd so every Gemini Live model commits end-of-speech reliably!
-    EnqueueSilence16k(450);
+    // Feed 750ms of pure zero-PCM digital silence (5 compact 150ms frames, ~1.8x silenceDurationMs=420ms)
+    // ONCE right after speech. Never send delayed audioStreamEnd or clientContent mid-generation,
+    // which caused Gemini to interrupt its own first answer and reply twice on weak WiFi!
+    EnqueueSilence16k(750);
     EmitEmotion("thinking");
 }
 
@@ -1187,54 +1190,37 @@ void GeminiLiveProtocol::TxWorkerLoop() {
 
         int64_t now_us = esp_timer_get_time();
 
-        // 1. Multi-stage turn recovery while awaiting Gemini's spoken reply:
-        //    - At 0.95s (voice turn): feed 400ms of pure zero-PCM silence to advance server VAD clock.
-        //    - At 1.85s (voice turn): if inputTranscription arrived (Proactive Audio stayed silent),
-        //      force an immediate spoken reply via clientContent; otherwise flush silence + audioStreamEnd.
-        //    - At 2.8s (clientContent turn): send single clientContent retry nudge.
-        //    - At 4.8s: unlock back to Listening; if 2 consecutive turns time out, cooldown model & reconnect.
+        // 1. Safe turn recovery while awaiting Gemini's spoken reply (ZERO duplicate-turn triggers!):
+        //    - Never send audioStreamEnd or clientContent once inputTranscription has arrived (which
+        //      proves Google already committed endOfSpeech and is generating audio over weak WiFi!).
+        //    - Only if 3.2s pass with ZERO inputTranscription and ZERO audio, send one audioStreamEnd.
+        //    - Unlock cleanly at 6.5s if WiFi dropped the turn completely.
         if (awaiting_response_.load() && !receiving_model_audio_.load() &&
             !speaking_active_.load() && jitter_ring_.Available() == 0 && !stopping_.load()) {
             int64_t waited_us = now_us - awaiting_since_us_.load();
             int nudges = awaiting_nudges_.load();
 
             if (user_turn_had_speech_.load()) {
-                if (waited_us > 550000LL && nudges == 0) {
-                    if (awaiting_nudges_.exchange(1) == 0) {
-                        EnqueueSilence16k(150);
+                if (waited_us > 3200000LL && nudges == 0 && tool_hold_until_us_.load() == 0) {
+                    bool has_input_tr = false;
+                    {
+                        std::lock_guard<std::mutex> lk(transcript_mutex_);
+                        has_input_tr = !pending_user_transcript_.empty();
+                    }
+                    if (!has_input_tr && awaiting_nudges_.exchange(1) == 0) {
+                        ESP_LOGW(TAG, "No inputTranscription after 3.2s — sending single stream-end flush");
                         EnqueueAudioStreamEnd();
                         continue;
                     }
-                } else if (waited_us > 1750000LL && nudges == 1 && tool_hold_until_us_.load() == 0) {
-                    if (awaiting_nudges_.exchange(2) == 1) {
-                        std::string peek_tr;
-                        {
-                            std::lock_guard<std::mutex> lk(transcript_mutex_);
-                            peek_tr = robi::CleanTranscriptText(pending_user_transcript_);
-                        }
-                        if (robi::HasMeaningfulSpeechText(peek_tr) && !silent_nudge_used_.exchange(true)) {
-                            user_turn_had_speech_.store(false);
-                            FlushPendingTranscripts();
-                            ESP_LOGW(TAG, "Proactive silence 1.75s after '%s' — forcing spoken reply",
-                                     peek_tr.c_str());
-                            EnqueueSilentTurnNudge(peek_tr);
-                            awaiting_nudges_.store(2);
-                        } else {
-                            ESP_LOGW(TAG, "No audio 1.75s after speech — re-sending stream-end flush");
-                            EnqueueSilence16k(150);
-                            EnqueueAudioStreamEnd();
-                        }
-                        continue;
-                    }
                 }
-            } else if (waited_us > 2800000LL && nudges == 0 && tool_hold_until_us_.load() == 0) {
+            } else if (waited_us > 3800000LL && nudges == 0 && tool_hold_until_us_.load() == 0) {
                 std::string retry_text;
                 {
                     std::lock_guard<std::mutex> clk(client_turn_mutex_);
                     retry_text = last_client_turn_text_;
                 }
                 if (!retry_text.empty() && awaiting_nudges_.exchange(2) == 0) {
-                    ESP_LOGW(TAG, "No audio 2.8s after clientContent — sending single retry nudge");
+                    ESP_LOGW(TAG, "No audio 3.8s after clientContent — sending single retry nudge");
                     awaiting_since_us_.store(now_us);
                     std::string payload = BuildClientTurnJson(retry_text);
                     if (!payload.empty()) {
@@ -1244,7 +1230,7 @@ void GeminiLiveProtocol::TxWorkerLoop() {
                 }
             }
 
-            if (waited_us > 4800000LL) {
+            if (waited_us > 6500000LL) {
                 int timeouts = consecutive_timeouts_.fetch_add(1) + 1;
                 ESP_LOGW(TAG, "Awaiting response timed out after %.1fs (consecutive=%d)",
                          static_cast<double>(waited_us) / 1000000.0, timeouts);
@@ -1509,19 +1495,31 @@ void GeminiLiveProtocol::PlaybackFeederLoop() {
     bool speaking_active = false;
     bool rebuffer_needed = false;
     int initial_burst_left = 0;
+    int64_t next_feed_us = 0;
     uint32_t active_gen = 0;
 
+    auto current_prebuffer_samples = []() -> size_t {
+        int rssi = WifiManager::GetInstance().GetRssi();
+        return (rssi != 0 && rssi < -76) ? kPreBufferWeakSamples : kPreBufferStrongSamples;
+    };
+    auto current_rebuffer_samples = []() -> size_t {
+        int rssi = WifiManager::GetInstance().GetRssi();
+        return (rssi != 0 && rssi < -76) ? kRebufferWeakSamples : kRebufferStrongSamples;
+    };
+
     while (!stopping_.load()) {
+        const size_t prebuf_target = current_prebuffer_samples();
+        const size_t rebuf_target = current_rebuffer_samples();
         size_t min_needed = speaking_active
-                                ? (rebuffer_needed ? kRebufferSamples : kPlaybackFrameSamples)
-                                : kPreBufferSamples;
+                                ? (rebuffer_needed ? rebuf_target : kPlaybackFrameSamples)
+                                : prebuf_target;
         jitter_ring_.WaitFor(std::chrono::milliseconds(30),
                              [this, min_needed, speaking_active](size_t ring_count) {
                                  if (stopping_.load() || !ws_connected_.load()) return true;
                                  if (drop_turn_.load()) return true;
                                  if (turn_complete_.load() && (speaking_active || ring_count > 0)) return true;
                                  if (ring_count > 0 &&
-                                     (esp_timer_get_time() - last_rx_audio_us_.load()) > 260000LL) {
+                                     (esp_timer_get_time() - last_rx_audio_us_.load()) > 1500000LL) {
                                      return true;
                                  }
                                  return ring_count >= min_needed;
@@ -1545,12 +1543,12 @@ void GeminiLiveProtocol::PlaybackFeederLoop() {
         size_t avail = jitter_ring_.Available();
         int64_t idle_rx_us = esp_timer_get_time() - last_rx_audio_us_.load();
         if (!speaking_active) {
-            if (avail >= kPreBufferSamples ||
-                ((turn_complete_.load() || idle_rx_us > 260000LL) && avail > 0)) {
+            if (avail >= prebuf_target ||
+                ((turn_complete_.load() || idle_rx_us > 1500000LL) && avail > 0)) {
                 speaking_active = true;
                 speaking_active_.store(true);
                 rebuffer_needed = false;
-                initial_burst_left = 3;  // Preload 150ms (3 * 50ms) into AudioService DMA queue
+                initial_burst_left = 4;  // Preload 200ms (4 * 50ms) into AudioService DMA queue
                 active_gen = turn_gen_.load();
                 awaiting_response_.store(false);
                 awaiting_nudges_.store(0);
@@ -1577,6 +1575,7 @@ void GeminiLiveProtocol::PlaybackFeederLoop() {
                         });
                     }
                 }
+                next_feed_us = esp_timer_get_time();
             } else {
                 int64_t now_chk_us = esp_timer_get_time();
                 int64_t th_until = tool_hold_until_us_.load();
@@ -1626,12 +1625,13 @@ void GeminiLiveProtocol::PlaybackFeederLoop() {
 
         avail = jitter_ring_.Available();
         idle_rx_us = esp_timer_get_time() - last_rx_audio_us_.load();
-        size_t pop_threshold = rebuffer_needed ? kRebufferSamples : kPlaybackFrameSamples;
+        size_t pop_threshold = rebuffer_needed ? rebuf_target : kPlaybackFrameSamples;
         if (avail >= pop_threshold ||
-            ((turn_complete_.load() || idle_rx_us > 260000LL) && avail > 0)) {
+            ((turn_complete_.load() || idle_rx_us > 1500000LL) && avail > 0)) {
             if (rebuffer_needed) {
                 rebuffer_needed = false;
-                initial_burst_left = 3;
+                initial_burst_left = 4;
+                next_feed_us = esp_timer_get_time();
             }
             size_t to_pop = std::min(kPlaybackFrameSamples, avail);
             size_t got = jitter_ring_.PopSamples(frame_buf.data(), to_pop);
@@ -1662,14 +1662,28 @@ void GeminiLiveProtocol::PlaybackFeederLoop() {
                     pkt->frame_duration = 0;
                     pkt->payload.resize(got * sizeof(int16_t));
                     std::memcpy(pkt->payload.data(), frame_buf.data(), pkt->payload.size());
-                    vTaskDelay(pdMS_TO_TICKS(16));
+                    vTaskDelay(pdMS_TO_TICKS(10));
                 }
 
+                // PLL-locked microsecond pacing: keeps ~200ms (4 frames) in AudioService DMA queue
+                // while holding bulk seconds of audio in our 512 KB PSRAM jitter_ring_ (saving SRAM!)
+                const int64_t frame_dur_us = (static_cast<int64_t>(got) * 1000000LL) / 24000LL;
                 if (initial_burst_left > 0) {
                     --initial_burst_left;
+                    next_feed_us = esp_timer_get_time() + frame_dur_us;
                 } else {
-                    // Feed 50ms frames every 46ms so AudioService stays gently cushioned without draining PSRAM ring
-                    vTaskDelay(pdMS_TO_TICKS(46));
+                    int64_t now_feed_us = esp_timer_get_time();
+                    if (now_feed_us < next_feed_us) {
+                        int64_t sleep_ms = (next_feed_us - now_feed_us) / 1000LL;
+                        if (sleep_ms >= 10) {
+                            vTaskDelay(pdMS_TO_TICKS(sleep_ms));
+                        }
+                    }
+                    next_feed_us += frame_dur_us;
+                    int64_t after_us = esp_timer_get_time();
+                    if (after_us - next_feed_us > 150000LL) {
+                        next_feed_us = after_us;
+                    }
                 }
             }
             continue;

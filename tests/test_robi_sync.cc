@@ -224,30 +224,29 @@ void TestAdaptiveSpeechTracker() {
         assert(!tracker.in_speech());
     }
 
-    // 4. Quiet 3D-printed enclosure (45..60 RMS) seeds immediately on Frame #1 and triggers on soft speech (165 RMS)
-    //    WITHOUT upward self-poisoning even across continuous moderate speech!
+    // 4. Real Waveshare 3D-enclosure telemetry (9..15 RMS ambient, 921 RMS speech) + soft 85 RMS speech
     {
         tracker.ResetSession();
-        auto idle0 = tracker.OnFrame(52.0f, 60);
-        assert(!idle0.in_speech);
-        assert(tracker.noise_floor_rms() <= 55.0f);
-        assert(tracker.current_onset_thresh() <= 150.0f);
+        for (int i = 0; i < 6; ++i) {
+            auto idle = tracker.OnFrame((i & 1) ? 15.0f : 9.0f, 60);
+            assert(!idle.in_speech && !idle.start_utterance);
+        }
+        assert(tracker.noise_floor_rms() <= 16.0f);
+        assert(tracker.current_onset_thresh() <= 70.0f);
 
-        // Soft speech inside 3D-printed shell (165 RMS) triggers onset in 2 frames (120ms)
-        auto w1 = tracker.OnFrame(165.0f, 60);
+        // Even soft speech (85 RMS) triggers onset in 2 frames (120ms) and commits cleanly at 11 RMS
+        auto w1 = tracker.OnFrame(85.0f, 60);
         assert(!w1.start_utterance);
-        auto w2 = tracker.OnFrame(175.0f, 60);
+        auto w2 = tracker.OnFrame(95.0f, 60);
         assert(w2.start_utterance && w2.in_speech);
 
-        // Stays open across soft 155..190 RMS syllables without premature cutoff
         for (int i = 0; i < 6; ++i) {
-            auto d = tracker.OnFrame(160.0f, 60);
+            auto d = tracker.OnFrame(140.0f, 60);
             assert(d.in_speech && !d.commit_utterance);
         }
-        // Commits cleanly in 600ms when returning to 55 RMS room floor
         bool committed = false;
         for (int i = 0; i < 10; ++i) {
-            if (tracker.OnFrame(55.0f, 60).commit_utterance) committed = true;
+            if (tracker.OnFrame(11.0f, 60).commit_utterance) committed = true;
         }
         assert(committed);
     }

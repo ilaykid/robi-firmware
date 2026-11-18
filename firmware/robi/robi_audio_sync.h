@@ -218,15 +218,15 @@ public:
         if (!calibrated_) {
             calibrated_ = true;
             if (ac_rms <= 310.0f) {
-                noise_floor_rms_ = std::clamp(ac_rms, 35.0f, 260.0f);
+                noise_floor_rms_ = std::clamp(ac_rms, 15.0f, 260.0f);
             } else {
                 // User is already speaking on Frame #1 right after OGG_POPUP
-                noise_floor_rms_ = 140.0f;
+                noise_floor_rms_ = 120.0f;
             }
         }
 
         if (!in_speech_) {
-            const float onset_thresh = std::clamp(noise_floor_rms_ * 1.65f + 55.0f, 145.0f, 760.0f);
+            const float onset_thresh = std::clamp(noise_floor_rms_ * 1.75f + 35.0f, 65.0f, 760.0f);
             if (ac_rms >= onset_thresh) {
                 onset_ms_ += frame_ms;
                 if (onset_ms_ >= 120u) {
@@ -243,9 +243,9 @@ public:
 
             onset_ms_ = (onset_ms_ > (frame_ms / 2u)) ? (onset_ms_ - (frame_ms / 2u)) : 0u;
             if (ac_rms < noise_floor_rms_) {
-                float sample = std::max(35.0f, ac_rms);
+                float sample = std::max(15.0f, ac_rms);
                 noise_floor_rms_ = 0.68f * noise_floor_rms_ + 0.32f * sample;
-            } else if (ac_rms < noise_floor_rms_ * 1.45f + 35.0f) {
+            } else if (ac_rms < noise_floor_rms_ * 1.45f + 30.0f) {
                 float sample = std::min(265.0f, ac_rms);
                 noise_floor_rms_ = 0.96f * noise_floor_rms_ + 0.04f * sample;
             }
@@ -257,8 +257,8 @@ public:
         peak_rms_ = std::max(peak_rms_, ac_rms);
         speech_ms_ = std::min<uint32_t>(speech_ms_ + frame_ms, 30000u);
 
-        const float floor_quiet = std::clamp(noise_floor_rms_ * 1.40f + 45.0f, 105.0f, 430.0f);
-        const float peak_drop_quiet = std::clamp(peak_rms_ * 0.28f, 105.0f, 480.0f);
+        const float floor_quiet = std::clamp(noise_floor_rms_ * 1.45f + 32.0f, 48.0f, 430.0f);
+        const float peak_drop_quiet = std::clamp(peak_rms_ * 0.26f, 48.0f, 480.0f);
         const float quiet_thresh = std::max(floor_quiet, peak_drop_quiet);
 
         if (ac_rms < quiet_thresh) {
@@ -283,7 +283,7 @@ public:
 
     float noise_floor_rms() const { return noise_floor_rms_; }
     float current_onset_thresh() const {
-        return std::clamp(noise_floor_rms_ * 1.65f + 55.0f, 145.0f, 760.0f);
+        return std::clamp(noise_floor_rms_ * 1.75f + 35.0f, 65.0f, 760.0f);
     }
     bool in_speech() const { return in_speech_; }
     uint32_t speech_ms() const { return speech_ms_; }
