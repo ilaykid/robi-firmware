@@ -19,12 +19,28 @@
 
 #define TAG "RobiConfig"
 
+extern "C" {
+
+esp_err_t __real_esp_wifi_scan_start(const wifi_scan_config_t* config, bool block);
+
+esp_err_t __wrap_esp_wifi_scan_start(const wifi_scan_config_t* config, bool block) {
+    if (config != nullptr && SsidManager::GetInstance().GetSsidList().size() > 1) {
+        // When multiple WiFi networks are saved (e.g. Home WiFi + Phone Hotspot whose channel
+        // changes dynamically across 1/6/11), always scan all channels so nearby Hotspots are found!
+        return __real_esp_wifi_scan_start(nullptr, block);
+    }
+    return __real_esp_wifi_scan_start(config, block);
+}
+
+}  // extern "C"
+
 namespace {
 
 constexpr const char* kNvsNsCfg = "robi_cfg";
 constexpr const char* kNvsKeyJson = "json";
 constexpr const char* kNvsKeyFlashSig = "flash_sig";
 constexpr const char* kNvsKeyGoodBssid = "good_bssid";
+constexpr const char* kNvsKeyGoodSsid = "good_ssid";
 constexpr const char* kNvsNsMem = "robi_mem";
 constexpr const char* kNvsKeyMemJson = "notes";
 constexpr const char* kNvsKeyDlgJson = "dlg";
@@ -41,7 +57,9 @@ esp_timer_handle_t s_nvs_flush_timer = nullptr;
 bool s_mem_dirty = false;
 bool s_dlg_dirty = false;
 bool s_usage_dirty = false;
+std::string s_cur_ssid;
 std::array<uint8_t, 6> s_cur_bssid = {};
+std::string s_good_ssid;
 std::array<uint8_t, 6> s_good_bssid = {};
 bool s_good_bssid_valid = false;
 bool s_steering_to_good = false;
@@ -57,10 +75,19 @@ bool IsDeadDhcpBssid(const std::array<uint8_t, 6>& b) {
     return false;
 }
 
+bool HasVerifiedBssidForCurrentSsid() {
+    return s_good_bssid_valid && !s_good_ssid.empty() && s_cur_ssid == s_good_ssid;
+}
+
 void SteerWifiConfigToGoodBssid() {
-    if (!s_good_bssid_valid || s_direct_pin_fails >= 2) return;
+    if (!HasVerifiedBssidForCurrentSsid() || s_direct_pin_fails >= 2) return;
     wifi_config_t wcfg = {};
     if (esp_wifi_get_config(WIFI_IF_STA, &wcfg) == ESP_OK) {
+        std::string cfg_ssid(reinterpret_cast<const char*>(wcfg.sta.ssid),
+                             strnlen(reinterpret_cast<const char*>(wcfg.sta.ssid), sizeof(wcfg.sta.ssid)));
+        if (cfg_ssid != s_good_ssid) {
+            return;
+        }
         std::memcpy(wcfg.sta.bssid, s_good_bssid.data(), 6);
         wcfg.sta.bssid_set = 1;
         if (esp_wifi_set_config(WIFI_IF_STA, &wcfg) == ESP_OK) {
@@ -76,9 +103,14 @@ void InstallSmartWifiDhcpGuard() {
     nvs_handle_t h = 0;
     if (nvs_open(kNvsNsCfg, NVS_READONLY, &h) == ESP_OK) {
         size_t len = 6;
-        if (nvs_get_blob(h, kNvsKeyGoodBssid, s_good_bssid.data(), &len) == ESP_OK && len == 6) {
+        char ssid_buf[36] = {};
+        size_t ssid_len = sizeof(ssid_buf);
+        if (nvs_get_blob(h, kNvsKeyGoodBssid, s_good_bssid.data(), &len) == ESP_OK && len == 6 &&
+            nvs_get_str(h, kNvsKeyGoodSsid, ssid_buf, &ssid_len) == ESP_OK && ssid_buf[0] != '\0') {
+            s_good_ssid = ssid_buf;
             s_good_bssid_valid = true;
-            ESP_LOGI(TAG, "Loaded last good DHCP BSSID: %02x:%02x:%02x:%02x:%02x:%02x",
+            ESP_LOGI(TAG, "Loaded last good DHCP BSSID for '%s': %02x:%02x:%02x:%02x:%02x:%02x",
+                     s_good_ssid.c_str(),
                      s_good_bssid[0], s_good_bssid[1], s_good_bssid[2],
                      s_good_bssid[3], s_good_bssid[4], s_good_bssid[5]);
         }
@@ -90,14 +122,15 @@ void InstallSmartWifiDhcpGuard() {
     esp_timer_create_args_t targs = {};
     targs.callback = [](void*) {
         // Never blacklist or forcibly disconnect our verified working router BSSID when RSSI is weak (-83 dBm)
-        if (s_good_bssid_valid && s_cur_bssid == s_good_bssid) {
+        if (HasVerifiedBssidForCurrentSsid() && s_cur_bssid == s_good_bssid) {
             ESP_LOGW(TAG, "DHCP still pending after 4.5s on verified router %02x:%02x:%02x:%02x:%02x:%02x — waiting naturally",
                      s_cur_bssid[0], s_cur_bssid[1], s_cur_bssid[2],
                      s_cur_bssid[3], s_cur_bssid[4], s_cur_bssid[5]);
             return;
         }
         if (!IsDeadDhcpBssid(s_cur_bssid)) {
-            ESP_LOGW(TAG, "DHCP timeout on BSSID %02x:%02x:%02x:%02x:%02x:%02x — blacklisting extender & steering to good router!",
+            ESP_LOGW(TAG, "DHCP timeout on '%s' BSSID %02x:%02x:%02x:%02x:%02x:%02x — blacklisting extender!",
+                     s_cur_ssid.c_str(),
                      s_cur_bssid[0], s_cur_bssid[1], s_cur_bssid[2],
                      s_cur_bssid[3], s_cur_bssid[4], s_cur_bssid[5]);
             if (s_dead_dhcp_bssids.size() < 8) {
@@ -117,30 +150,37 @@ void InstallSmartWifiDhcpGuard() {
         [](void*, esp_event_base_t, int32_t event_id, void* event_data) {
             if (event_id == WIFI_EVENT_STA_CONNECTED && event_data != nullptr) {
                 auto* ev = static_cast<wifi_event_sta_connected_t*>(event_data);
+                size_t slen = ev->ssid_len > 0
+                                  ? std::min<size_t>(ev->ssid_len, sizeof(ev->ssid))
+                                  : strnlen(reinterpret_cast<const char*>(ev->ssid), sizeof(ev->ssid));
+                s_cur_ssid.assign(reinterpret_cast<const char*>(ev->ssid), slen);
                 std::memcpy(s_cur_bssid.data(), ev->bssid, 6);
                 s_deliberate_skip_disconnect = false;
                 if (s_dhcp_watchdog_timer == nullptr) return;
                 esp_timer_stop(s_dhcp_watchdog_timer);
 
-                if (s_good_bssid_valid && s_cur_bssid == s_good_bssid) {
+                if (HasVerifiedBssidForCurrentSsid() && s_cur_bssid == s_good_bssid) {
                     s_steering_to_good = false;
                     s_direct_pin_fails = 0;
                     return;
                 }
 
                 if (IsDeadDhcpBssid(s_cur_bssid)) {
-                    ESP_LOGW(TAG, "Fast-skipping dead DHCP BSSID %02x:%02x:%02x:%02x:%02x:%02x -> steering to verified router",
+                    ESP_LOGW(TAG, "Fast-skipping dead DHCP BSSID %02x:%02x:%02x:%02x:%02x:%02x on '%s'",
                              s_cur_bssid[0], s_cur_bssid[1], s_cur_bssid[2],
-                             s_cur_bssid[3], s_cur_bssid[4], s_cur_bssid[5]);
+                             s_cur_bssid[3], s_cur_bssid[4], s_cur_bssid[5], s_cur_ssid.c_str());
                     SteerWifiConfigToGoodBssid();
                     esp_timer_start_once(s_dhcp_watchdog_timer, 25000ULL);
                     return;
                 }
-                if (s_good_bssid_valid && s_cur_bssid != s_good_bssid && s_fast_skip_count < 12) {
+                // ONLY fast-skip non-preferred BSSIDs within the SAME SSID (e.g. home router vs dead extender),
+                // NEVER kick Robi off a different saved network such as a Phone Hotspot!
+                if (HasVerifiedBssidForCurrentSsid() && s_cur_bssid != s_good_bssid && s_fast_skip_count < 12) {
                     ++s_fast_skip_count;
-                    ESP_LOGI(TAG, "Fast-skipping non-preferred BSSID %02x:%02x:%02x:%02x:%02x:%02x (%d/12) -> steering to good router",
+                    ESP_LOGI(TAG, "Fast-skipping repeater BSSID %02x:%02x:%02x:%02x:%02x:%02x on '%s' (%d/12) -> steering to router",
                              s_cur_bssid[0], s_cur_bssid[1], s_cur_bssid[2],
-                             s_cur_bssid[3], s_cur_bssid[4], s_cur_bssid[5], s_fast_skip_count);
+                             s_cur_bssid[3], s_cur_bssid[4], s_cur_bssid[5],
+                             s_cur_ssid.c_str(), s_fast_skip_count);
                     SteerWifiConfigToGoodBssid();
                     esp_timer_start_once(s_dhcp_watchdog_timer, 25000ULL);
                     return;
@@ -181,18 +221,27 @@ void InstallSmartWifiDhcpGuard() {
             s_dead_dhcp_bssids.erase(
                 std::remove(s_dead_dhcp_bssids.begin(), s_dead_dhcp_bssids.end(), s_cur_bssid),
                 s_dead_dhcp_bssids.end());
-            if (!s_good_bssid_valid || s_good_bssid != s_cur_bssid) {
-                s_good_bssid = s_cur_bssid;
-                s_good_bssid_valid = true;
-                nvs_handle_t nh = 0;
-                if (nvs_open(kNvsNsCfg, NVS_READWRITE, &nh) == ESP_OK) {
-                    nvs_set_blob(nh, kNvsKeyGoodBssid, s_good_bssid.data(), 6);
-                    nvs_commit(nh);
-                    nvs_close(nh);
+            // Save verified router BSSID ONLY when it already had a dead-repeater skip or when
+            // no verified BSSID exists yet (avoids overwriting home router BSSID when visiting a Hotspot,
+            // unless that SSID itself needed repeater disambiguation!)
+            if (!s_cur_ssid.empty() &&
+                (!s_good_bssid_valid || s_good_ssid == s_cur_ssid || !s_dead_dhcp_bssids.empty())) {
+                if (!s_good_bssid_valid || s_good_ssid != s_cur_ssid || s_good_bssid != s_cur_bssid) {
+                    s_good_ssid = s_cur_ssid;
+                    s_good_bssid = s_cur_bssid;
+                    s_good_bssid_valid = true;
+                    nvs_handle_t nh = 0;
+                    if (nvs_open(kNvsNsCfg, NVS_READWRITE, &nh) == ESP_OK) {
+                        nvs_set_str(nh, kNvsKeyGoodSsid, s_good_ssid.c_str());
+                        nvs_set_blob(nh, kNvsKeyGoodBssid, s_good_bssid.data(), 6);
+                        nvs_commit(nh);
+                        nvs_close(nh);
+                    }
+                    ESP_LOGI(TAG, "Saved verified DHCP BSSID for '%s': %02x:%02x:%02x:%02x:%02x:%02x",
+                             s_good_ssid.c_str(),
+                             s_good_bssid[0], s_good_bssid[1], s_good_bssid[2],
+                             s_good_bssid[3], s_good_bssid[4], s_good_bssid[5]);
                 }
-                ESP_LOGI(TAG, "Saved verified DHCP BSSID: %02x:%02x:%02x:%02x:%02x:%02x",
-                         s_good_bssid[0], s_good_bssid[1], s_good_bssid[2],
-                         s_good_bssid[3], s_good_bssid[4], s_good_bssid[5]);
             }
         },
         nullptr, nullptr);
@@ -442,10 +491,11 @@ bool RobiConfig::ParseIntoLocked(const std::string& json_str, bool keep_existing
 
     if (cJSON_HasObjectItem(root, "gemini_key")) {
         std::string k = SafeGetStr(root, "gemini_key", "");
-        if (keep_existing_key_if_sentinel && (k == "__KEEP__" || k.empty()) &&
-            !cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "clear_key"))) {
-            // Keep existing key
-        } else if (k.size() <= 160) {
+        if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "clear_key"))) {
+            next.gemini_key.clear();
+        } else if (keep_existing_key_if_sentinel && (k == "__KEEP__" || k.size() < 20)) {
+            // Keep existing key (ignores blank fields AND short browser password-autofill strings!)
+        } else if (k.size() >= 20 && k.size() <= 160) {
             next.gemini_key = robi::Utf8Sanitize(k);
         }
     }

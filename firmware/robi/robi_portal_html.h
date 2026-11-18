@@ -66,7 +66,7 @@ button{cursor:pointer;border:none;border-radius:12px;padding:11px 16px;font-weig
   <div class="card">
     <h2>🔑 מפתח Gemini, מודל וקול</h2>
     <label>מפתח Gemini API <span id="keyHint" style="color:#10b981;font-size:.8rem"></span></label>
-    <input type="password" id="geminiKey" dir="ltr" placeholder="השאר ריק כדי לשמור על המפתח הקיים, או הדבק מפתח חדש (AIza...)">
+    <input type="password" id="geminiKey" dir="ltr" autocomplete="new-password" data-lpignore="true" data-1p-ignore="true" placeholder="השאר ריק כדי לשמור על המפתח הקיים, או הדבק מפתח חדש (AIza...)">
     <div class="row">
       <div>
         <label>שם הרובוט</label>
@@ -152,6 +152,26 @@ button{cursor:pointer;border:none;border-radius:12px;padding:11px 16px;font-weig
     <label style="margin-top:12px">זיכרונות שרובי שמר משיחות אחרונות:</label>
     <ul class="mem-list" id="memList"><li>אין זיכרונות שמורים עדיין</li></ul>
     <button type="button" class="btn-danger" onclick="clearMem()">נקה זיכרונות שיחה</button>
+  </div>
+
+  <div class="card">
+    <h2>📶 רשתות WiFi שמורות והוספת Hotspot נייד</h2>
+    <div style="color:var(--muted);font-size:.83rem;margin-bottom:8px">רובי שומר עד 10 רשתות במקביל (למשל בית + נקודה חמה בטלפון). ב-iPhone ודאו שמתג <b>מרב התאימות (2.4GHz)</b> דלוק.</div>
+    <div id="wifiListWrap" style="margin-bottom:10px"></div>
+    <div class="row">
+      <div>
+        <label>שם רשת / Hotspot נוסף (SSID)</label>
+        <input type="text" id="newWifiSsid" dir="ltr" autocomplete="off" placeholder="למשל: IlayHotspot">
+      </div>
+      <div>
+        <label>סיסמת הרשת</label>
+        <input type="password" id="newWifiPass" dir="ltr" autocomplete="new-password" data-lpignore="true" placeholder="••••••••">
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+      <button type="button" class="btn-sec" onclick="addWifiOnly(false)">➕ שמור רשת נוספת בזיכרון</button>
+      <button type="button" class="btn-sec" style="border-color:var(--cyan);color:var(--cyan)" onclick="addWifiOnly(true)">⚡ שמור והתחבר אליה עכשיו</button>
+    </div>
   </div>
 
   <div class="card">
@@ -304,6 +324,46 @@ async function resetUsage(){
   refreshStatusOnly();
 }
 
+function renderSavedWifi(st){
+  const w=document.getElementById('wifiListWrap');
+  if(!w)return;
+  const arr=st.saved_ssids||[];
+  if(!arr.length){w.innerHTML='';return;}
+  w.innerHTML=arr.map(s=>{
+    const cur=(st.ssid===s);
+    const jsS=JSON.stringify(s).replace(/"/g,'&quot;');
+    return `<div style="display:flex;justify-content:space-between;align-items:center;background:#091022;border:1px solid ${cur?'#10b981':'#223357'};border-radius:10px;padding:7px 11px;margin-bottom:6px;gap:8px;flex-wrap:wrap">
+      <span dir="ltr" style="font-weight:600;color:${cur?'#34d399':'#e2e8f0'}">${cur?'🟢 ':'📶 '}${esc(s)}${cur?' (מחובר כעת)':''}</span>
+      <div style="display:flex;gap:6px">
+        ${cur?'':`<button type="button" class="btn-sec" style="padding:4px 10px;font-size:.78rem" onclick="connectWifi(${jsS})">התחבר עכשיו</button>`}
+        ${arr.length>1?`<button type="button" class="btn-danger" style="padding:4px 9px;font-size:.76rem" onclick="removeWifi(${jsS})">הסר</button>`:''}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function addWifiOnly(connectNow){
+  const s=document.getElementById('newWifiSsid').value.trim();
+  const p=document.getElementById('newWifiPass').value;
+  if(!s){showToast('נא להזין שם רשת (SSID)',true);return;}
+  const body={add_wifi_ssid:s,add_wifi_pass:p};
+  if(connectNow)body.connect_wifi_ssid=s;
+  await sendCtrl(body);
+  document.getElementById('newWifiSsid').value='';
+  document.getElementById('newWifiPass').value='';
+  showToast(connectNow?'הרשת נשמרה — רובי עובר אליה כעת!':'הרשת נוספה ונשמרה במקביל לרשת הביתית!');
+  setTimeout(refreshStatusOnly,1200);
+}
+async function connectWifi(s){
+  await sendCtrl({connect_wifi_ssid:s});
+  showToast('מעביר את רובי אל '+s+'...');
+}
+async function removeWifi(s){
+  await sendCtrl({remove_wifi_ssid:s});
+  showToast('הרשת '+s+' הוסרה');
+  setTimeout(refreshStatusOnly,600);
+}
+
 function fmtAudioSec(sec){
   sec=+sec||0;
   const m=Math.floor(sec/60),s=sec%60;
@@ -409,6 +469,7 @@ async function refreshStatusOnly(){
       <span class="pill" dir="ltr">🤖 ${esc(actMod)}</span>
       <span class="pill" dir="ltr">🔋 ${st.battery??100}% ${st.charging?'⚡':''}</span>`;
     renderModelsAndQuota(st);
+    renderSavedWifi(st);
     const ml=document.getElementById('memList');
     if(ml){
       ml.innerHTML=(st.memories&&st.memories.length)?st.memories.map(m=>`<li>${esc(m)}</li>`).join(''):'<li>אין זיכרונות שמורים עדיין</li>';
@@ -443,6 +504,7 @@ async function loadAll(){
       <span class="pill" dir="ltr">🤖 ${esc(actMod)}</span>
       <span class="pill" dir="ltr">🔋 ${st.battery??100}% ${st.charging?'⚡':''}</span>`;
     renderModelsAndQuota(st);
+    renderSavedWifi(st);
     if(st.volume!==undefined){document.getElementById('volRange').value=st.volume;document.getElementById('volLbl').textContent=st.volume;}
     if(st.brightness!==undefined){document.getElementById('briRange').value=st.brightness;document.getElementById('briLbl').textContent=st.brightness;}
     const ml=document.getElementById('memList');

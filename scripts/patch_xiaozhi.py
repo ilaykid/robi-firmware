@@ -74,7 +74,7 @@ must_replace(
     "endif()\n",
     "if(NOT CMAKE_BUILD_EARLY_EXPANSION)\n"
     "    target_compile_options(${COMPONENT_LIB} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-std=gnu++23>)\n"
-    '    target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=esp_tls_conn_new_sync" "-Wl,--wrap=esp_tls_conn_read")\n'
+    '    target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=esp_tls_conn_new_sync" "-Wl,--wrap=esp_tls_conn_read" "-Wl,--wrap=esp_wifi_scan_start")\n'
     "endif()\n",
 )
 

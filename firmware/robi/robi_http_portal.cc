@@ -16,7 +16,9 @@
 #include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <esp_timer.h>
+#include <esp_wifi.h>
 #include <netinet/in.h>
+#include <ssid_manager.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <wifi_manager.h>
@@ -145,6 +147,11 @@ esp_err_t HandleStatusGet(httpd_req_t* req) {
     cJSON_AddStringToObject(root, "ssid", wifi.GetSsid().c_str());
     cJSON_AddStringToObject(root, "ip", wifi.GetIpAddress().c_str());
     cJSON_AddNumberToObject(root, "rssi", wifi.GetRssi());
+    cJSON* saved_arr = cJSON_CreateArray();
+    for (const auto& item : SsidManager::GetInstance().GetSsidList()) {
+        cJSON_AddItemToArray(saved_arr, cJSON_CreateString(item.ssid.c_str()));
+    }
+    cJSON_AddItemToObject(root, "saved_ssids", saved_arr);
     cJSON_AddStringToObject(root, "preferred_model", cfg.preferred_model.c_str());
     cJSON_AddStringToObject(root, "usage_day", RobiConfig::GetInstance().GetUsageDay().c_str());
 
@@ -353,6 +360,53 @@ esp_err_t HandleControlPost(httpd_req_t* req) {
             if (auto* proto = GeminiLiveProtocol::GetActiveInstance()) {
                 if (proto->IsAudioChannelOpened()) {
                     proto->CloseAudioChannel(false);
+                }
+            }
+        });
+    }
+    const cJSON* add_ssid = cJSON_GetObjectItemCaseSensitive(root, "add_wifi_ssid");
+    const cJSON* add_pass = cJSON_GetObjectItemCaseSensitive(root, "add_wifi_pass");
+    if (cJSON_IsString(add_ssid) && add_ssid->valuestring != nullptr && add_ssid->valuestring[0] != '\0') {
+        std::string ws = add_ssid->valuestring;
+        std::string wp = (cJSON_IsString(add_pass) && add_pass->valuestring != nullptr)
+                             ? add_pass->valuestring
+                             : "";
+        SsidManager::GetInstance().AddSsid(ws, wp);
+    }
+    const cJSON* rm_ssid = cJSON_GetObjectItemCaseSensitive(root, "remove_wifi_ssid");
+    if (cJSON_IsString(rm_ssid) && rm_ssid->valuestring != nullptr && rm_ssid->valuestring[0] != '\0') {
+        std::string target = rm_ssid->valuestring;
+        const auto& list = SsidManager::GetInstance().GetSsidList();
+        for (size_t i = 0; i < list.size(); ++i) {
+            if (list[i].ssid == target) {
+                SsidManager::GetInstance().RemoveSsid(static_cast<int>(i));
+                break;
+            }
+        }
+    }
+    const cJSON* conn_ssid = cJSON_GetObjectItemCaseSensitive(root, "connect_wifi_ssid");
+    if (cJSON_IsString(conn_ssid) && conn_ssid->valuestring != nullptr && conn_ssid->valuestring[0] != '\0') {
+        std::string target = conn_ssid->valuestring;
+        Application::GetInstance().Schedule([target]() {
+            const auto& list = SsidManager::GetInstance().GetSsidList();
+            for (size_t i = 0; i < list.size(); ++i) {
+                if (list[i].ssid == target) {
+                    std::string pass = list[i].password;
+                    SsidManager::GetInstance().SetDefaultSsid(static_cast<int>(i));
+                    wifi_config_t wcfg = {};
+                    if (esp_wifi_get_config(WIFI_IF_STA, &wcfg) == ESP_OK) {
+                        std::memset(wcfg.sta.ssid, 0, sizeof(wcfg.sta.ssid));
+                        std::memset(wcfg.sta.password, 0, sizeof(wcfg.sta.password));
+                        std::memcpy(wcfg.sta.ssid, target.data(),
+                                    std::min(target.size(), sizeof(wcfg.sta.ssid)));
+                        std::memcpy(wcfg.sta.password, pass.data(),
+                                    std::min(pass.size(), sizeof(wcfg.sta.password)));
+                        wcfg.sta.bssid_set = 0;
+                        wcfg.sta.channel = 0;
+                        esp_wifi_set_config(WIFI_IF_STA, &wcfg);
+                    }
+                    esp_wifi_disconnect();
+                    break;
                 }
             }
         });
