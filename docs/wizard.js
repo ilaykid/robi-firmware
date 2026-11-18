@@ -1,72 +1,55 @@
 import { FACE_STYLES, FACE_THEMES, RobiFaceSimulator } from "./face-preview.js";
 import { ESPLoader, Transport } from "./vendor/esptool-js.bundle.js";
-
-const VOICES = [
-  { id: "Puck", label: "Puck ⭐ מומלץ", desc: "קופצני, שמח, אנרגטי וטבעי מאוד לילדים" },
-  { id: "Zephyr", label: "Zephyr", desc: "בהיר, נעים, קליל וידידותי" },
-  { id: "Leda", label: "Leda", desc: "צעיר, חמים וסקרן" },
-  { id: "Aoede", label: "Aoede", desc: "עשיר, מלודי ומספר סיפורים מצוין" },
-  { id: "Fenrir", label: "Fenrir", desc: "נלהב, הרפתקני ומלא מרץ" },
-  { id: "Achird", label: "Achird", desc: "רגוע, חברי ונעים לאוזן" },
-  { id: "Kore", label: "Kore", desc: "ברור, סבלני ומעולה לתרגול לימודי" },
-  { id: "Charon", label: "Charon", desc: "יציב, סמכותי וידען" },
-];
-
-const ACTIVITY_PRESETS = [
-  {
-    label: "חשבון",
-    prompt: "בוא נתרגל חשבון בכיף! תשאל אותי חידות ותרגילים מותאמים לגיל שלי ותעודד אותי.",
-  },
-  {
-    label: "אנגלית",
-    prompt: "בוא נלמד אנגלית במשחק! תלמד אותי מילים ומשפטים חדשים ותבקש ממני לחזור אחריך.",
-  },
-  {
-    label: "ידע כללי",
-    prompt: "בוא נשחק טריוויה וידע כללי על מדע, טבע, חיות והעולם!",
-  },
-  {
-    label: "סיפור בהמשכים",
-    prompt: "בוא נמציא יחד סיפור הרפתקאות מרתק שבהמשך כל קטע אני מחליט מה הגיבור עושה!",
-  },
-  {
-    label: "חלל ומדע",
-    prompt: "ספר לי עובדה מדהימה על החלל, כוכבי לכת או המצאות מדעיות ושאל אותי מה דעתי!",
-  },
-  {
-    label: "חידות בלשיות",
-    prompt: "תן לי חידת היגיון או תעלומה בלשית קצרה ותן לי רמזים עד שאפתור!",
-  },
-  {
-    label: "דינוזאורים וחיות",
-    prompt: "בוא נחקור דינוזאורים וחיות פרא נדירות עם חידון נכון או לא נכון!",
-  },
-];
-
-const DEFAULT_KIDS = [
-  {
-    name: "נועה",
-    age: 8,
-    color: "#3b82f6",
-    interests: "חלל, חיות, חידות וסיפורים",
-    activities: [
-      { ...ACTIVITY_PRESETS[0] },
-      { ...ACTIVITY_PRESETS[1] },
-      { ...ACTIVITY_PRESETS[2] },
-      { ...ACTIVITY_PRESETS[3] },
-    ],
-  },
-];
+import { I18N, getDict } from "./i18n.js";
 
 const STORAGE_KEY = "heyrobi_wizard_draft_v2";
+const UI_LANG_KEY = "heyrobi_wizard_ui_lang_v1";
+
+function detectInitialUiLang() {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const q = (params.get("lang") || "").toLowerCase();
+    if (q === "he" || q === "he-il") return "he";
+    if (q === "en" || q === "en-us") return "en";
+    const saved = localStorage.getItem(UI_LANG_KEY);
+    if (saved === "he" || saved === "en") return saved;
+  } catch (_) {}
+  return "en";
+}
+
+function makeDefaultKids(lang) {
+  const d = getDict(lang);
+  return [
+    {
+      name: d.defaultKidName,
+      age: 8,
+      color: "#3b82f6",
+      interests: d.defaultKidInterests,
+      activities: d.presets.slice(0, 4).map((p) => ({ ...p })),
+    },
+  ];
+}
+
+function isUntouchedDefaultKids(kids, lang) {
+  const def = makeDefaultKids(lang);
+  if (!Array.isArray(kids) || kids.length !== 1) return false;
+  const k = kids[0];
+  const d = def[0];
+  if (k.name !== d.name || k.interests !== d.interests) return false;
+  if (!Array.isArray(k.activities) || k.activities.length !== 4) return false;
+  return k.activities.every((a, i) => a.label === d.activities[i].label && a.prompt === d.activities[i].prompt);
+}
+
+let uiLang = detectInitialUiLang();
+const initDict = getDict(uiLang);
 
 const state = {
   step: 1,
   gemini_key: "",
   preferred_model: "auto",
   keyVerified: false,
-  robot_name: "רובי",
-  language: "he-IL",
+  robot_name: initDict.defaultRobotName,
+  language: initDict.defaultLanguage,
   voice: "Puck",
   face_style: "cyber_visor",
   face_theme: "cyber_cyan",
@@ -74,7 +57,7 @@ const state = {
   brightness: 85,
   custom_topics: [],
   custom_prompt: "",
-  kids: structuredClone(DEFAULT_KIDS),
+  kids: makeDefaultKids(uiLang),
   wifi_ssid: "",
   wifi_pass: "",
   board: "waveshare175",
@@ -86,6 +69,88 @@ let simulator = null;
 let activeAudioCtx = null;
 let activeAudioSource = null;
 const nextSlotByKid = {};
+
+function dict() {
+  return getDict(uiLang);
+}
+
+function applyStaticI18n() {
+  const d = dict();
+  document.documentElement.lang = uiLang;
+  document.documentElement.dir = d.dir;
+  document.title = d.pageTitle;
+
+  document.querySelectorAll("[data-i18n]").forEach((el) => {
+    const key = el.dataset.i18n;
+    if (typeof d[key] === "string") el.textContent = d[key];
+  });
+  document.querySelectorAll("[data-i18n-html]").forEach((el) => {
+    const key = el.dataset.i18nHtml;
+    if (typeof d[key] === "string") el.innerHTML = d[key];
+  });
+  document.querySelectorAll("[data-i18n-placeholder]").forEach((el) => {
+    const key = el.dataset.i18nPlaceholder;
+    if (typeof d[key] === "string") el.placeholder = d[key];
+  });
+  document.querySelectorAll("[data-i18n-aria]").forEach((el) => {
+    const key = el.dataset.i18nAria;
+    if (typeof d[key] === "string") el.setAttribute("aria-label", d[key]);
+  });
+
+  document.querySelectorAll(".lang-btn[data-ui-lang]").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.uiLang === uiLang);
+  });
+
+  const lnkCase = document.getElementById("lnkOrderCaseIL");
+  if (lnkCase) {
+    lnkCase.href =
+      uiLang === "he"
+        ? "https://github.com/ilaykid/robi-firmware/blob/main/case/Robi_v4/README.md#hebrew-guide"
+        : "https://github.com/ilaykid/robi-firmware/tree/main/case/Robi_v4";
+  }
+  const lnkGuide = document.getElementById("lnkFullGuide");
+  if (lnkGuide) {
+    lnkGuide.href =
+      uiLang === "he"
+        ? "https://github.com/ilaykid/robi-firmware#hebrew-readme"
+        : "https://github.com/ilaykid/robi-firmware";
+  }
+}
+
+function setUiLang(nextLang, { persist = true } = {}) {
+  const normalized = nextLang === "he" ? "he" : "en";
+  const prevLang = uiLang;
+  const prevDict = getDict(prevLang);
+  const nextDict = getDict(normalized);
+
+  if (prevLang !== normalized) {
+    if (state.robot_name === prevDict.defaultRobotName) {
+      state.robot_name = nextDict.defaultRobotName;
+    }
+    if (state.language === prevDict.defaultLanguage) {
+      state.language = nextDict.defaultLanguage;
+    }
+    if (isUntouchedDefaultKids(state.kids, prevLang)) {
+      state.kids = makeDefaultKids(normalized);
+    }
+  }
+
+  uiLang = normalized;
+  if (persist) {
+    try {
+      localStorage.setItem(UI_LANG_KEY, uiLang);
+    } catch (_) {}
+  }
+
+  applyStaticI18n();
+  hydrateInputs();
+  renderVoices();
+  renderFaceStyles();
+  renderThemes();
+  renderCustomTopics();
+  renderKids();
+  syncSimulator();
+}
 
 function loadDraft() {
   try {
@@ -145,6 +210,7 @@ function syncSimulator() {
     themeId: state.face_theme,
     robotName: state.robot_name,
     kids: state.kids,
+    uiLang,
   });
 }
 
@@ -167,29 +233,30 @@ function setStatus(id, text, kind = "") {
 
 // ---------- Step 1: Verify Gemini API Key ----------
 async function verifyGeminiKey() {
+  const d = dict();
   const key = state.gemini_key.trim();
   if (!key || key.length < 20) {
-    setStatus("keyStatus", "נא להזין מפתח Gemini תקין (מתחיל בדרך כלל ב-AIza).", "err");
+    setStatus("keyStatus", d.stKeyInvalid, "err");
     return;
   }
   const btn = document.getElementById("btnVerifyKey");
   btn.disabled = true;
-  setStatus("keyStatus", "בודק את המפתח מול שרתי Google Gemini...", "warn");
+  setStatus("keyStatus", d.stKeyChecking, "warn");
   try {
     const res = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models?pageSize=5&key=${encodeURIComponent(key)}`
     );
     if (!res.ok) {
       const errJson = await res.json().catch(() => ({}));
-      const msg = errJson?.error?.message || `שגיאת HTTP ${res.status}`;
-      setStatus("keyStatus", `המפתח נדחה: ${msg}`, "err");
+      const msg = errJson?.error?.message || `HTTP ${res.status}`;
+      setStatus("keyStatus", d.stKeyRejected(msg), "err");
       state.keyVerified = false;
       return;
     }
     state.keyVerified = true;
-    setStatus("keyStatus", "מעולה! המפתח תקין ופעיל מול Google Gemini.", "ok");
+    setStatus("keyStatus", d.stKeyOk, "ok");
   } catch (e) {
-    setStatus("keyStatus", `שגיאת רשת בבדיקת המפתח: ${e.message}`, "err");
+    setStatus("keyStatus", d.stKeyNetErr(e.message), "err");
   } finally {
     btn.disabled = false;
   }
@@ -197,9 +264,10 @@ async function verifyGeminiKey() {
 
 // ---------- Step 2: Voice Selection & Browser Live TTS Sample ----------
 function renderVoices() {
+  const d = dict();
   const grid = document.getElementById("voiceGrid");
   grid.innerHTML = "";
-  for (const v of VOICES) {
+  for (const v of d.voices) {
     const card = document.createElement("div");
     card.className = "voice-card" + (state.voice === v.id ? " selected" : "");
     card.innerHTML = `
@@ -246,14 +314,15 @@ function pcm24kBase64ToWavBuffer(b64) {
 }
 
 async function playVoiceSample() {
+  const d = dict();
   const key = state.gemini_key.trim();
   if (!key) {
-    setStatus("voiceStatus", "כדי לשמוע דגימת קול חיה, הזינו קודם את מפתח ה-Gemini בשלב 1.", "warn");
+    setStatus("voiceStatus", d.stVoiceNeedKey, "warn");
     return;
   }
   const btn = document.getElementById("btnPlayVoice");
   btn.disabled = true;
-  setStatus("voiceStatus", `יוצר דגימת קול חיה עבור ${state.voice}...`, "warn");
+  setStatus("voiceStatus", d.stVoiceLoading(state.voice), "warn");
 
   try {
     if (activeAudioSource) {
@@ -292,7 +361,7 @@ async function playVoiceSample() {
 
     const data = await resp.json();
     const b64 = data?.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-    if (!b64) throw new Error("לא התקבל אודיו מהשרת");
+    if (!b64) throw new Error(d.stVoiceNoAudio);
 
     const wavBuf = pcm24kBase64ToWavBuffer(b64);
     if (!activeAudioCtx) {
@@ -331,14 +400,14 @@ async function playVoiceSample() {
     source.onended = () => {
       playing = false;
       simulator?.setExternalAudioLevel(0);
-      setStatus("voiceStatus", `דגימת הקול (${state.voice}) נוגנה בהצלחה!`, "ok");
+      setStatus("voiceStatus", dict().stVoiceDone(state.voice), "ok");
     };
 
-    setStatus("voiceStatus", `מנגן עכשיו את הקול ${state.voice} — הביטו בפנים של רובי משמאל!`, "ok");
+    setStatus("voiceStatus", d.stVoicePlaying(state.voice), "ok");
     source.start();
     pumpLipSync();
   } catch (e) {
-    setStatus("voiceStatus", `שגיאה בהשמעת דגימת קול: ${e.message}`, "err");
+    setStatus("voiceStatus", dict().stVoiceErr(e.message), "err");
   } finally {
     btn.disabled = false;
   }
@@ -346,16 +415,18 @@ async function playVoiceSample() {
 
 // ---------- Step 3: Face Styles & Color Themes ----------
 function renderFaceStyles() {
+  const d = dict();
   const grid = document.getElementById("styleGrid");
   grid.innerHTML = "";
   for (const st of Object.values(FACE_STYLES)) {
+    const loc = d.faceStyles[st.id] || st;
     const card = document.createElement("div");
     card.className = "style-card" + (state.face_style === st.id ? " selected" : "");
     card.innerHTML = `
       <div class="style-icon">${st.icon}</div>
       <div class="style-info">
-        <strong>${st.title}</strong>
-        <span>${st.subtitle}</span>
+        <strong>${loc.title}</strong>
+        <span>${loc.subtitle}</span>
       </div>
     `;
     card.addEventListener("click", () => {
@@ -368,16 +439,18 @@ function renderFaceStyles() {
 }
 
 function renderThemes() {
+  const d = dict();
   const grid = document.getElementById("themeGrid");
   grid.innerHTML = "";
   for (const t of Object.values(FACE_THEMES)) {
+    const loc = d.faceThemes[t.id] || t;
     const card = document.createElement("div");
     card.className = "theme-card" + (state.face_theme === t.id ? " selected" : "");
     card.innerHTML = `
       <div class="theme-dot" style="background: radial-gradient(circle at 35% 35%, ${t.eyeCore}, ${t.eyeMain} 65%, ${t.bgDeep}); color: ${t.eyeMain};"></div>
       <div class="theme-info">
-        <strong>${t.title}</strong>
-        <span>${t.subtitle}</span>
+        <strong>${loc.title}</strong>
+        <span>${loc.subtitle}</span>
       </div>
     `;
     card.addEventListener("click", () => {
@@ -391,16 +464,17 @@ function renderThemes() {
 
 // ---------- Step 4: Parent Custom Topics + Kids ----------
 function renderCustomTopics() {
+  const d = dict();
   const list = document.getElementById("customTopicsList");
   list.innerHTML = "";
   if (state.custom_topics.length === 0) {
-    list.innerHTML = `<span style="color:var(--text-muted);font-size:0.82rem;">עדיין לא נוספו נושאים אישיים — הקלידו למעלה כל נושא שתרצו!</span>`;
+    list.innerHTML = `<span style="color:var(--text-muted);font-size:0.82rem;">${d.s4TopicsEmpty}</span>`;
     return;
   }
   state.custom_topics.forEach((topic, idx) => {
     const tag = document.createElement("span");
     tag.className = "topic-tag";
-    tag.innerHTML = `<span>${escapeAttr(topic)}</span><button type="button" title="הסרת נושא" data-rm-topic="${idx}">×</button>`;
+    tag.innerHTML = `<span>${escapeAttr(topic)}</span><button type="button" title="${escapeAttr(d.s4RemoveTopicTitle)}" data-rm-topic="${idx}">×</button>`;
     list.appendChild(tag);
   });
   list.querySelectorAll("[data-rm-topic]").forEach((btn) => {
@@ -413,11 +487,12 @@ function renderCustomTopics() {
 }
 
 function addCustomTopicFromInput() {
+  const d = dict();
   const inp = document.getElementById("inpNewTopic");
   const val = (inp.value || "").trim();
   if (!val) return;
   if (state.custom_topics.length >= 16) {
-    alert("ניתן להוסיף עד 16 נושאי שיחה אישיים.");
+    alert(d.s4MaxTopicsAlert);
     return;
   }
   if (!state.custom_topics.includes(val)) {
@@ -430,15 +505,18 @@ function addCustomTopicFromInput() {
 }
 
 function ensureFourActivities(kid) {
+  const presets = dict().presets;
   if (!Array.isArray(kid.activities)) kid.activities = [];
   while (kid.activities.length < 4) {
-    const fallback = ACTIVITY_PRESETS[kid.activities.length % ACTIVITY_PRESETS.length];
+    const fallback = presets[kid.activities.length % presets.length];
     kid.activities.push({ ...fallback });
   }
   kid.activities = kid.activities.slice(0, 4);
 }
 
 function renderKids() {
+  const d = dict();
+  const presets = d.presets;
   const wrap = document.getElementById("kidsContainer");
   wrap.innerHTML = "";
 
@@ -451,54 +529,58 @@ function renderKids() {
       .map(
         (act, aIdx) => `
         <div class="act-row">
-          <input type="text" data-k="${idx}" data-a="${aIdx}" data-f="label" maxlength="16" placeholder="כותרת כפתור #${aIdx + 1}" value="${escapeAttr(act.label)}" />
-          <input type="text" data-k="${idx}" data-a="${aIdx}" data-f="prompt" maxlength="200" placeholder="על מה רובי ידבר כשלוחצים על הכפתור?" value="${escapeAttr(act.prompt)}" />
+          <input type="text" data-k="${idx}" data-a="${aIdx}" data-f="label" maxlength="16" placeholder="${escapeAttr(d.kidActLabelPh(aIdx + 1))}" value="${escapeAttr(act.label)}" />
+          <input type="text" data-k="${idx}" data-a="${aIdx}" data-f="prompt" maxlength="200" placeholder="${escapeAttr(d.kidActPromptPh)}" value="${escapeAttr(act.prompt)}" />
         </div>
       `
       )
       .join("");
 
-    const presetHtml = ACTIVITY_PRESETS.map(
-      (p, pIdx) =>
-        `<button type="button" class="chip" data-preset="${pIdx}" data-kid="${idx}">+ ${p.label}</button>`
-    ).join("");
+    const presetHtml = presets
+      .map(
+        (p, pIdx) =>
+          `<button type="button" class="chip" data-preset="${pIdx}" data-kid="${idx}">+ ${escapeAttr(p.label)}</button>`
+      )
+      .join("");
+
+    const displayName = escapeAttr(kid.name || d.kidFallbackName(idx + 1));
 
     box.innerHTML = `
       <div class="kid-head">
-        <strong>פרופיל ילד/ה #${idx + 1}</strong>
-        <button type="button" class="btn btn-secondary" data-remove-kid="${idx}" style="padding:5px 12px;font-size:0.8rem;">הסרה</button>
+        <strong>${d.kidHeader(idx + 1)}</strong>
+        <button type="button" class="btn btn-secondary" data-remove-kid="${idx}" style="padding:5px 12px;font-size:0.8rem;">${d.kidRemove}</button>
       </div>
       <div class="row-2">
         <div class="field">
-          <label>שם הילד/ה (מופיע על המסך העגול)</label>
+          <label>${d.kidNameLabel}</label>
           <input type="text" data-kid-field="name" data-k="${idx}" maxlength="14" value="${escapeAttr(kid.name)}" />
         </div>
         <div class="row-2">
           <div class="field">
-            <label>גיל</label>
+            <label>${d.kidAgeLabel}</label>
             <input type="number" data-kid-field="age" data-k="${idx}" min="3" max="18" value="${Number(kid.age) || 8}" />
           </div>
           <div class="field">
-            <label>צבע כפתור</label>
+            <label>${d.kidColorLabel}</label>
             <input type="color" data-kid-field="color" data-k="${idx}" value="${escapeAttr(kid.color || "#3b82f6")}" style="height:43px;width:100%;padding:4px;background:var(--bg-input);border-radius:10px;border:1px solid rgba(148,163,184,0.26);cursor:pointer;" />
           </div>
         </div>
       </div>
       <div class="field">
-        <label>תחומי עניין ותחביבים (כתיבה חופשית — רובי ישלב אותם בשיחות!)</label>
-        <input type="text" data-kid-field="interests" data-k="${idx}" maxlength="180" placeholder="למשל: לגו, כדורגל, חלל, ציור, שחמט, מיינקראפט..." value="${escapeAttr(kid.interests || "")}" />
+        <label>${d.kidInterestsLabel}</label>
+        <input type="text" data-kid-field="interests" data-k="${idx}" maxlength="180" placeholder="${escapeAttr(d.kidInterestsPlaceholder)}" value="${escapeAttr(kid.interests || "")}" />
       </div>
       <div class="field" style="margin-bottom:0;">
-        <label>4 כפתורי נושאים על המסך של ${escapeAttr(kid.name || `ילד/ה #${idx + 1}`)} (כתבו כפתור אישי משלכם או בחרו מתבנית):</label>
+        <label>${d.kidActivitiesLabel(displayName)}</label>
         <div class="custom-act-builder">
-          <div style="font-size:0.8rem;color:#a5f3fc;font-weight:600;margin-bottom:6px;">✨ הוספת כפתור נושא אישי משלכם למסך:</div>
+          <div style="font-size:0.8rem;color:#a5f3fc;font-weight:600;margin-bottom:6px;">${d.kidCustomActTitle}</div>
           <div style="display:grid;grid-template-columns:130px 1fr auto;gap:8px;align-items:center;">
-            <input type="text" id="custActLbl_${idx}" maxlength="16" placeholder="שם על הכפתור" />
-            <input type="text" id="custActPrm_${idx}" maxlength="200" placeholder="מה תרצו שרובי יעשה? (למשל: שאל אותי חידון על כדורגל עולמי!)" />
-            <button type="button" class="btn btn-accent" data-add-cust-act="${idx}" style="padding:9px 13px;font-size:0.82rem;">+ הכנס לכפתור</button>
+            <input type="text" id="custActLbl_${idx}" maxlength="16" placeholder="${escapeAttr(d.kidCustomActLabelPh)}" />
+            <input type="text" id="custActPrm_${idx}" maxlength="200" placeholder="${escapeAttr(d.kidCustomActPromptPh)}" />
+            <button type="button" class="btn btn-accent" data-add-cust-act="${idx}" style="padding:9px 13px;font-size:0.82rem;">${d.kidCustomActBtn}</button>
           </div>
         </div>
-        <div style="font-size:0.78rem;color:var(--text-muted);margin-bottom:4px;">או מילוי מהיר מתבנית מוכנה (ואפשר לערוך חופשי כל שורה למטה):</div>
+        <div style="font-size:0.78rem;color:var(--text-muted);margin-bottom:4px;">${d.kidPresetsHint}</div>
         <div class="preset-chips">${presetHtml}</div>
         ${actRowsHtml}
       </div>
@@ -545,7 +627,7 @@ function renderKids() {
       const lblInp = document.getElementById(`custActLbl_${k}`);
       const prmInp = document.getElementById(`custActPrm_${k}`);
       const lbl = (lblInp?.value || "").trim();
-      const prm = (prmInp?.value || "").trim() || (lbl ? `בוא נדבר ונשחק בנושא ${lbl}!` : "");
+      const prm = (prmInp?.value || "").trim() || (lbl ? dict().kidDefaultPrompt(lbl) : "");
       if (!lbl || !state.kids[k]) return;
       const slot = (nextSlotByKid[k] || 0) % 4;
       nextSlotByKid[k] = slot + 1;
@@ -558,7 +640,7 @@ function renderKids() {
   wrap.querySelectorAll("[data-preset]").forEach((chip) => {
     chip.addEventListener("click", () => {
       const k = Number(chip.dataset.kid);
-      const p = ACTIVITY_PRESETS[Number(chip.dataset.preset)];
+      const p = dict().presets[Number(chip.dataset.preset)];
       if (!state.kids[k] || !p) return;
       const slot = (nextSlotByKid[k] || 0) % 4;
       nextSlotByKid[k] = slot + 1;
@@ -579,14 +661,15 @@ function escapeAttr(s) {
 
 // ---------- Step 5: Build ROBICFG1 Binary Sector & WebSerial Flash ----------
 export function buildConfigObject({ includeSecrets = true } = {}) {
-  const rName = (state.robot_name || "רובי").trim();
+  const d = dict();
+  const rName = (state.robot_name || d.defaultRobotName).trim();
   const fTheme = state.face_theme || "cyber_cyan";
   const obj = {
     bot_name: rName,
     robot_name: rName,
     preferred_model: state.preferred_model || "auto",
     voice: state.voice || "Puck",
-    language: state.language || "he-IL",
+    language: state.language || d.defaultLanguage,
     theme: fTheme,
     face_theme: fTheme,
     face_style: state.face_style || "cyber_visor",
@@ -594,13 +677,13 @@ export function buildConfigObject({ includeSecrets = true } = {}) {
     brightness: Number(state.brightness) || 85,
     custom_topics: (state.custom_topics || []).slice(0, 16),
     custom_prompt: (state.custom_prompt || "").trim(),
-    kids: state.kids.slice(0, 3).map((k) => ({
-      name: (k.name || "ילד").trim(),
+    kids: state.kids.slice(0, 3).map((k, idx) => ({
+      name: (k.name || d.simKidFallback(idx + 1)).trim(),
       age: Math.max(3, Math.min(18, Number(k.age) || 8)),
       color: k.color || "#3b82f6",
       interests: (k.interests || "").trim(),
       activities: (k.activities || []).slice(0, 4).map((a) => ({
-        label: (a.label || "פעילות").trim(),
+        label: (a.label || d.kidFallbackAct).trim(),
         prompt: (a.prompt || "").trim(),
       })),
     })),
@@ -617,7 +700,7 @@ export function buildConfigObject({ includeSecrets = true } = {}) {
 export function buildRobiCfgSectorBytes(cfgObj) {
   const jsonBytes = new TextEncoder().encode(JSON.stringify(cfgObj));
   if (jsonBytes.length === 0 || jsonBytes.length > 12288) {
-    throw new Error(`גודל קובץ ההגדרות חורג מהמותר (${jsonBytes.length} בתים)`);
+    throw new Error(dict().stCfgTooLarge(jsonBytes.length));
   }
   const totalLen = Math.ceil((16 + jsonBytes.length) / 4096) * 4096;
   const sector = new Uint8Array(totalLen);
@@ -650,6 +733,7 @@ function setProgress(pct) {
 }
 
 async function fetchFirmwareBytes({ appOnly = false } = {}) {
+  const d = dict();
   if (state.customBinFile) {
     appendLog(`Loading local firmware file: ${state.customBinFile.name}`);
     const ab = await state.customBinFile.arrayBuffer();
@@ -668,32 +752,23 @@ async function fetchFirmwareBytes({ appOnly = false } = {}) {
   const res = await fetch(`${url}?t=${Date.now()}`, { cache: "no-store" });
   if (!res.ok) {
     if (state.board === "spotpear128") {
-      throw new Error(
-        `קובץ הקושחה הניסיוני עבור Spotpear 1.28" (${url}) אינו זמין עדיין בשרת זה (HTTP ${res.status}). עבור לוח Waveshare 1.75" בחרו בדגם הראשי, או טענו קובץ .bin מקומי מתחת לכפתור.`
-      );
+      throw new Error(d.stFwMissingSpotpear(url, res.status));
     }
-    throw new Error(
-      `קובץ הקושחה (${url}) לא נמצא בשרת זה (HTTP ${res.status}). ניתן לבחור קובץ .bin מקומי מתחת לכפתור או להשתמש באתר GitHub Pages הרשמי.`
-    );
+    throw new Error(d.stFwMissing(url, res.status));
   }
   const ab = await res.arrayBuffer();
   return new Uint8Array(ab);
 }
 
 async function runUsbFlash({ configOnly = false, upgradeOnly = false }) {
+  const d = dict();
   if (!("serial" in navigator)) {
-    setStatus(
-      "flashStatus",
-      "הדפדפן הנוכחי אינו תומך ב-WebSerial. נא לפתוח את האשף בדפדפן Google Chrome או Microsoft Edge במחשב.",
-      "err"
-    );
+    setStatus("flashStatus", d.stNoWebSerial, "err");
     return;
   }
 
   if (!upgradeOnly && !state.gemini_key.trim()) {
-    const ok = window.confirm(
-      "לא הזנתם מפתח Gemini בשלב 1. רובי יידלק אך יבקש מכם להגדיר מפתח דרך http://robi.local לפני שיוכל לדבר. להמשיך בצריבה?"
-    );
+    const ok = window.confirm(d.stNoKeyConfirm);
     if (!ok) return;
   }
 
@@ -709,11 +784,11 @@ async function runUsbFlash({ configOnly = false, upgradeOnly = false }) {
   try {
     const fileArray = [];
     if (upgradeOnly) {
-      setStatus("flashStatus", "מוריד עדכון קושחה של HeyRobi (ללא נגיעה בזיכרונות ובהגדרות)...", "warn");
+      setStatus("flashStatus", d.stDlUpgrade, "warn");
       setProgress(4);
       const appBytes = await fetchFirmwareBytes({ appOnly: true });
       if (appBytes.length < 200000 || appBytes[0] !== 0xe9) {
-        throw new Error("קובץ עדכון הקושחה שהתקבל אינו תמונת ESP32 תקינה (חסר magic 0xE9).");
+        throw new Error(d.stBadBin);
       }
       appendLog(`Upgrade app loaded (${(appBytes.length / (1024 * 1024)).toFixed(2)} MB -> 0x20000, NVS 0x9000 untouched)`);
       fileArray.push({ data: appBytes, address: 0x20000 });
@@ -721,11 +796,11 @@ async function runUsbFlash({ configOnly = false, upgradeOnly = false }) {
       const cfgObj = buildConfigObject({ includeSecrets: true });
       const cfgSector = buildRobiCfgSectorBytes(cfgObj);
       if (!configOnly) {
-        setStatus("flashStatus", "מוריד את קובץ המערכת של HeyRobi...", "warn");
+        setStatus("flashStatus", d.stDlFull, "warn");
         setProgress(4);
         const fwBytes = await fetchFirmwareBytes({ appOnly: false });
         if (fwBytes.length < 200000 || fwBytes[0] !== 0xe9) {
-          throw new Error("קובץ הקושחה שהתקבל אינו תמונת ESP32 תקינה (חסר magic 0xE9).");
+          throw new Error(d.stBadBin);
         }
         appendLog(`Firmware loaded (${(fwBytes.length / (1024 * 1024)).toFixed(2)} MB)`);
         fileArray.push({ data: fwBytes, address: 0x0 });
@@ -733,7 +808,7 @@ async function runUsbFlash({ configOnly = false, upgradeOnly = false }) {
       fileArray.push({ data: cfgSector, address: 0x010000 });
     }
 
-    setStatus("flashStatus", "בחרו את רובי בחלון ה-USB שנפתח (USB JTAG/serial debug unit)...", "warn");
+    setStatus("flashStatus", d.stPickPort, "warn");
     const port = await navigator.serial.requestPort({
       filters: [{ usbVendorId: 0x303a }],
     }).catch(async () => {
@@ -756,7 +831,7 @@ async function runUsbFlash({ configOnly = false, upgradeOnly = false }) {
       },
     });
 
-    setStatus("flashStatus", "מתחבר לבקר ESP32-S3 של רובי...", "warn");
+    setStatus("flashStatus", d.stConnecting, "warn");
     const chip = await loader.main();
     appendLog(`Connected to ${chip}`);
 
@@ -765,11 +840,7 @@ async function runUsbFlash({ configOnly = false, upgradeOnly = false }) {
 
     setStatus(
       "flashStatus",
-      configOnly
-        ? "מעדכן הגדרות בזיכרון של רובי (שנייה אחת)..."
-        : upgradeOnly
-          ? "משדרג קושחה בלבד ושומר על כל הזיכרונות וההגדרות (כ-15–25 שניות, נא לא לנתק)..."
-          : "צורב את מערכת HeyRobi וההגדרות האישיות שלכם (כ-45–90 שניות, נא לא לנתק את הכבל)...",
+      configOnly ? d.stFlashingCfg : upgradeOnly ? d.stFlashingUpg : d.stFlashingFull,
       "warn"
     );
 
@@ -797,14 +868,12 @@ async function runUsbFlash({ configOnly = false, upgradeOnly = false }) {
 
     setStatus(
       "flashStatus",
-      upgradeOnly
-        ? "השדרוג הושלם בהצלחה! כל הזיכרונות, ה-WiFi וההגדרות שלך נשמרו במלואם 🎉"
-        : "הצריבה הושלמה בהצלחה! רובי מתעורר עכשיו ויתחבר אוטומטית ל-WiFi הביתי שלכם 🎉",
+      upgradeOnly ? d.stFlashOkUpg : d.stFlashOkFull,
       "ok"
     );
   } catch (e) {
     appendLog(`ERROR: ${e?.message || e}`);
-    setStatus("flashStatus", `שגיאה בצריבה: ${e?.message || e}`, "err");
+    setStatus("flashStatus", dict().stFlashErr(e?.message || e), "err");
   } finally {
     if (transport) {
       try { await transport.disconnect(); } catch (_) {}
@@ -850,9 +919,9 @@ function importJsonFile(file) {
       renderThemes();
       renderCustomTopics();
       renderKids();
-      alert("הפרופיל נטען בהצלחה!");
+      alert(dict().stProfileLoaded);
     } catch (e) {
-      alert("קובץ ה-JSON אינו תקין: " + e.message);
+      alert(dict().stProfileInvalid(e.message));
     }
   };
   reader.readAsText(file);
@@ -884,6 +953,8 @@ window.addEventListener("DOMContentLoaded", () => {
 
   const canvas = document.getElementById("robiCanvas");
   simulator = new RobiFaceSimulator(canvas);
+
+  applyStaticI18n();
   syncSimulator();
 
   hydrateInputs();
@@ -892,6 +963,10 @@ window.addEventListener("DOMContentLoaded", () => {
   renderThemes();
   renderCustomTopics();
   renderKids();
+
+  document.querySelectorAll(".lang-btn[data-ui-lang]").forEach((btn) => {
+    btn.addEventListener("click", () => setUiLang(btn.dataset.uiLang));
+  });
 
   document.querySelectorAll(".step-tab").forEach((tab) => {
     tab.addEventListener("click", () => setStep(Number(tab.dataset.step)));
@@ -953,13 +1028,14 @@ window.addEventListener("DOMContentLoaded", () => {
 
   document.getElementById("btnAddKid").addEventListener("click", () => {
     if (state.kids.length >= 3) return;
+    const d = dict();
     const palette = ["#3b82f6", "#10b981", "#f59e0b"];
     state.kids.push({
-      name: `ילד ${state.kids.length + 1}`,
+      name: d.simKidFallback(state.kids.length + 1),
       age: 7,
       color: palette[state.kids.length % palette.length],
-      interests: "משחקים, חידות וסיפורים",
-      activities: ACTIVITY_PRESETS.slice(0, 4).map((p) => ({ ...p })),
+      interests: d.newKidInterests,
+      activities: d.presets.slice(0, 4).map((p) => ({ ...p })),
     });
     saveDraft();
     renderKids();
@@ -995,7 +1071,7 @@ window.addEventListener("DOMContentLoaded", () => {
   document.getElementById("inpCustomBin").addEventListener("change", (e) => {
     state.customBinFile = e.target.files?.[0] || null;
     if (state.customBinFile) {
-      setStatus("flashStatus", `נבחר קובץ קושחה מקומי: ${state.customBinFile.name}`, "ok");
+      setStatus("flashStatus", dict().stCustomBinSelected(state.customBinFile.name), "ok");
     }
   });
 

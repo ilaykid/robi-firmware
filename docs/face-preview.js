@@ -1,42 +1,44 @@
 // Live 60fps 466x466 Circular AMOLED Simulator matching firmware scripts/robi_ui.inc
+import { getDict } from "./i18n.js";
+
 export const FACE_STYLES = {
   cyber_visor: {
     id: "cyber_visor",
     icon: "🤖",
-    title: "קפסולות סייבר",
-    subtitle: "עיני זכוכית אנכיות עם סריקת לייזר",
+    title: "Cyber Capsules",
+    subtitle: "Vertical glass eyes with laser scanline",
   },
   round_kawaii: {
     id: "round_kawaii",
     icon: "✨",
-    title: "עגול חמוד",
-    subtitle: "אישונים גדולים ונוצצים עם לחיים סמוקות",
+    title: "Round Kawaii",
+    subtitle: "Big sparkling pupils with rosy cheeks",
   },
   retro_pixel: {
     id: "retro_pixel",
     icon: "👾",
-    title: "רטרו פיקסל",
-    subtitle: "רובוט ארקייד מרובע בסגנון 8-ביט",
+    title: "Retro Pixel",
+    subtitle: "8-bit square arcade robot eyes",
   },
   visor_cyclops: {
     id: "visor_cyclops",
     icon: "🚀",
-    title: "משקף סייבורג",
-    subtitle: "קסדת משקף רחבה עם אלומת סורק נעה",
+    title: "Cyborg Visor",
+    subtitle: "Wide helmet visor with sweeping scanner beam",
   },
   owl_mech: {
     id: "owl_mech",
     icon: "⚙️",
-    title: "עדשות מכניות",
-    subtitle: "טבעות צמצם כפולות בסגנון רובוט מכני",
+    title: "Mech Lenses",
+    subtitle: "Dual mechanical aperture rings",
   },
 };
 
 export const FACE_THEMES = {
   cyber_cyan: {
     id: "cyber_cyan",
-    title: "סייבר טורקיז",
-    subtitle: "הניאון הקלאסי הזוהר",
+    title: "Cyber Cyan",
+    subtitle: "Classic glowing neon cyan",
     bgDeep: "#02050a",
     hudRing: "#0c192c",
     hudDotDim: "#0e7490",
@@ -50,8 +52,8 @@ export const FACE_THEMES = {
   },
   solar_gold: {
     id: "solar_gold",
-    title: "זהב סולארי",
-    subtitle: "חמים, אנרגטי ושמשי",
+    title: "Solar Gold",
+    subtitle: "Warm, sunny, and energetic",
     bgDeep: "#090502",
     hudRing: "#291805",
     hudDotDim: "#b45309",
@@ -65,8 +67,8 @@ export const FACE_THEMES = {
   },
   emerald_matrix: {
     id: "emerald_matrix",
-    title: "מטריקס אזמרגד",
-    subtitle: "מדע בדיוני ירוק־ניאון חד",
+    title: "Emerald Matrix",
+    subtitle: "Crisp sci-fi neon green",
     bgDeep: "#020905",
     hudRing: "#062817",
     hudDotDim: "#047857",
@@ -80,8 +82,8 @@ export const FACE_THEMES = {
   },
   cosmic_violet: {
     id: "cosmic_violet",
-    title: "סגול קוסמי",
-    subtitle: "חלל עמוק ונצנוץ גלקטי",
+    title: "Cosmic Violet",
+    subtitle: "Deep space galactic shimmer",
     bgDeep: "#06020c",
     hudRing: "#1f0d38",
     hudDotDim: "#6d28d9",
@@ -95,8 +97,8 @@ export const FACE_THEMES = {
   },
   coral_cute: {
     id: "coral_cute",
-    title: "קורל מתוק",
-    subtitle: "ורוד־אפרסק חמוד וידידותי",
+    title: "Coral Cute",
+    subtitle: "Friendly peach-pink glow",
     bgDeep: "#0a0206",
     hudRing: "#2d0b1a",
     hudDotDim: "#be185d",
@@ -127,7 +129,8 @@ export class RobiFaceSimulator {
     this.ctx = canvas.getContext("2d");
     this.themeId = "cyber_cyan";
     this.styleId = "cyber_visor";
-    this.robotName = "רובי";
+    this.uiLang = "en";
+    this.robotName = "Robi";
     this.kids = [];
     this.emotion = "happy";
     this.speakingLevel = 0;
@@ -149,10 +152,13 @@ export class RobiFaceSimulator {
     requestAnimationFrame(this.loop);
   }
 
-  setState({ themeId, styleId, robotName, kids }) {
+  setState({ themeId, styleId, robotName, kids, uiLang }) {
+    if (uiLang === "en" || uiLang === "he") this.uiLang = uiLang;
     if (themeId && FACE_THEMES[themeId]) this.themeId = themeId;
     if (styleId && FACE_STYLES[styleId]) this.styleId = styleId;
-    if (typeof robotName === "string") this.robotName = robotName || "רובי";
+    if (typeof robotName === "string") {
+      this.robotName = robotName || getDict(this.uiLang).defaultRobotName;
+    }
     if (Array.isArray(kids)) {
       this.kids = kids;
       if (this.activeMenuKid >= kids.length) this.activeMenuKid = -1;
@@ -278,7 +284,7 @@ export class RobiFaceSimulator {
       ctx.fillStyle = "rgba(148, 163, 184, 0.68)";
       ctx.font = "600 18px system-ui, sans-serif";
       ctx.textAlign = "center";
-      ctx.fillText(`היי, אני ${this.robotName}!`, 233, 405);
+      ctx.fillText(getDict(this.uiLang).simGreeting(this.robotName), 233, 405);
     }
 
     ctx.restore();
@@ -597,7 +603,7 @@ export class RobiFaceSimulator {
       ctx.font = "700 18px system-ui, sans-serif";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      const label = (kid.name || `ילד ${i + 1}`).slice(0, 10);
+      const label = (kid.name || getDict(this.uiLang).simKidFallback(i + 1)).slice(0, 10);
       ctx.fillText(label, x + pillW / 2, y + pillH / 2 + 1);
       ctx.restore();
 
@@ -610,10 +616,11 @@ export class RobiFaceSimulator {
     ctx.fillStyle = "rgba(4, 9, 20, 0.94)";
     ctx.fillRect(0, 0, 466, 466);
 
+    const d = getDict(this.uiLang);
     ctx.fillStyle = col;
     ctx.font = "700 26px system-ui, sans-serif";
     ctx.textAlign = "center";
-    ctx.fillText(`${kid.name} — מה עושים?`, 233, 86);
+    ctx.fillText(d.simKidMenuTitle(kid.name), 233, 86);
 
     const acts = kid.activities || [];
     const boxW = 152;
@@ -627,7 +634,7 @@ export class RobiFaceSimulator {
       const c = i % 2;
       const bx = startX + c * (boxW + gap);
       const by = startY + r * (boxH + gap);
-      const lbl = acts[i]?.label || `פעילות ${i + 1}`;
+      const lbl = acts[i]?.label || d.simActFallback(i + 1);
 
       ctx.save();
       ctx.fillStyle = "rgba(15, 28, 52, 0.95)";
@@ -660,6 +667,6 @@ export class RobiFaceSimulator {
     ctx.font = "600 17px system-ui, sans-serif";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText("חזרה לפנים", 233, by + bh / 2);
+    ctx.fillText(d.simBackToFace, 233, by + bh / 2);
   }
 }
