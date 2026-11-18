@@ -44,6 +44,9 @@ bool s_usage_dirty = false;
 std::array<uint8_t, 6> s_cur_bssid = {};
 std::array<uint8_t, 6> s_good_bssid = {};
 bool s_good_bssid_valid = false;
+bool s_steering_to_good = false;
+bool s_deliberate_skip_disconnect = false;
+int s_direct_pin_fails = 0;
 int s_fast_skip_count = 0;
 std::vector<std::array<uint8_t, 6>> s_dead_dhcp_bssids;
 
@@ -52,6 +55,18 @@ bool IsDeadDhcpBssid(const std::array<uint8_t, 6>& b) {
         if (d == b) return true;
     }
     return false;
+}
+
+void SteerWifiConfigToGoodBssid() {
+    if (!s_good_bssid_valid || s_direct_pin_fails >= 2) return;
+    wifi_config_t wcfg = {};
+    if (esp_wifi_get_config(WIFI_IF_STA, &wcfg) == ESP_OK) {
+        std::memcpy(wcfg.sta.bssid, s_good_bssid.data(), 6);
+        wcfg.sta.bssid_set = 1;
+        if (esp_wifi_set_config(WIFI_IF_STA, &wcfg) == ESP_OK) {
+            s_steering_to_good = true;
+        }
+    }
 }
 
 void InstallSmartWifiDhcpGuard() {
@@ -82,11 +97,15 @@ void InstallSmartWifiDhcpGuard() {
             return;
         }
         if (!IsDeadDhcpBssid(s_cur_bssid)) {
-            ESP_LOGW(TAG, "DHCP timeout (4.5s) on BSSID %02x:%02x:%02x:%02x:%02x:%02x — blacklisting extender & advancing AP queue!",
+            ESP_LOGW(TAG, "DHCP timeout on BSSID %02x:%02x:%02x:%02x:%02x:%02x — blacklisting extender & steering to good router!",
                      s_cur_bssid[0], s_cur_bssid[1], s_cur_bssid[2],
                      s_cur_bssid[3], s_cur_bssid[4], s_cur_bssid[5]);
-            s_dead_dhcp_bssids.push_back(s_cur_bssid);
+            if (s_dead_dhcp_bssids.size() < 8) {
+                s_dead_dhcp_bssids.push_back(s_cur_bssid);
+            }
         }
+        SteerWifiConfigToGoodBssid();
+        s_deliberate_skip_disconnect = true;
         esp_wifi_disconnect();
     };
     targs.dispatch_method = ESP_TIMER_TASK;
@@ -99,34 +118,52 @@ void InstallSmartWifiDhcpGuard() {
             if (event_id == WIFI_EVENT_STA_CONNECTED && event_data != nullptr) {
                 auto* ev = static_cast<wifi_event_sta_connected_t*>(event_data);
                 std::memcpy(s_cur_bssid.data(), ev->bssid, 6);
+                s_deliberate_skip_disconnect = false;
                 if (s_dhcp_watchdog_timer == nullptr) return;
                 esp_timer_stop(s_dhcp_watchdog_timer);
 
+                if (s_good_bssid_valid && s_cur_bssid == s_good_bssid) {
+                    s_steering_to_good = false;
+                    s_direct_pin_fails = 0;
+                    return;
+                }
+
                 if (IsDeadDhcpBssid(s_cur_bssid)) {
-                    ESP_LOGW(TAG, "Fast-skipping dead DHCP BSSID %02x:%02x:%02x:%02x:%02x:%02x",
+                    ESP_LOGW(TAG, "Fast-skipping dead DHCP BSSID %02x:%02x:%02x:%02x:%02x:%02x -> steering to verified router",
                              s_cur_bssid[0], s_cur_bssid[1], s_cur_bssid[2],
                              s_cur_bssid[3], s_cur_bssid[4], s_cur_bssid[5]);
+                    SteerWifiConfigToGoodBssid();
                     esp_timer_start_once(s_dhcp_watchdog_timer, 25000ULL);
                     return;
                 }
-                if (s_good_bssid_valid && s_cur_bssid != s_good_bssid && s_fast_skip_count < 6) {
+                if (s_good_bssid_valid && s_cur_bssid != s_good_bssid && s_fast_skip_count < 12) {
                     ++s_fast_skip_count;
-                    if (s_fast_skip_count >= 6 && !IsDeadDhcpBssid(s_cur_bssid)) {
-                        s_dead_dhcp_bssids.push_back(s_cur_bssid);
-                    }
-                    ESP_LOGI(TAG, "Fast-skipping non-preferred BSSID %02x:%02x:%02x:%02x:%02x:%02x (%d/6) to reach good router",
+                    ESP_LOGI(TAG, "Fast-skipping non-preferred BSSID %02x:%02x:%02x:%02x:%02x:%02x (%d/12) -> steering to good router",
                              s_cur_bssid[0], s_cur_bssid[1], s_cur_bssid[2],
                              s_cur_bssid[3], s_cur_bssid[4], s_cur_bssid[5], s_fast_skip_count);
+                    SteerWifiConfigToGoodBssid();
                     esp_timer_start_once(s_dhcp_watchdog_timer, 25000ULL);
                     return;
                 }
-                if (!s_good_bssid_valid || s_cur_bssid != s_good_bssid) {
-                    esp_timer_start_once(s_dhcp_watchdog_timer, 4500000ULL);
-                }
+                esp_timer_start_once(s_dhcp_watchdog_timer, 4500000ULL);
             } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
                 if (s_dhcp_watchdog_timer != nullptr) {
                     esp_timer_stop(s_dhcp_watchdog_timer);
                 }
+                if (s_steering_to_good && !s_deliberate_skip_disconnect) {
+                    ++s_direct_pin_fails;
+                    if (s_direct_pin_fails >= 2) {
+                        s_steering_to_good = false;
+                        wifi_config_t wcfg = {};
+                        if (esp_wifi_get_config(WIFI_IF_STA, &wcfg) == ESP_OK && wcfg.sta.bssid_set) {
+                            wcfg.sta.bssid_set = 0;
+                            std::memset(wcfg.sta.bssid, 0, 6);
+                            esp_wifi_set_config(WIFI_IF_STA, &wcfg);
+                        }
+                        ESP_LOGW(TAG, "Preferred router BSSID unreachable; restored open BSSID roaming");
+                    }
+                }
+                s_deliberate_skip_disconnect = false;
             }
         },
         nullptr, nullptr);
@@ -137,6 +174,13 @@ void InstallSmartWifiDhcpGuard() {
             if (s_dhcp_watchdog_timer != nullptr) {
                 esp_timer_stop(s_dhcp_watchdog_timer);
             }
+            s_fast_skip_count = 0;
+            s_direct_pin_fails = 0;
+            s_steering_to_good = false;
+            s_deliberate_skip_disconnect = false;
+            s_dead_dhcp_bssids.erase(
+                std::remove(s_dead_dhcp_bssids.begin(), s_dead_dhcp_bssids.end(), s_cur_bssid),
+                s_dead_dhcp_bssids.end());
             if (!s_good_bssid_valid || s_good_bssid != s_cur_bssid) {
                 s_good_bssid = s_cur_bssid;
                 s_good_bssid_valid = true;
@@ -432,7 +476,8 @@ bool RobiConfig::ParseIntoLocked(const std::string& json_str, bool keep_existing
     }
 
     if (cJSON_HasObjectItem(root, "volume")) {
-        next.volume = std::clamp(SafeGetInt(root, "volume", next.volume), 35, 100);
+        int min_vol = keep_existing_key_if_sentinel ? 35 : 0;
+        next.volume = std::clamp(SafeGetInt(root, "volume", next.volume), min_vol, 100);
     }
     if (cJSON_HasObjectItem(root, "brightness")) {
         next.brightness = std::clamp(SafeGetInt(root, "brightness", next.brightness), 10, 100);

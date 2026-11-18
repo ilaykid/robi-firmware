@@ -168,16 +168,36 @@ struct SpeechFrameDecision {
     bool commit_utterance = false;
 };
 
-// Hardware-calibrated adaptive utterance tracker for Waveshare ESP32-S3 ES7210 (+30dB ADC, no NSNet).
+// Smooth, non-clipping speech pre-gain for 3D-printed enclosures where AFE has AGC disabled:
+// boosts quiet/distant human speech (e.g. 150..500 RMS) up toward ~2100 RMS (-23.8 dBFS) so
+// Google Gemini Live's server-side VAD and Hebrew STT recognize soft voices effortlessly,
+// while leaving loud close-talk speech (>= 2100 RMS) at unity gain (1.0x).
+inline float NormalizeSpeechPcm(int16_t* samples, size_t count, float ac_rms, float& smooth_gain) {
+    if (samples == nullptr || count == 0) return smooth_gain;
+    float target_gain = std::clamp(2100.0f / std::max(ac_rms, 160.0f), 1.0f, 4.6f);
+    smooth_gain = 0.65f * smooth_gain + 0.35f * target_gain;
+    if (smooth_gain <= 1.03f) {
+        return smooth_gain;
+    }
+    const int32_t scale_q10 = static_cast<int32_t>(smooth_gain * 1024.0f + 0.5f);
+    for (size_t i = 0; i < count; ++i) {
+        int32_t v = (static_cast<int32_t>(samples[i]) * scale_q10 + 512) >> 10;
+        samples[i] = static_cast<int16_t>(std::clamp<int32_t>(v, -30000, 30000));
+    }
+    return smooth_gain;
+}
+
+// Hardware-calibrated adaptive utterance tracker for Waveshare ESP32-S3 ES7210 (+30dB ADC, no NSNet/AGC).
 // - Completely independent of ESP-SR VAD_MODE_0 (which stays latched true on ES7210 +30dB self-noise).
-// - Seeds noise_floor_rms_ at 220.0 (realistic ES7210 baseline) with fast downward adaptation for quiet rooms
-//   and smooth upward adaptation for steady AC/fan hum, preserving the learned floor across turns.
-// - Detects speech onset in 120ms (caller flushes 420ms pre-roll) and commits end-of-speech in 600ms
-//   using combined noise-floor + peak-drop hysteresis (plus a 9.0s continuous-speech safety cap).
+// - Calibrates immediately on Frame #1 via minimum-statistics seeding so quiet enclosures (~45..85 RMS)
+//   trigger speech onset at >= 145 RMS without waiting, while louder board hiss (~250 RMS) never false-triggers.
+// - Prevents speech self-poisoning: upward floor tracking only runs within 1.45x of the current floor
+//   and is strictly capped at 265 RMS so continuous speech can never lock out onset detection.
 class AdaptiveSpeechTracker {
 public:
     void ResetSession() {
-        noise_floor_rms_ = 220.0f;
+        calibrated_ = false;
+        noise_floor_rms_ = 95.0f;
         ResetTurn();
     }
 
@@ -195,8 +215,18 @@ public:
         SpeechFrameDecision dec;
         frame_ms = std::clamp<uint32_t>(frame_ms, 10u, 120u);
 
+        if (!calibrated_) {
+            calibrated_ = true;
+            if (ac_rms <= 310.0f) {
+                noise_floor_rms_ = std::clamp(ac_rms, 35.0f, 260.0f);
+            } else {
+                // User is already speaking on Frame #1 right after OGG_POPUP
+                noise_floor_rms_ = 140.0f;
+            }
+        }
+
         if (!in_speech_) {
-            const float onset_thresh = std::clamp(noise_floor_rms_ * 1.90f + 105.0f, 320.0f, 1080.0f);
+            const float onset_thresh = std::clamp(noise_floor_rms_ * 1.65f + 55.0f, 145.0f, 760.0f);
             if (ac_rms >= onset_thresh) {
                 onset_ms_ += frame_ms;
                 if (onset_ms_ >= 120u) {
@@ -213,11 +243,11 @@ public:
 
             onset_ms_ = (onset_ms_ > (frame_ms / 2u)) ? (onset_ms_ - (frame_ms / 2u)) : 0u;
             if (ac_rms < noise_floor_rms_) {
-                float sample = std::max(40.0f, ac_rms);
-                noise_floor_rms_ = 0.80f * noise_floor_rms_ + 0.20f * sample;
-            } else if (ac_rms < onset_thresh * 0.88f) {
-                float sample = std::min(520.0f, ac_rms);
-                noise_floor_rms_ = 0.94f * noise_floor_rms_ + 0.06f * sample;
+                float sample = std::max(35.0f, ac_rms);
+                noise_floor_rms_ = 0.68f * noise_floor_rms_ + 0.32f * sample;
+            } else if (ac_rms < noise_floor_rms_ * 1.45f + 35.0f) {
+                float sample = std::min(265.0f, ac_rms);
+                noise_floor_rms_ = 0.96f * noise_floor_rms_ + 0.04f * sample;
             }
             return dec;
         }
@@ -227,8 +257,8 @@ public:
         peak_rms_ = std::max(peak_rms_, ac_rms);
         speech_ms_ = std::min<uint32_t>(speech_ms_ + frame_ms, 30000u);
 
-        const float floor_quiet = std::clamp(noise_floor_rms_ * 1.45f + 60.0f, 205.0f, 700.0f);
-        const float peak_drop_quiet = std::clamp(peak_rms_ * 0.28f, 205.0f, 580.0f);
+        const float floor_quiet = std::clamp(noise_floor_rms_ * 1.40f + 45.0f, 105.0f, 430.0f);
+        const float peak_drop_quiet = std::clamp(peak_rms_ * 0.28f, 105.0f, 480.0f);
         const float quiet_thresh = std::max(floor_quiet, peak_drop_quiet);
 
         if (ac_rms < quiet_thresh) {
@@ -238,12 +268,12 @@ public:
                 ResetTurn();
             }
         } else {
-            if (ac_rms >= quiet_thresh * 1.35f) {
+            if (ac_rms >= quiet_thresh * 1.30f) {
                 silence_ms_ = 0;
             } else {
                 silence_ms_ = (silence_ms_ > frame_ms) ? (silence_ms_ - frame_ms) : 0u;
             }
-            if (speech_ms_ >= 9000u) {
+            if (speech_ms_ >= 8000u) {
                 dec.commit_utterance = true;
                 ResetTurn();
             }
@@ -252,11 +282,15 @@ public:
     }
 
     float noise_floor_rms() const { return noise_floor_rms_; }
+    float current_onset_thresh() const {
+        return std::clamp(noise_floor_rms_ * 1.65f + 55.0f, 145.0f, 760.0f);
+    }
     bool in_speech() const { return in_speech_; }
     uint32_t speech_ms() const { return speech_ms_; }
 
 private:
-    float noise_floor_rms_ = 220.0f;
+    bool calibrated_ = false;
+    float noise_floor_rms_ = 95.0f;
     bool in_speech_ = false;
     uint32_t onset_ms_ = 0;
     uint32_t speech_ms_ = 0;

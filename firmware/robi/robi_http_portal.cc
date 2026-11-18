@@ -180,6 +180,7 @@ esp_err_t HandleStatusGet(httpd_req_t* req) {
         cJSON_AddNumberToObject(root, "tx_audio_packets", proto->GetTxAudioPackets());
         cJSON_AddNumberToObject(root, "rx_ws_msgs", proto->GetRxWsMessages());
         cJSON_AddNumberToObject(root, "mic_rms", proto->GetLastMicRms());
+        cJSON_AddNumberToObject(root, "peak_mic_rms", proto->GetPeakMicRms());
         cJSON_AddNumberToObject(root, "noise_floor_rms", proto->GetNoiseFloorRms());
         cJSON_AddNumberToObject(root, "ring_avail", static_cast<double>(proto->GetRingAvailableSamples()));
         cJSON_AddBoolToObject(root, "playback_idle", app.GetAudioService().IsPlaybackIdle());
@@ -318,6 +319,32 @@ esp_err_t HandleControlPost(httpd_req_t* req) {
         Application::GetInstance().Schedule([e_str]() {
             if (auto* disp = Board::GetInstance().GetDisplay()) {
                 disp->SetEmotion(e_str.c_str());
+            }
+        });
+    }
+    if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "toggle_chat"))) {
+        Application::GetInstance().Schedule([]() { Application::GetInstance().ToggleChatState(); });
+    }
+    if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "commit_utterance"))) {
+        Application::GetInstance().Schedule([]() {
+            if (auto* proto = GeminiLiveProtocol::GetActiveInstance()) {
+                proto->CommitListeningUtterance();
+            }
+        });
+    }
+    const cJSON* prompt = cJSON_GetObjectItemCaseSensitive(root, "prompt");
+    if (cJSON_IsString(prompt) && prompt->valuestring != nullptr && prompt->valuestring[0] != '\0') {
+        std::string p_str = prompt->valuestring;
+        if (auto* proto = GeminiLiveProtocol::GetActiveInstance()) {
+            proto->InjectUserPromptTurn(p_str);
+        }
+    }
+    const cJSON* sim_mic = cJSON_GetObjectItemCaseSensitive(root, "simulate_mic_ms");
+    if (cJSON_IsNumber(sim_mic) && sim_mic->valueint > 0) {
+        int dur = sim_mic->valueint;
+        Application::GetInstance().Schedule([dur]() {
+            if (auto* proto = GeminiLiveProtocol::GetActiveInstance()) {
+                proto->SimulateMicUtterance(dur);
             }
         });
     }
