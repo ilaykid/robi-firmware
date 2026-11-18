@@ -25,23 +25,23 @@ struct EmojiMapping {
 
 inline constexpr EmojiMapping kEmojiMap[] = {
     {"😂", "laughing"},    {"🤣", "laughing"},    {"😆", "laughing"},
-    {"🤩", "surprised"},   {"😮", "surprised"},   {"😯", "surprised"},   {"🌟", "surprised"},
+    {"🤩", "surprised"},   {"😮", "surprised"},   {"😯", "surprised"},   {"🌟", "surprised"},   {"✨", "surprised"},
     {"😱", "shocked"},     {"🤯", "shocked"},     {"⚡", "shocked"},
     {"🥰", "loving"},      {"😍", "loving"},      {"❤", "loving"},       {"💖", "loving"},    {"🤗", "loving"},
     {"😘", "kissy"},       {"😗", "kissy"},
-    {"😉", "winking"},     {"😜", "winking"},     {"😝", "winking"},
-    {"😎", "cool"},        {"🤖", "cool"},        {"🚀", "cool"},
-    {"🤔", "thinking"},    {"🧐", "thinking"},    {"💭", "thinking"},
+    {"😉", "winking"},     {"😜", "winking"},     {"😝", "winking"},     {"🤭", "winking"},
+    {"😎", "cool"},        {"🤖", "cool"},        {"🚀", "cool"},        {"🔥", "cool"},
+    {"🤔", "thinking"},    {"🧐", "thinking"},    {"💭", "thinking"},    {"💡", "thinking"},    {"❓", "thinking"},
     {"😕", "confused"},    {"🤨", "confused"},
     {"🤪", "silly"},       {"😛", "silly"},
-    {"😳", "embarrassed"}, {"🙈", "embarrassed"},
+    {"😳", "embarrassed"}, {"🙈", "embarrassed"}, {"😅", "embarrassed"},
     {"😌", "relaxed"},     {"😋", "relaxed"},
     {"😢", "sad"},         {"😔", "sad"},
     {"😭", "crying"},
     {"😠", "angry"},       {"😡", "angry"},
     {"😴", "sleepy"},      {"🥱", "sleepy"},
-    {"😏", "confident"},   {"💪", "confident"},
-    {"😄", "happy"},       {"😊", "happy"},       {"🙂", "happy"},       {"😁", "happy"},     {"🎉", "happy"},
+    {"😏", "confident"},   {"💪", "confident"},   {"🏆", "confident"},   {"👏", "confident"},
+    {"😄", "happy"},       {"😊", "happy"},       {"🙂", "happy"},       {"😁", "happy"},     {"🎉", "happy"},     {"🥳", "happy"},
 };
 
 inline const char* MatchLeadingOrInlineEmoji(std::string_view s) {

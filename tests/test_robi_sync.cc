@@ -486,20 +486,106 @@ void TestSfxSynthAndGamesEngine() {
     assert(hu.phase() == robi::HeadsUpEngine::Phase::kPlaying);
     assert(hu.CurrentWord() != w1);
 
-    // 4. Test RobiGameHub thread-safe Trivia & Custom Heads-Up queues + emotion aliases
-    robi::TriviaCardPayload card;
-    card.question = "כמה רגליים יש לתמנון?";
-    card.options = {"שש", "שמונה", "עשר"};
-    card.correct_index = 99;  // Out-of-bounds index must clamp safely to 2
-    card.player_turn = "אורי";
-    card.score_summary = "לביא: 2 | אורי: 3";
-    robi::RobiGameHub::GetInstance().QueueTriviaCard(card);
+    // 4. Test deterministic 8-Question TriviaEngine (Solo + Head-to-Head + Shuffling + Fallback)
+    for (const auto& tcat : robi::kTriviaCategories) {
+        assert(IsStrictlyValidUtf8(tcat.title_he));
+        assert(IsStrictlyValidUtf8(tcat.ai_topic_he));
+        assert(tcat.count_he >= 8 && tcat.count_en >= 6);
+        for (size_t i = 0; i < tcat.count_he; ++i) {
+            assert(std::strlen(tcat.items_he[i].q) > 0 && IsStrictlyValidUtf8(tcat.items_he[i].q));
+            assert(std::strlen(tcat.items_he[i].o0) > 0 && IsStrictlyValidUtf8(tcat.items_he[i].o0));
+            assert(std::strlen(tcat.items_he[i].o1) > 0 && IsStrictlyValidUtf8(tcat.items_he[i].o1));
+            assert(std::strlen(tcat.items_he[i].o2) > 0 && IsStrictlyValidUtf8(tcat.items_he[i].o2));
+            assert(std::strlen(tcat.items_he[i].o3) > 0 && IsStrictlyValidUtf8(tcat.items_he[i].o3));
+        }
+        for (size_t i = 0; i < tcat.count_en; ++i) {
+            assert(std::strlen(tcat.items_en[i].q) > 0 && IsStrictlyValidUtf8(tcat.items_en[i].q));
+            assert(std::strlen(tcat.items_en[i].o0) > 0 && IsStrictlyValidUtf8(tcat.items_en[i].o0));
+            assert(std::strlen(tcat.items_en[i].o1) > 0 && IsStrictlyValidUtf8(tcat.items_en[i].o1));
+            assert(std::strlen(tcat.items_en[i].o2) > 0 && IsStrictlyValidUtf8(tcat.items_en[i].o2));
+            assert(std::strlen(tcat.items_en[i].o3) > 0 && IsStrictlyValidUtf8(tcat.items_en[i].o3));
+        }
+    }
 
-    robi::TriviaCardPayload popped;
-    assert(robi::RobiGameHub::GetInstance().PopPendingTriviaCard(popped));
-    assert(popped.correct_index == 2);
-    assert(popped.options.size() == 3);
-    assert(!robi::RobiGameHub::GetInstance().PopPendingTriviaCard(popped));
+    robi::TriviaEngine tr;
+    tr.SeedRng(20261118u);
+    tr.StartOfflineDeck(-1, /*head_to_head=*/true, "לביא", "אורי", /*english=*/false, 8);
+    assert(tr.IsActive() && tr.phase() == robi::TriviaEngine::Phase::kQuestion);
+    assert(tr.total_questions() == 8);
+
+    bool slot_seen[4] = {false, false, false, false};
+    for (size_t qi = 0; qi < 8; ++qi) {
+        assert(tr.question_index() == qi);
+        assert(tr.CurrentPlayerIndex() == static_cast<int>(qi % 2));
+        assert(tr.CurrentPlayerName() == ((qi % 2 == 0) ? "לביא" : "אורי"));
+        const auto* q = tr.CurrentQuestion();
+        assert(q != nullptr && q->options.size() == 4);
+        assert(q->correct_index >= 0 && q->correct_index < 4);
+        slot_seen[q->correct_index] = true;
+
+        // Lavi (even turns: 0,2,4,6) answers 3/4 right; Ori (odd turns: 1,3,5,7) answers 4/4 right!
+        int pick = (qi == 2) ? ((q->correct_index + 1) % 4) : q->correct_index;
+        assert(tr.SubmitAnswer(pick));
+        assert(tr.phase() == robi::TriviaEngine::Phase::kReveal);
+        assert(!tr.SubmitAnswer(0));  // Double-tap during reveal must be ignored!
+
+        bool next_q = false;
+        bool summary = false;
+        for (int step = 0; step < 16; ++step) {
+            auto tev = tr.Step(100);
+            if (tev.advanced_to_next_question) next_q = true;
+            if (tev.finished_to_summary) summary = true;
+        }
+        if (qi < 7) {
+            assert(next_q && !summary);
+            assert(tr.phase() == robi::TriviaEngine::Phase::kQuestion);
+        } else {
+            assert(summary && !next_q);
+            assert(tr.phase() == robi::TriviaEngine::Phase::kSummary);
+        }
+    }
+    assert(tr.score(0) == 3 && tr.score(1) == 4);
+    assert(tr.FormatHeaderText().find("אורי") != std::string::npos);
+    assert(IsStrictlyValidUtf8(tr.FormatSummaryBody()));
+    int distinct_slots = (slot_seen[0] ? 1 : 0) + (slot_seen[1] ? 1 : 0) +
+                         (slot_seen[2] ? 1 : 0) + (slot_seen[3] ? 1 : 0);
+    assert(distinct_slots >= 2);  // Options were genuinely shuffled across indices
+
+    // Test preserve_first_question_order for voice-launched custom deck + loading timeout fallback
+    std::vector<robi::TriviaQuestionItem> custom_qs = {
+        {"שאלה ראשונה קבועה?", {"נכון1", "לא2", "לא3", "לא4"}, 0},
+        {"שאלה שנייה?", {"נכון2", "לא2", "לא3", "לא4"}, 0},
+        {"שאלה שלישית?", {"נכון3", "לא2", "לא3", "לא4"}, 0},
+        {"שאלה רביעית?", {"נכון4", "לא2", "לא3", "לא4"}, 0},
+    };
+    tr.StartCustomDeck("כדורגל", custom_qs, 2, false, "לביא", "אורי", false, 4, true);
+    assert(tr.CurrentQuestion() != nullptr);
+    assert(tr.CurrentQuestion()->question == "שאלה ראשונה קבועה?");
+    assert(tr.CurrentQuestion()->options[static_cast<size_t>(tr.CurrentQuestion()->correct_index)] == "נכון1");
+
+    tr.BeginLoading("חלל", false, "לביא", "אורי", false);
+    assert(tr.phase() == robi::TriviaEngine::Phase::kLoading);
+    bool timed_out = false;
+    for (int i = 0; i < 60; ++i) {
+        if (tr.Step(100).loading_timed_out) timed_out = true;
+    }
+    assert(timed_out);
+
+    // 5. Test RobiGameHub request-id cancellation & mic-mute gate
+    auto& hub = robi::RobiGameHub::GetInstance();
+    uint32_t r1 = hub.NextTriviaRequestId();
+    uint32_t r2 = hub.NextTriviaRequestId();
+    hub.DeliverAsyncTriviaDeck(r1, custom_qs);  // Stale r1 must be ignored!
+    std::vector<robi::TriviaQuestionItem> popped_qs;
+    assert(!hub.PopAsyncTriviaDeck(r2, popped_qs));
+    hub.DeliverAsyncTriviaDeck(r2, custom_qs);
+    assert(hub.PopAsyncTriviaDeck(r2, popped_qs) && popped_qs.size() == 4);
+    assert(!hub.PopAsyncTriviaDeck(r2, popped_qs));
+
+    hub.SetMicMutedForScreenGame(true);
+    assert(hub.IsMicMutedForScreenGame());
+    hub.SetMicMutedForScreenGame(false);
+    assert(!hub.IsMicMutedForScreenGame());
 
     auto dizzy_res = robi::RobiComputePresetParams("dizzy", robi::ROBI_THEME_CYBER_CYAN,
                                                    robi::ROBI_STYLE_CYBER_VISOR);

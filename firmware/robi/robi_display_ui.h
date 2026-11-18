@@ -103,12 +103,27 @@
         }
         if (std::strcmp(emotion, "arcade:close") == 0) {
             RobiCloseAllGameScreensLocked(true);
-            RobiHideTriviaOverlayLocked();
+            RobiHideTriviaOverlayLocked(true, true);
             return;
         }
         if (std::strncmp(emotion, "headsup:", 8) == 0) {
             int c_idx = std::atoi(emotion + 8);
             RobiStartOfflineHeadsUpLocked(c_idx);
+            return;
+        }
+        if (std::strncmp(emotion, "trivia:solo:", 12) == 0) {
+            int c_idx = std::atoi(emotion + 12);
+            RobiStartTriviaRoundLocked(c_idx, false);
+            return;
+        }
+        if (std::strncmp(emotion, "trivia:h2h:", 11) == 0) {
+            int c_idx = std::atoi(emotion + 11);
+            RobiStartTriviaRoundLocked(c_idx, true);
+            return;
+        }
+        if (std::strncmp(emotion, "trivia:pick:", 12) == 0) {
+            int p_idx = std::atoi(emotion + 12);
+            RobiHandleTriviaPickIndexLocked(p_idx);
             return;
         }
         if (std::strncmp(emotion, "kid:", 4) == 0) {
@@ -528,7 +543,7 @@ private:
         phase_t_ += dt;
 
         RobiStepArcadeAndImuLocked(now_us, dt);
-        if (imu_sleeping_ || heads_up_.IsActive()) {
+        if (imu_sleeping_ || heads_up_.IsActive() || trivia_.IsActive()) {
             return;
         }
 
@@ -1363,6 +1378,11 @@ private:
         out += ",\"arcade_open\":" + std::string(RobiIsArcadeOrGameOpen() ? "true" : "false");
         out += ",\"headsup_phase\":" + std::to_string(static_cast<int>(heads_up_.phase()));
         out += ",\"trivia_visible\":" + std::string(trivia_visible_ ? "true" : "false");
+        out += ",\"trivia_phase\":" + std::to_string(static_cast<int>(trivia_.phase()));
+        out += ",\"trivia_q_idx\":" + std::to_string(static_cast<int>(trivia_.question_index()));
+        out += ",\"trivia_tot\":" + std::to_string(static_cast<int>(trivia_.total_questions()));
+        out += ",\"trivia_s0\":" + std::to_string(trivia_.score(0));
+        out += ",\"trivia_s1\":" + std::to_string(trivia_.score(1));
         out += "}";
         return out;
     }

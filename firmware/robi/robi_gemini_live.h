@@ -61,7 +61,10 @@ public:
     bool CanExitListeningByTap() const;
     bool CommitListeningUtterance();
     bool InjectUserPromptTurn(const std::string& text);
+    void CancelPendingTurnAudio();
     bool SimulateMicUtterance(int duration_ms);
+    static void RequestAsyncAiTriviaDeck(uint32_t req_id, const std::string& topic_desc,
+                                         bool head_to_head, bool english);
 
 protected:
     bool SendText(const std::string& text) override;
@@ -86,6 +89,7 @@ private:
     void ResetTurnRuntimeFlags();
 
     void EnqueueTxJson(std::string&& json_str, bool is_audio = false);
+    void PurgeQueuedClientContent();
     void EnqueueClientTextTurn(const std::string& text);
     void EnqueueSilentTurnNudge(const std::string& user_text);
     void EnqueuePcm16k(const uint8_t* pcm_bytes, size_t byte_len);

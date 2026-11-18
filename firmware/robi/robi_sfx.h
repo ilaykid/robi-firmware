@@ -141,19 +141,11 @@ inline std::vector<int16_t> SynthesizeSfxPcm(RobiSfxId id, int sample_rate = 240
 
 #ifdef ESP_PLATFORM
 
-inline void PlayRobiSfx(RobiSfxId id, bool allow_interrupt_speaking = false) {
-    auto& app = Application::GetInstance();
-    if (app.GetDeviceState() == kDeviceStateSpeaking) {
-        if (!allow_interrupt_speaking) {
-            return;
-        }
-        app.AbortSpeaking(kAbortReasonNone);
-    }
-
+inline void PushRobiSfxPcmNow(RobiSfxId id) {
     std::vector<int16_t> pcm = SynthesizeSfxPcm(id, 24000);
     if (pcm.empty()) return;
 
-    auto& audio = app.GetAudioService();
+    auto& audio = Application::GetInstance().GetAudioService();
     constexpr size_t kChunkSamples = 960;  // 40ms @ 24kHz (matches Gemini feeder chunk size)
     size_t offset = 0;
     while (offset < pcm.size()) {
@@ -168,6 +160,21 @@ inline void PlayRobiSfx(RobiSfxId id, bool allow_interrupt_speaking = false) {
         }
         offset += n;
     }
+}
+
+inline void PlayRobiSfx(RobiSfxId id, bool allow_interrupt_speaking = false) {
+    auto& app = Application::GetInstance();
+    if (app.GetDeviceState() == kDeviceStateSpeaking) {
+        if (!allow_interrupt_speaking) {
+            return;
+        }
+        app.AbortSpeaking(kAbortReasonNone);
+        // Enqueue FIFO after AbortSpeaking's scheduled SetDeviceState(Listening)->ResetDecoder()
+        // so ResetDecoder() finishes BEFORE our chime PCM enters DecodeQueue!
+        app.Schedule([id]() { PushRobiSfxPcmNow(id); });
+        return;
+    }
+    PushRobiSfxPcmNow(id);
 }
 
 #endif  // ESP_PLATFORM
