@@ -163,66 +163,105 @@ inline int ComputeVoiceLevel0To100(const int16_t* samples, size_t count) {
 }
 
 struct SpeechFrameDecision {
-    bool active_voice = false;
-    bool should_send_soft_stream_end = false;
+    bool start_utterance = false;
+    bool in_speech = false;
+    bool commit_utterance = false;
 };
 
-// Non-blocking adaptive speech tracker:
-// Never gates or blocks continuous 16kHz PCM streaming to Gemini's neural VAD.
-// Only emits a soft one-shot `audioStreamEnd` backstop if the user clearly spoke (>= 192ms)
-// and then stayed quiet for >= 1050ms while ambient room hum prevented server VAD from closing.
+// Hardware-calibrated adaptive utterance tracker for Waveshare ESP32-S3 ES7210 (+30dB ADC, no NSNet).
+// - Completely independent of ESP-SR VAD_MODE_0 (which stays latched true on ES7210 +30dB self-noise).
+// - Seeds noise_floor_rms_ at 220.0 (realistic ES7210 baseline) with fast downward adaptation for quiet rooms
+//   and smooth upward adaptation for steady AC/fan hum, preserving the learned floor across turns.
+// - Detects speech onset in 120ms (caller flushes 420ms pre-roll) and commits end-of-speech in 600ms
+//   using combined noise-floor + peak-drop hysteresis (plus a 9.0s continuous-speech safety cap).
 class AdaptiveSpeechTracker {
 public:
-    void Reset() {
-        speech_accum_ms_ = 0;
-        post_speech_quiet_ms_ = 0;
-        soft_flush_sent_ = false;
+    void ResetSession() {
+        noise_floor_rms_ = 220.0f;
+        ResetTurn();
     }
 
-    SpeechFrameDecision OnFrame(float ac_rms, bool afe_vad, uint32_t frame_ms) {
+    void ResetTurn() {
+        in_speech_ = false;
+        onset_ms_ = 0;
+        speech_ms_ = 0;
+        silence_ms_ = 0;
+        peak_rms_ = 0.0f;
+    }
+
+    void Reset() { ResetTurn(); }
+
+    SpeechFrameDecision OnFrame(float ac_rms, uint32_t frame_ms) {
         SpeechFrameDecision dec;
-        const float speech_thresh = std::clamp(noise_floor_rms_ * 2.5f + 70.0f, 260.0f, 950.0f);
-        const float quiet_thresh = std::clamp(noise_floor_rms_ * 1.7f + 45.0f, 190.0f, 650.0f);
+        frame_ms = std::clamp<uint32_t>(frame_ms, 10u, 120u);
 
-        dec.active_voice = afe_vad || (ac_rms >= speech_thresh);
+        if (!in_speech_) {
+            const float onset_thresh = std::clamp(noise_floor_rms_ * 1.90f + 105.0f, 320.0f, 1080.0f);
+            if (ac_rms >= onset_thresh) {
+                onset_ms_ += frame_ms;
+                if (onset_ms_ >= 120u) {
+                    in_speech_ = true;
+                    speech_ms_ = onset_ms_;
+                    silence_ms_ = 0;
+                    peak_rms_ = ac_rms;
+                    onset_ms_ = 0;
+                    dec.start_utterance = true;
+                    dec.in_speech = true;
+                }
+                return dec;
+            }
 
-        if (!afe_vad && ac_rms < speech_thresh * 0.85f) {
-            float sample_floor = std::clamp(ac_rms, 25.0f, 420.0f);
-            noise_floor_rms_ = 0.96f * noise_floor_rms_ + 0.04f * sample_floor;
-        }
-
-        if (dec.active_voice) {
-            speech_accum_ms_ = std::min<uint32_t>(speech_accum_ms_ + frame_ms, 30000u);
-            post_speech_quiet_ms_ = 0;
-            soft_flush_sent_ = false;
+            onset_ms_ = (onset_ms_ > (frame_ms / 2u)) ? (onset_ms_ - (frame_ms / 2u)) : 0u;
+            if (ac_rms < noise_floor_rms_) {
+                float sample = std::max(40.0f, ac_rms);
+                noise_floor_rms_ = 0.80f * noise_floor_rms_ + 0.20f * sample;
+            } else if (ac_rms < onset_thresh * 0.88f) {
+                float sample = std::min(520.0f, ac_rms);
+                noise_floor_rms_ = 0.94f * noise_floor_rms_ + 0.06f * sample;
+            }
             return dec;
         }
 
-        if (speech_accum_ms_ >= 192u) {
-            post_speech_quiet_ms_ += (ac_rms <= quiet_thresh) ? frame_ms : (frame_ms / 2u);
-            if (!soft_flush_sent_ && post_speech_quiet_ms_ >= 1050u) {
-                soft_flush_sent_ = true;
-                speech_accum_ms_ = 0;
-                post_speech_quiet_ms_ = 0;
-                dec.should_send_soft_stream_end = true;
+        // Active speech utterance in progress
+        dec.in_speech = true;
+        peak_rms_ = std::max(peak_rms_, ac_rms);
+        speech_ms_ = std::min<uint32_t>(speech_ms_ + frame_ms, 30000u);
+
+        const float floor_quiet = std::clamp(noise_floor_rms_ * 1.45f + 60.0f, 205.0f, 700.0f);
+        const float peak_drop_quiet = std::clamp(peak_rms_ * 0.28f, 205.0f, 580.0f);
+        const float quiet_thresh = std::max(floor_quiet, peak_drop_quiet);
+
+        if (ac_rms < quiet_thresh) {
+            silence_ms_ += frame_ms;
+            if (silence_ms_ >= 600u) {
+                dec.commit_utterance = true;
+                ResetTurn();
             }
-        } else if (speech_accum_ms_ > 0) {
-            post_speech_quiet_ms_ += frame_ms;
-            if (post_speech_quiet_ms_ >= 320u) {
-                speech_accum_ms_ = 0;
-                post_speech_quiet_ms_ = 0;
+        } else {
+            if (ac_rms >= quiet_thresh * 1.35f) {
+                silence_ms_ = 0;
+            } else {
+                silence_ms_ = (silence_ms_ > frame_ms) ? (silence_ms_ - frame_ms) : 0u;
+            }
+            if (speech_ms_ >= 9000u) {
+                dec.commit_utterance = true;
+                ResetTurn();
             }
         }
         return dec;
     }
 
     float noise_floor_rms() const { return noise_floor_rms_; }
+    bool in_speech() const { return in_speech_; }
+    uint32_t speech_ms() const { return speech_ms_; }
 
 private:
-    float noise_floor_rms_ = 75.0f;
-    uint32_t speech_accum_ms_ = 0;
-    uint32_t post_speech_quiet_ms_ = 0;
-    bool soft_flush_sent_ = false;
+    float noise_floor_rms_ = 220.0f;
+    bool in_speech_ = false;
+    uint32_t onset_ms_ = 0;
+    uint32_t speech_ms_ = 0;
+    uint32_t silence_ms_ = 0;
+    float peak_rms_ = 0.0f;
 };
 
 struct ScheduledEmotion {

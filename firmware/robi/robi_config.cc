@@ -74,6 +74,13 @@ void InstallSmartWifiDhcpGuard() {
 
     esp_timer_create_args_t targs = {};
     targs.callback = [](void*) {
+        // Never blacklist or forcibly disconnect our verified working router BSSID when RSSI is weak (-83 dBm)
+        if (s_good_bssid_valid && s_cur_bssid == s_good_bssid) {
+            ESP_LOGW(TAG, "DHCP still pending after 4.5s on verified router %02x:%02x:%02x:%02x:%02x:%02x — waiting naturally",
+                     s_cur_bssid[0], s_cur_bssid[1], s_cur_bssid[2],
+                     s_cur_bssid[3], s_cur_bssid[4], s_cur_bssid[5]);
+            return;
+        }
         if (!IsDeadDhcpBssid(s_cur_bssid)) {
             ESP_LOGW(TAG, "DHCP timeout (4.5s) on BSSID %02x:%02x:%02x:%02x:%02x:%02x — blacklisting extender & advancing AP queue!",
                      s_cur_bssid[0], s_cur_bssid[1], s_cur_bssid[2],
@@ -113,7 +120,9 @@ void InstallSmartWifiDhcpGuard() {
                     esp_timer_start_once(s_dhcp_watchdog_timer, 25000ULL);
                     return;
                 }
-                esp_timer_start_once(s_dhcp_watchdog_timer, 4500000ULL);
+                if (!s_good_bssid_valid || s_cur_bssid != s_good_bssid) {
+                    esp_timer_start_once(s_dhcp_watchdog_timer, 4500000ULL);
+                }
             } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
                 if (s_dhcp_watchdog_timer != nullptr) {
                     esp_timer_stop(s_dhcp_watchdog_timer);
@@ -254,6 +263,13 @@ void RobiConfig::EnsureLoaded() {
 
     // 2. Check raw flash 0x010000 ("ROBICFG1") provisioned by WebSerial Wizard
     TryImportFlashSectorLocked();
+
+    // 2a. Auto-heal inaudible ES8311 speaker volume (<= 25% = -64..-77 dB on ES8311 DAC, caused by legacy RTL range slider)
+    if (data_.volume <= 25) {
+        ESP_LOGW(TAG, "Healing inaudible ES8311 speaker volume (%d%% -> 80%%)", data_.volume);
+        data_.volume = 80;
+        SaveConfigToNvsLocked(SerializeLocked(false));
+    }
 
     // 2b. Ensure WifiStation pins to each scanned BSSID in connect_queue_ and install DHCP failover guard
     nvs_handle_t wifi_h = 0;
@@ -416,7 +432,7 @@ bool RobiConfig::ParseIntoLocked(const std::string& json_str, bool keep_existing
     }
 
     if (cJSON_HasObjectItem(root, "volume")) {
-        next.volume = std::clamp(SafeGetInt(root, "volume", next.volume), 10, 100);
+        next.volume = std::clamp(SafeGetInt(root, "volume", next.volume), 35, 100);
     }
     if (cJSON_HasObjectItem(root, "brightness")) {
         next.brightness = std::clamp(SafeGetInt(root, "brightness", next.brightness), 10, 100);

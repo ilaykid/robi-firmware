@@ -158,12 +158,12 @@ button{cursor:pointer;border:none;border-radius:12px;padding:11px 16px;font-weig
     <h2>🔊 עוצמת שמע, בהירות ומערכת</h2>
     <div class="row">
       <div>
-        <label>עוצמת רמקול: <span id="volLbl">75</span>%</label>
-        <input type="range" id="volRange" min="0" max="100" value="75" style="width:100%" onchange="sendCtrl({volume:+this.value});document.getElementById('volLbl').textContent=this.value">
+        <label>עוצמת רמקול: <span id="volLbl">80</span>%</label>
+        <input type="range" id="volRange" dir="ltr" min="35" max="100" value="80" style="width:100%" onchange="sendCtrl({volume:+this.value});document.getElementById('volLbl').textContent=this.value">
       </div>
       <div>
         <label>בהירות מסך: <span id="briLbl">85</span>%</label>
-        <input type="range" id="briRange" min="10" max="100" value="85" style="width:100%" onchange="sendCtrl({brightness:+this.value});document.getElementById('briLbl').textContent=this.value">
+        <input type="range" id="briRange" dir="ltr" min="10" max="100" value="85" style="width:100%" onchange="sendCtrl({brightness:+this.value});document.getElementById('briLbl').textContent=this.value">
       </div>
     </div>
   </div>

@@ -474,7 +474,7 @@ must_replace(
 )
 
 # 8. Firmware version
-version = os.environ.get("ROBI_VERSION", "3.1.0")
+version = os.environ.get("ROBI_VERSION", "3.1.1")
 must_replace(fw / "CMakeLists.txt", 'set(PROJECT_VER "2.5.2")', f'set(PROJECT_VER "{version}")')
 
 print("HeyRobi standalone patch completed successfully!")
