@@ -94,6 +94,8 @@ constexpr int64_t kPostPlaybackGuardUs = 180000LL;  // 180ms OGG_POPUP / speaker
 std::atomic<int64_t> g_model_cooldown_until_us[3] = {{0}, {0}, {0}};
 std::mutex g_last_model_mutex;
 std::string g_last_connected_model;
+std::string g_fast_rest_model;
+std::atomic<uint32_t> g_trivia_round_counter{0};
 GeminiLiveProtocol* g_active_protocol = nullptr;
 
 std::string Base64Encode(const uint8_t* src, size_t len) {
@@ -125,6 +127,176 @@ bool WaitForWifiOnline(int max_wait_ms) {
         }
     }
     return IsWifiOnlineWithIp();
+}
+
+std::string DiscoverActiveFlashModel(const std::string& api_key) {
+    auto network = Board::GetInstance().GetNetwork();
+    auto http = network ? network->CreateHttp(0) : nullptr;
+    if (!http) return {};
+    std::string url =
+        "https://generativelanguage.googleapis.com/v1beta/models?pageSize=40&key=" + api_key;
+    std::string best_name;
+    int best_score = -1;
+    if (auto opened = http->Open("GET", url); opened) {
+        auto sc = http->GetStatusCode();
+        if (sc && *sc == 200) {
+            std::string raw = http->ReadAll();
+            cJSON* rj = cJSON_ParseWithLength(raw.data(), raw.size());
+            if (rj) {
+                const cJSON* models = cJSON_GetObjectItemCaseSensitive(rj, "models");
+                if (cJSON_IsArray(models)) {
+                    const cJSON* m = nullptr;
+                    cJSON_ArrayForEach(m, models) {
+                        const cJSON* nm = cJSON_GetObjectItemCaseSensitive(m, "name");
+                        const cJSON* methods = cJSON_GetObjectItemCaseSensitive(m, "supportedGenerationMethods");
+                        if (!cJSON_IsString(nm) || !nm->valuestring || !cJSON_IsArray(methods)) continue;
+                        bool supports_gen = false;
+                        const cJSON* mt = nullptr;
+                        cJSON_ArrayForEach(mt, methods) {
+                            if (cJSON_IsString(mt) && mt->valuestring &&
+                                std::strcmp(mt->valuestring, "generateContent") == 0) {
+                                supports_gen = true;
+                                break;
+                            }
+                        }
+                        if (!supports_gen) continue;
+                        std::string id = nm->valuestring;
+                        if (id.rfind("models/", 0) == 0) id = id.substr(7);
+                        if (id.find("gemini-") != 0) continue;
+                        if (id.find("live") != std::string::npos ||
+                            id.find("audio") != std::string::npos ||
+                            id.find("tts") != std::string::npos ||
+                            id.find("image") != std::string::npos ||
+                            id.find("embedding") != std::string::npos ||
+                            id.find("vision") != std::string::npos) {
+                            continue;
+                        }
+                        int score = 10;
+                        if (id.find("flash") != std::string::npos) score += 100;
+                        if (id.find("lite") != std::string::npos) score += 20;
+                        if (id.find("gemini-4") == 0) score += 60;
+                        else if (id.find("gemini-3") == 0) score += 45;
+                        else if (id.find("gemini-2") == 0) score -= 40;
+                        if (id.find("latest") != std::string::npos) score += 15;
+                        if (id.find("preview") != std::string::npos || id.find("exp") != std::string::npos) {
+                            score -= 10;
+                        }
+                        if (score > best_score || (score == best_score && id > best_name)) {
+                            best_score = score;
+                            best_name = id;
+                        }
+                    }
+                }
+                cJSON_Delete(rj);
+            }
+        } else {
+            ESP_LOGW(TAG, "ListModels discovery HTTP status=%d", sc ? *sc : -1);
+        }
+        http->Close();
+    }
+    if (!best_name.empty()) {
+        ESP_LOGI(TAG, "Auto-discovered active Gemini Flash REST model: %s", best_name.c_str());
+    }
+    return best_name;
+}
+
+bool CallGeminiFastRestGenerate(const std::string& api_key, const std::string& req_body,
+                                const char* purpose, std::string& text_out) {
+    text_out.clear();
+    if (api_key.empty() || !IsWifiOnlineWithIp()) return false;
+
+    std::vector<std::string> candidates;
+    {
+        std::lock_guard<std::mutex> lk(g_last_model_mutex);
+        if (!g_fast_rest_model.empty()) {
+            candidates.push_back(g_fast_rest_model);
+        }
+    }
+    static const char* const kDefaults[] = {
+        "gemini-3.5-flash-lite",
+        "gemini-flash-latest",
+        "gemini-3.8-flash",
+        "gemini-3.6-flash",
+    };
+    for (const char* d : kDefaults) {
+        if (std::find(candidates.begin(), candidates.end(), d) == candidates.end()) {
+            candidates.emplace_back(d);
+        }
+    }
+
+    auto try_one = [&](const std::string& model_id, int& status_out) -> bool {
+        status_out = -1;
+        auto network = Board::GetInstance().GetNetwork();
+        auto http = network ? network->CreateHttp(0) : nullptr;
+        if (!http) return false;
+        http->SetHeader("Content-Type", "application/json");
+        http->SetContent(std::string(req_body));
+        std::string url = "https://generativelanguage.googleapis.com/v1beta/models/" +
+                          model_id + ":generateContent?key=" + api_key;
+        bool ok = false;
+        if (auto opened = http->Open("POST", url); opened) {
+            auto sc = http->GetStatusCode();
+            status_out = sc ? *sc : -1;
+            if (status_out == 200) {
+                std::string raw = http->ReadAll();
+                cJSON* rj = cJSON_ParseWithLength(raw.data(), raw.size());
+                if (rj) {
+                    const cJSON* cands = cJSON_GetObjectItemCaseSensitive(rj, "candidates");
+                    const cJSON* cand0 = cJSON_IsArray(cands) ? cJSON_GetArrayItem(cands, 0) : nullptr;
+                    const cJSON* cont = cand0 ? cJSON_GetObjectItemCaseSensitive(cand0, "content") : nullptr;
+                    const cJSON* rparts = cont ? cJSON_GetObjectItemCaseSensitive(cont, "parts") : nullptr;
+                    if (cJSON_IsArray(rparts)) {
+                        const cJSON* rp = nullptr;
+                        cJSON_ArrayForEach(rp, rparts) {
+                            if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(rp, "thought"))) {
+                                continue;
+                            }
+                            const cJSON* txt = cJSON_GetObjectItemCaseSensitive(rp, "text");
+                            if (cJSON_IsString(txt) && txt->valuestring != nullptr) {
+                                text_out += txt->valuestring;
+                            }
+                        }
+                    }
+                    cJSON_Delete(rj);
+                }
+                if (!text_out.empty()) {
+                    std::lock_guard<std::mutex> lk(g_last_model_mutex);
+                    g_fast_rest_model = model_id;
+                    ESP_LOGI(TAG, "%s OK on %s (%u bytes)", purpose, model_id.c_str(),
+                             static_cast<unsigned>(text_out.size()));
+                    ok = true;
+                }
+            } else {
+                ESP_LOGW(TAG, "%s HTTP status=%d on %s", purpose, status_out, model_id.c_str());
+            }
+            http->Close();
+        } else {
+            ESP_LOGW(TAG, "%s HTTP open failed on %s", purpose, model_id.c_str());
+        }
+        return ok;
+    };
+
+    bool saw_404 = false;
+    for (const auto& m : candidates) {
+        int st = -1;
+        if (try_one(m, st)) return true;
+        if (st == 404) {
+            saw_404 = true;
+        } else if (st == -1) {
+            // Network/TLS unreachable: don't burn multiple TLS timeouts
+            return false;
+        }
+    }
+
+    if (saw_404) {
+        std::string disc = DiscoverActiveFlashModel(api_key);
+        if (!disc.empty() &&
+            std::find(candidates.begin(), candidates.end(), disc) == candidates.end()) {
+            int st = -1;
+            if (try_one(disc, st)) return true;
+        }
+    }
+    return false;
 }
 
 }  // namespace
@@ -2100,85 +2272,41 @@ void GeminiLiveProtocol::HandleToolCalls(const cJSON* tool_call) {
                 std::string answer;
                 auto cfg = RobiConfig::GetInstance().Get();
                 if (!query.empty() && !cfg.gemini_key.empty() && IsWifiOnlineWithIp()) {
-                    const char* search_models[2] = {"gemini-2.5-flash", "gemini-2.0-flash"};
-                    for (int m_idx = 0; m_idx < 2 && answer.empty(); ++m_idx) {
-                        cJSON* s_root = cJSON_CreateObject();
-                        cJSON* contents = cJSON_CreateArray();
-                        cJSON* c0 = cJSON_CreateObject();
-                        cJSON* parts = cJSON_CreateArray();
-                        cJSON* p0 = cJSON_CreateObject();
-                        std::string full_q =
-                            (cfg.language == "en-US")
-                                ? (query + " (Give a concise, factual, up-to-date summary in 2-3 sentences.)")
-                                : (query + " (תן סיכום עובדתי עדכני, מדויק וקצר בעברית ב-2 עד 3 משפטים.)");
-                        cJSON_AddStringToObject(p0, "text", full_q.c_str());
-                        cJSON_AddItemToArray(parts, p0);
-                        cJSON_AddItemToObject(c0, "parts", parts);
-                        cJSON_AddItemToArray(contents, c0);
-                        cJSON_AddItemToObject(s_root, "contents", contents);
+                    cJSON* s_root = cJSON_CreateObject();
+                    cJSON* contents = cJSON_CreateArray();
+                    cJSON* c0 = cJSON_CreateObject();
+                    cJSON* parts = cJSON_CreateArray();
+                    cJSON* p0 = cJSON_CreateObject();
+                    std::string full_q =
+                        (cfg.language == "en-US")
+                            ? (query + " (Give a concise, factual, up-to-date summary in 2-3 sentences.)")
+                            : (query + " (תן סיכום עובדתי עדכני, מדויק וקצר בעברית ב-2 עד 3 משפטים.)");
+                    cJSON_AddStringToObject(p0, "text", full_q.c_str());
+                    cJSON_AddItemToArray(parts, p0);
+                    cJSON_AddItemToObject(c0, "parts", parts);
+                    cJSON_AddItemToArray(contents, c0);
+                    cJSON_AddItemToObject(s_root, "contents", contents);
 
-                        cJSON* s_tools = cJSON_CreateArray();
-                        cJSON* gs = cJSON_CreateObject();
-                        cJSON_AddItemToObject(gs, "google_search", cJSON_CreateObject());
-                        cJSON_AddItemToArray(s_tools, gs);
-                        cJSON_AddItemToObject(s_root, "tools", s_tools);
+                    cJSON* s_tools = cJSON_CreateArray();
+                    cJSON* gs = cJSON_CreateObject();
+                    cJSON_AddItemToObject(gs, "google_search", cJSON_CreateObject());
+                    cJSON_AddItemToArray(s_tools, gs);
+                    cJSON_AddItemToObject(s_root, "tools", s_tools);
 
-                        cJSON* gcfg = cJSON_CreateObject();
-                        cJSON_AddNumberToObject(gcfg, "maxOutputTokens", 280);
-                        cJSON_AddNumberToObject(gcfg, "temperature", 0.1);
-                        if (m_idx == 0) {
-                            cJSON* tcfg = cJSON_CreateObject();
-                            cJSON_AddNumberToObject(tcfg, "thinkingBudget", 0);
-                            cJSON_AddItemToObject(gcfg, "thinkingConfig", tcfg);
-                        }
-                        cJSON_AddItemToObject(s_root, "generationConfig", gcfg);
+                    cJSON* gcfg = cJSON_CreateObject();
+                    cJSON_AddNumberToObject(gcfg, "maxOutputTokens", 320);
+                    cJSON_AddNumberToObject(gcfg, "temperature", 0.1);
+                    cJSON_AddItemToObject(s_root, "generationConfig", gcfg);
 
-                        char* req_str = cJSON_PrintUnformatted(s_root);
-                        std::string req_body = req_str ? req_str : "{}";
-                        if (req_str) cJSON_free(req_str);
-                        cJSON_Delete(s_root);
+                    char* req_str = cJSON_PrintUnformatted(s_root);
+                    std::string req_body = req_str ? req_str : "{}";
+                    if (req_str) cJSON_free(req_str);
+                    cJSON_Delete(s_root);
 
-                        auto network = Board::GetInstance().GetNetwork();
-                        auto http = network ? network->CreateHttp(0) : nullptr;
-                        if (http) {
-                            http->SetHeader("Content-Type", "application/json");
-                            http->SetContent(std::move(req_body));
-                            std::string url =
-                                std::string("https://generativelanguage.googleapis.com/v1beta/models/") +
-                                search_models[m_idx] + ":generateContent?key=" + cfg.gemini_key;
-                            if (auto opened = http->Open("POST", url); opened) {
-                                auto sc = http->GetStatusCode();
-                                if (sc && *sc == 200) {
-                                    std::string resp_raw = http->ReadAll();
-                                    cJSON* rj = cJSON_ParseWithLength(resp_raw.data(), resp_raw.size());
-                                    if (rj) {
-                                        const cJSON* cands = cJSON_GetObjectItemCaseSensitive(rj, "candidates");
-                                        const cJSON* cand0 = cJSON_IsArray(cands) ? cJSON_GetArrayItem(cands, 0) : nullptr;
-                                        const cJSON* cont = cand0 ? cJSON_GetObjectItemCaseSensitive(cand0, "content") : nullptr;
-                                        const cJSON* rparts = cont ? cJSON_GetObjectItemCaseSensitive(cont, "parts") : nullptr;
-                                        if (cJSON_IsArray(rparts)) {
-                                            const cJSON* rp = nullptr;
-                                            cJSON_ArrayForEach(rp, rparts) {
-                                                const cJSON* txt = cJSON_GetObjectItemCaseSensitive(rp, "text");
-                                                if (cJSON_IsString(txt) && txt->valuestring != nullptr) {
-                                                    answer += txt->valuestring;
-                                                }
-                                            }
-                                        }
-                                        cJSON_Delete(rj);
-                                    }
-                                } else {
-                                    ESP_LOGW(TAG, "web_search HTTP status=%d on %s",
-                                             sc ? *sc : -1, search_models[m_idx]);
-                                }
-                                http->Close();
-                            }
-                        }
-                    }
+                    CallGeminiFastRestGenerate(cfg.gemini_key, req_body, "web_search", answer);
                 }
                 answer = robi::Utf8SafeTruncate(answer, 900);
                 if (!answer.empty()) {
-                    ESP_LOGI(TAG, "web_search OK (%u bytes)", static_cast<unsigned>(answer.size()));
                     cJSON_AddStringToObject(res_obj, "search_results", answer.c_str());
                 } else {
                     cJSON_AddStringToObject(res_obj, "search_results",
@@ -2243,127 +2371,134 @@ void GeminiLiveProtocol::RequestAsyncAiTriviaDeck(uint32_t req_id, const std::st
                         audience = req->english ? "smart family & adults" : "משפחה ומבוגרים";
                     }
 
+                    const uint32_t rnd_num =
+                        g_trivia_round_counter.fetch_add(1) +
+                        static_cast<uint32_t>(esp_timer_get_time() & 0xFFFFu);
+                    static const char* const kAnglesHe[] = {
+                        "שיאי עולם מדהימים ועובדות מפתיעות",
+                        "שאלות טריקיות ומפתיעות שלא שואלים בדרך כלל",
+                        "סיפורים מרתקים, המצאות ותגליות",
+                        "זיהוי לפי רמזים קצרים ומקוריים",
+                        "השוואות מפתיעות (הכי גדול, הכי מהיר, הכי עתיק)",
+                        "עובדות שכיף לספר לחברים בבית ספר",
+                    };
+                    static const char* const kAnglesEn[] = {
+                        "amazing world records and surprising facts",
+                        "clever less-common twists and fun surprises",
+                        "cool inventions, discoveries, and records",
+                        "short creative clue-based questions",
+                        "surprising comparisons (fastest, oldest, biggest)",
+                        "fun mind-blowing facts kids love sharing",
+                    };
+                    const char* angle = req->english
+                                            ? kAnglesEn[rnd_num % (sizeof(kAnglesEn) / sizeof(kAnglesEn[0]))]
+                                            : kAnglesHe[rnd_num % (sizeof(kAnglesHe) / sizeof(kAnglesHe[0]))];
+
+                    auto recent_qs = robi::RobiGameHub::GetInstance().GetRecentTriviaQuestions(14);
+                    std::string avoid_block;
+                    if (!recent_qs.empty()) {
+                        avoid_block = req->english ? "\nDO NOT repeat or paraphrase any of these recent questions: "
+                                                   : "\nאל תחזור ואל תשאל שאלות דומות לאלו שכבר נשאלו לאחרונה: ";
+                        for (size_t i = 0; i < recent_qs.size(); ++i) {
+                            if (i > 0) avoid_block += " | ";
+                            avoid_block += recent_qs[i];
+                        }
+                    }
+
                     std::string prompt;
                     if (req->english) {
                         prompt =
-                            "Generate a JSON array of 8 fresh, fun, accurate multiple-choice trivia questions in English about: " +
-                            req->topic_desc + ". Audience: " + audience +
+                            "Generate a JSON array of 8 fresh, creative, factually accurate multiple-choice trivia questions in English about: " +
+                            req->topic_desc + ". Creative angle for Round #" + std::to_string(rnd_num) + ": " + angle +
+                            ". Audience: " + audience +
                             ". Return ONLY a compact JSON array with this exact schema: "
-                            "[{\"q\":\"Short question max 50 chars?\",\"o\":[\"Right answer\",\"Wrong 2\",\"Wrong 3\",\"Wrong 4\"],\"c\":0}]. "
-                            "Rules: 4 short button options per question (1-3 words, max 18 chars each), c is the 0-based index of the 100% factually correct option, no duplicate questions.";
+                            "[{\"q\":\"Short question max 48 chars?\",\"o\":[\"Right answer\",\"Wrong 2\",\"Wrong 3\",\"Wrong 4\"],\"c\":0}]. "
+                            "Rules: 4 short button options per question (1-3 words, max 18 chars each), c is the 0-based index of the 100% factually correct option." +
+                            avoid_block;
                     } else {
                         prompt =
-                            "צור מערך JSON קומפקטי של 8 שאלות טריוויה חדשות, מהנות ומדויקות בעברית תקנית בנושא: " +
-                            req->topic_desc + ". מותאם עבור: " + audience +
+                            "צור מערך JSON קומפקטי של 8 שאלות טריוויה חדשות, מקוריות, מפתיעות ומדויקות בעברית תקנית בנושא: " +
+                            req->topic_desc + ". זווית מיוחדת לסיבוב #" + std::to_string(rnd_num) + ": " + angle +
+                            ". מותאם עבור: " + audience +
                             ". החזר אך ורק מערך JSON תקין במבנה: "
-                            "[{\"q\":\"שאלה קצרה עד 48 תווים?\",\"o\":[\"תשובה נכונה\",\"מסיח 2\",\"מסיח 3\",\"מסיח 4\"],\"c\":0}]. "
-                            "חוקים: בדיוק 4 אפשרויות קצרות בכל שאלה (1 עד 3 מילים, עד 18 תווים לכפתור), ודא עובדתית שהתשובה באינדקס c נכונה ב-100%, גוון ללא חזרות.";
+                            "[{\"q\":\"שאלה קצרה עד 46 תווים?\",\"o\":[\"תשובה נכונה\",\"מסיח 2\",\"מסיח 3\",\"מסיח 4\"],\"c\":0}]. "
+                            "חוקים: בדיוק 4 אפשרויות קצרות בכל שאלה (1 עד 3 מילים, עד 18 תווים לכפתור), ודא עובדתית שהתשובה באינדקס c נכונה ב-100%, גוון והימנע משאלות בנאליות." +
+                            avoid_block;
                     }
 
-                    const char* models[2] = {"gemini-2.5-flash-lite", "gemini-2.5-flash"};
-                    for (int m_idx = 0; m_idx < 2 && parsed_items.size() < 4; ++m_idx) {
-                        cJSON* jroot = cJSON_CreateObject();
-                        cJSON* contents = cJSON_CreateArray();
-                        cJSON* c0 = cJSON_CreateObject();
-                        cJSON* parts = cJSON_CreateArray();
-                        cJSON* p0 = cJSON_CreateObject();
-                        cJSON_AddStringToObject(p0, "text", prompt.c_str());
-                        cJSON_AddItemToArray(parts, p0);
-                        cJSON_AddItemToObject(c0, "parts", parts);
-                        cJSON_AddItemToArray(contents, c0);
-                        cJSON_AddItemToObject(jroot, "contents", contents);
+                    cJSON* jroot = cJSON_CreateObject();
+                    cJSON* contents = cJSON_CreateArray();
+                    cJSON* c0 = cJSON_CreateObject();
+                    cJSON* parts = cJSON_CreateArray();
+                    cJSON* p0 = cJSON_CreateObject();
+                    cJSON_AddStringToObject(p0, "text", prompt.c_str());
+                    cJSON_AddItemToArray(parts, p0);
+                    cJSON_AddItemToObject(c0, "parts", parts);
+                    cJSON_AddItemToArray(contents, c0);
+                    cJSON_AddItemToObject(jroot, "contents", contents);
 
-                        cJSON* gcfg = cJSON_CreateObject();
-                        cJSON_AddStringToObject(gcfg, "responseMimeType", "application/json");
-                        cJSON_AddNumberToObject(gcfg, "temperature", 0.9);
-                        cJSON_AddNumberToObject(gcfg, "maxOutputTokens", 2048);
-                        if (m_idx == 1) {
-                            cJSON* tcfg = cJSON_CreateObject();
-                            cJSON_AddNumberToObject(tcfg, "thinkingBudget", 0);
-                            cJSON_AddItemToObject(gcfg, "thinkingConfig", tcfg);
-                        }
-                        cJSON_AddItemToObject(jroot, "generationConfig", gcfg);
+                    cJSON* gcfg = cJSON_CreateObject();
+                    cJSON_AddStringToObject(gcfg, "responseMimeType", "application/json");
+                    cJSON_AddNumberToObject(gcfg, "temperature", 0.95);
+                    cJSON_AddNumberToObject(gcfg, "maxOutputTokens", 3072);
+                    cJSON_AddItemToObject(jroot, "generationConfig", gcfg);
 
-                        char* body_c = cJSON_PrintUnformatted(jroot);
-                        std::string body = body_c ? body_c : "{}";
-                        if (body_c) cJSON_free(body_c);
-                        cJSON_Delete(jroot);
+                    char* body_c = cJSON_PrintUnformatted(jroot);
+                    std::string body = body_c ? body_c : "{}";
+                    if (body_c) cJSON_free(body_c);
+                    cJSON_Delete(jroot);
 
-                        auto network = Board::GetInstance().GetNetwork();
-                        auto http = network ? network->CreateHttp(0) : nullptr;
-                        if (!http) break;
-                        http->SetHeader("Content-Type", "application/json");
-                        http->SetContent(std::move(body));
-                        std::string url =
-                            std::string("https://generativelanguage.googleapis.com/v1beta/models/") +
-                            models[m_idx] + ":generateContent?key=" + cfg.gemini_key;
-                        if (auto opened = http->Open("POST", url); opened) {
-                            auto sc = http->GetStatusCode();
-                            if (sc && *sc == 200) {
-                                std::string raw = http->ReadAll();
-                                cJSON* rj = cJSON_ParseWithLength(raw.data(), raw.size());
-                                if (rj) {
-                                    std::string json_txt;
-                                    const cJSON* cands = cJSON_GetObjectItemCaseSensitive(rj, "candidates");
-                                    const cJSON* cand0 = cJSON_IsArray(cands) ? cJSON_GetArrayItem(cands, 0) : nullptr;
-                                    const cJSON* cont = cand0 ? cJSON_GetObjectItemCaseSensitive(cand0, "content") : nullptr;
-                                    const cJSON* rparts = cont ? cJSON_GetObjectItemCaseSensitive(cont, "parts") : nullptr;
-                                    if (cJSON_IsArray(rparts)) {
-                                        const cJSON* rp = nullptr;
-                                        cJSON_ArrayForEach(rp, rparts) {
-                                            const cJSON* txt = cJSON_GetObjectItemCaseSensitive(rp, "text");
-                                            if (cJSON_IsString(txt) && txt->valuestring != nullptr) {
-                                                json_txt += txt->valuestring;
+                    std::string json_txt;
+                    if (CallGeminiFastRestGenerate(cfg.gemini_key, body, "AI trivia", json_txt)) {
+                        size_t lb = json_txt.find('[');
+                        size_t rb = json_txt.rfind(']');
+                        if (lb != std::string::npos && rb != std::string::npos && rb > lb) {
+                            std::string slice = json_txt.substr(lb, rb - lb + 1);
+                            cJSON* arr = cJSON_ParseWithLength(slice.data(), slice.size());
+                            if (cJSON_IsArray(arr)) {
+                                const cJSON* it = nullptr;
+                                cJSON_ArrayForEach(it, arr) {
+                                    if (parsed_items.size() >= 8) break;
+                                    if (!cJSON_IsObject(it)) continue;
+                                    robi::TriviaQuestionItem qi;
+                                    const cJSON* qf = cJSON_GetObjectItemCaseSensitive(it, "q");
+                                    if (!qf) qf = cJSON_GetObjectItemCaseSensitive(it, "question");
+                                    if (cJSON_IsString(qf) && qf->valuestring != nullptr) {
+                                        qi.question = robi::Utf8SafeTruncate(qf->valuestring, 115);
+                                    }
+                                    const cJSON* of = cJSON_GetObjectItemCaseSensitive(it, "o");
+                                    if (!of) of = cJSON_GetObjectItemCaseSensitive(it, "options");
+                                    if (cJSON_IsArray(of)) {
+                                        const cJSON* opt = nullptr;
+                                        cJSON_ArrayForEach(opt, of) {
+                                            if (qi.options.size() >= 4) break;
+                                            if (cJSON_IsString(opt) && opt->valuestring != nullptr &&
+                                                opt->valuestring[0] != '\0') {
+                                                qi.options.push_back(robi::Utf8SafeTruncate(opt->valuestring, 36));
                                             }
                                         }
                                     }
-                                    cJSON_Delete(rj);
-
-                                    size_t lb = json_txt.find('[');
-                                    size_t rb = json_txt.rfind(']');
-                                    if (lb != std::string::npos && rb != std::string::npos && rb > lb) {
-                                        std::string slice = json_txt.substr(lb, rb - lb + 1);
-                                        cJSON* arr = cJSON_ParseWithLength(slice.data(), slice.size());
-                                        if (cJSON_IsArray(arr)) {
-                                            const cJSON* it = nullptr;
-                                            cJSON_ArrayForEach(it, arr) {
-                                                if (parsed_items.size() >= 8) break;
-                                                if (!cJSON_IsObject(it)) continue;
-                                                robi::TriviaQuestionItem qi;
-                                                const cJSON* qf = cJSON_GetObjectItemCaseSensitive(it, "q");
-                                                if (!qf) qf = cJSON_GetObjectItemCaseSensitive(it, "question");
-                                                if (cJSON_IsString(qf) && qf->valuestring != nullptr) {
-                                                    qi.question = robi::Utf8SafeTruncate(qf->valuestring, 115);
-                                                }
-                                                const cJSON* of = cJSON_GetObjectItemCaseSensitive(it, "o");
-                                                if (!of) of = cJSON_GetObjectItemCaseSensitive(it, "options");
-                                                if (cJSON_IsArray(of)) {
-                                                    const cJSON* opt = nullptr;
-                                                    cJSON_ArrayForEach(opt, of) {
-                                                        if (qi.options.size() >= 4) break;
-                                                        if (cJSON_IsString(opt) && opt->valuestring != nullptr &&
-                                                            opt->valuestring[0] != '\0') {
-                                                            qi.options.push_back(robi::Utf8SafeTruncate(opt->valuestring, 36));
-                                                        }
-                                                    }
-                                                }
-                                                const cJSON* cf = cJSON_GetObjectItemCaseSensitive(it, "c");
-                                                if (!cf) cf = cJSON_GetObjectItemCaseSensitive(it, "correct_index");
-                                                if (cJSON_IsNumber(cf)) {
-                                                    qi.correct_index = cf->valueint;
-                                                }
-                                                if (!qi.question.empty() && qi.options.size() >= 2) {
-                                                    parsed_items.push_back(std::move(qi));
-                                                }
+                                    const cJSON* cf = cJSON_GetObjectItemCaseSensitive(it, "c");
+                                    if (!cf) cf = cJSON_GetObjectItemCaseSensitive(it, "correct_index");
+                                    if (cJSON_IsNumber(cf)) {
+                                        qi.correct_index = cf->valueint;
+                                    }
+                                    bool dup = std::find(recent_qs.begin(), recent_qs.end(), qi.question) !=
+                                               recent_qs.end();
+                                    if (!dup) {
+                                        for (const auto& existing : parsed_items) {
+                                            if (existing.question == qi.question) {
+                                                dup = true;
+                                                break;
                                             }
                                         }
-                                        if (arr) cJSON_Delete(arr);
+                                    }
+                                    if (!dup && !qi.question.empty() && qi.options.size() >= 2) {
+                                        parsed_items.push_back(std::move(qi));
                                     }
                                 }
-                            } else {
-                                ESP_LOGW(TAG, "AI trivia HTTP status=%d on %s", sc ? *sc : -1, models[m_idx]);
                             }
-                            http->Close();
+                            if (arr) cJSON_Delete(arr);
                         }
                     }
                 }

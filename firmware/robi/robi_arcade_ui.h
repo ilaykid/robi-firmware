@@ -510,26 +510,30 @@
             RobiSetHidden(robi_trivia_done_, false);
             RobiSetHidden(robi_trivia_x_, true);
         } else {
-            // kQuestion or kReveal: strict non-overlapping row bands
-            lv_obj_align(robi_trivia_hdr_, LV_ALIGN_TOP_MID, 0, 22);
+            // kQuestion or kReveal: strict non-overlapping row bands (44px tall for 30px Noto Sans glyphs)
             std::string sc_txt = trivia_.FormatScoreText();
             if (h2h && !sc_txt.empty()) {
+                lv_obj_align(robi_trivia_hdr_, LV_ALIGN_TOP_MID, 0, 24);
                 lv_label_set_text(robi_trivia_score_, sc_txt.c_str());
+                lv_obj_align(robi_trivia_score_, LV_ALIGN_TOP_MID, 0, 60);
                 RobiSetHidden(robi_trivia_score_, false);
-                lv_obj_set_style_max_height(robi_trivia_q_, 90, 0);
-                lv_obj_align(robi_trivia_q_, LV_ALIGN_TOP_MID, 0, 94);
+                lv_obj_set_width(robi_trivia_q_, 354);
+                lv_obj_set_style_max_height(robi_trivia_q_, 86, 0);
+                lv_obj_align(robi_trivia_q_, LV_ALIGN_TOP_MID, 0, 100);
             } else {
+                lv_obj_align(robi_trivia_hdr_, LV_ALIGN_TOP_MID, 0, 28);
                 RobiSetHidden(robi_trivia_score_, true);
-                lv_obj_set_style_max_height(robi_trivia_q_, 106, 0);
-                lv_obj_align(robi_trivia_q_, LV_ALIGN_TOP_MID, 0, 66);
+                lv_obj_set_width(robi_trivia_q_, 354);
+                lv_obj_set_style_max_height(robi_trivia_q_, 102, 0);
+                lv_obj_align(robi_trivia_q_, LV_ALIGN_TOP_MID, 0, 74);
             }
 
             const auto* cur = trivia_.CurrentQuestion();
             lv_label_set_text(robi_trivia_q_, cur ? cur->question.c_str() : "");
 
             uint32_t idle_border = (h2h && trivia_.CurrentPlayerIndex() == 1) ? 0xF59E0B : 0x00E5FF;
-            const int opt_y0 = h2h ? 188 : 174;
-            const int opt_pitch = h2h ? 50 : 52;
+            const int opt_y0 = h2h ? 190 : 178;
+            const int opt_pitch = h2h ? 48 : 51;
             const int opt_h = h2h ? 44 : 46;
             for (int i = 0; i < 4; ++i) {
                 if (cur != nullptr && i < static_cast<int>(cur->options.size())) {
@@ -704,7 +708,9 @@
         }
 #endif
         active_trivia_req_id_ = 0;
-        trivia_.StartOfflineDeck(cat_idx, head_to_head, p1, p2, en, 8);
+        auto recent_qs = robi::RobiGameHub::GetInstance().GetRecentTriviaQuestions(40);
+        trivia_.StartOfflineDeck(cat_idx, head_to_head, p1, p2, en, 8, recent_qs);
+        robi::RobiGameHub::GetInstance().RecordPlayedTriviaQuestions(trivia_.deck());
         RobiSyncTriviaWidgetsLocked();
 #ifdef ESP_PLATFORM
         Application::GetInstance().Schedule([]() {
@@ -1106,10 +1112,10 @@
 
         robi_hu_top_lbl_ = lv_label_create(robi_hu_stage_);
         lv_label_set_long_mode(robi_hu_top_lbl_, LV_LABEL_LONG_CLIP);
-        lv_obj_set_size(robi_hu_top_lbl_, 256, 36);
+        lv_obj_set_size(robi_hu_top_lbl_, 264, 44);
         lv_obj_set_style_text_align(robi_hu_top_lbl_, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_style_text_color(robi_hu_top_lbl_, lv_color_hex(0x38BDF8), 0);
-        lv_obj_align(robi_hu_top_lbl_, LV_ALIGN_TOP_MID, 0, 40);
+        lv_obj_align(robi_hu_top_lbl_, LV_ALIGN_TOP_MID, 0, 36);
 
         robi_hu_btn_x_ = RobiPillBtnPx(robi_hu_stage_, "X", 0x64748B, 52, 42, OnArcadeBack, nullptr);
         lv_obj_align(robi_hu_btn_x_, LV_ALIGN_TOP_MID, 0, 92);
@@ -1166,33 +1172,33 @@
 
         robi_trivia_hdr_ = lv_label_create(robi_trivia_box_);
         lv_label_set_long_mode(robi_trivia_hdr_, LV_LABEL_LONG_CLIP);
-        lv_obj_set_size(robi_trivia_hdr_, 244, 36);
+        lv_obj_set_size(robi_trivia_hdr_, 248, 44);
         lv_obj_set_style_text_align(robi_trivia_hdr_, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_style_text_color(robi_trivia_hdr_, lv_color_hex(0xFBBF24), 0);
-        lv_obj_align(robi_trivia_hdr_, LV_ALIGN_TOP_MID, 0, 22);
+        lv_obj_align(robi_trivia_hdr_, LV_ALIGN_TOP_MID, 0, 24);
 
         robi_trivia_score_ = lv_label_create(robi_trivia_box_);
         lv_label_set_long_mode(robi_trivia_score_, LV_LABEL_LONG_CLIP);
-        lv_obj_set_size(robi_trivia_score_, 286, 34);
+        lv_obj_set_size(robi_trivia_score_, 316, 44);
         lv_obj_set_style_text_align(robi_trivia_score_, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_style_text_color(robi_trivia_score_, lv_color_hex(0x38BDF8), 0);
-        lv_obj_align(robi_trivia_score_, LV_ALIGN_TOP_MID, 0, 56);
+        lv_obj_align(robi_trivia_score_, LV_ALIGN_TOP_MID, 0, 60);
         lv_obj_add_flag(robi_trivia_score_, LV_OBJ_FLAG_HIDDEN);
 
         robi_trivia_q_ = lv_label_create(robi_trivia_box_);
         lv_label_set_long_mode(robi_trivia_q_, LV_LABEL_LONG_WRAP);
-        lv_obj_set_width(robi_trivia_q_, 344);
-        lv_obj_set_style_max_height(robi_trivia_q_, 92, 0);
+        lv_obj_set_width(robi_trivia_q_, 354);
+        lv_obj_set_style_max_height(robi_trivia_q_, 86, 0);
         lv_obj_set_style_text_align(robi_trivia_q_, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_style_text_color(robi_trivia_q_, lv_color_hex(0xF8FAFC), 0);
-        lv_obj_align(robi_trivia_q_, LV_ALIGN_TOP_MID, 0, 94);
+        lv_obj_align(robi_trivia_q_, LV_ALIGN_TOP_MID, 0, 100);
 
-        const int opt_widths[4] = {348, 356, 344, 304};
+        const int opt_widths[4] = {360, 360, 344, 304};
         for (int i = 0; i < 4; ++i) {
             robi_trivia_opts_[i] = RobiPillBtnPx(
                 robi_trivia_box_, "", 0x00E5FF, opt_widths[i], 44, OnTriviaPickOption,
                 reinterpret_cast<void*>(static_cast<intptr_t>(i)));
-            lv_obj_align(robi_trivia_opts_[i], LV_ALIGN_TOP_MID, 0, 188 + i * 50);
+            lv_obj_align(robi_trivia_opts_[i], LV_ALIGN_TOP_MID, 0, 190 + i * 48);
         }
 
         robi_trivia_again_ = RobiPillBtnPx(robi_trivia_box_, "שוב!", 0x10B981, 144, 50,
@@ -1207,7 +1213,7 @@
 
         robi_trivia_x_ = RobiPillBtnPx(robi_trivia_box_, "X", 0x475569, 68, 36,
                                        OnTriviaClose, nullptr);
-        lv_obj_align(robi_trivia_x_, LV_ALIGN_TOP_MID, 0, 392);
+        lv_obj_align(robi_trivia_x_, LV_ALIGN_TOP_MID, 0, 388);
         lv_obj_add_flag(robi_trivia_box_, LV_OBJ_FLAG_HIDDEN);
 
         RobiRefreshGameLocaleLocked();
@@ -1238,6 +1244,7 @@
                 trivia_.StartCustomDeck(voice_triv.topic, voice_triv.questions, -1,
                                         voice_triv.head_to_head, p1, p2, en, 8,
                                         /*preserve_first_question_order=*/true);
+                robi::RobiGameHub::GetInstance().RecordPlayedTriviaQuestions(trivia_.deck());
                 RobiSyncTriviaWidgetsLocked();
             } else {
                 RobiStartTriviaRoundLocked(-1, voice_triv.head_to_head, voice_triv.topic);
@@ -1254,8 +1261,15 @@
                 std::string p1, p2;
                 ResolveTriviaPlayerNames(cfg, p1, p2);
                 std::string title = trivia_.topic_title();
-                trivia_.StartCustomDeck(title, ai_items, last_trivia_cat_, last_trivia_h2h_,
-                                        p1, p2, en, 8, false);
+                if (ai_items.size() >= 4) {
+                    trivia_.StartCustomDeck(title, ai_items, last_trivia_cat_, last_trivia_h2h_,
+                                            p1, p2, en, 8, false);
+                } else {
+                    auto recent_qs = robi::RobiGameHub::GetInstance().GetRecentTriviaQuestions(40);
+                    trivia_.StartOfflineDeck(last_trivia_cat_, last_trivia_h2h_, p1, p2, en, 8,
+                                             recent_qs);
+                }
+                robi::RobiGameHub::GetInstance().RecordPlayedTriviaQuestions(trivia_.deck());
                 RobiSyncTriviaWidgetsLocked();
                 RobiSpeakCurrentTriviaQuestionLocked(/*include_prev_reaction=*/false);
             }
@@ -1270,7 +1284,10 @@
                 const bool en = (cfg.language == "en-US");
                 std::string p1, p2;
                 ResolveTriviaPlayerNames(cfg, p1, p2);
-                trivia_.StartOfflineDeck(last_trivia_cat_, last_trivia_h2h_, p1, p2, en, 8);
+                auto recent_qs = robi::RobiGameHub::GetInstance().GetRecentTriviaQuestions(40);
+                trivia_.StartOfflineDeck(last_trivia_cat_, last_trivia_h2h_, p1, p2, en, 8,
+                                         recent_qs);
+                robi::RobiGameHub::GetInstance().RecordPlayedTriviaQuestions(trivia_.deck());
                 RobiSyncTriviaWidgetsLocked();
                 RobiSpeakCurrentTriviaQuestionLocked(false);
             } else if (tev.advanced_to_next_question) {

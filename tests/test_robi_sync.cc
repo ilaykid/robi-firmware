@@ -524,7 +524,10 @@ void TestSfxSynthAndGamesEngine() {
         slot_seen[q->correct_index] = true;
 
         // Lavi (even turns: 0,2,4,6) answers 3/4 right; Ori (odd turns: 1,3,5,7) answers 4/4 right!
-        assert(!tr.FormatScoreText().empty() && IsStrictlyValidUtf8(tr.FormatScoreText()));
+        std::string sc_line = tr.FormatScoreText();
+        assert(!sc_line.empty() && IsStrictlyValidUtf8(sc_line));
+        assert(sc_line.find(" | ") != std::string::npos);
+        assert(sc_line.find("   ") == std::string::npos);
         int pick = (qi == 2) ? ((q->correct_index + 1) % 4) : q->correct_index;
         assert(tr.SubmitAnswer(pick));
         assert(tr.phase() == robi::TriviaEngine::Phase::kReveal);
@@ -567,12 +570,12 @@ void TestSfxSynthAndGamesEngine() {
     tr.BeginLoading("חלל", false, "לביא", "אורי", false);
     assert(tr.phase() == robi::TriviaEngine::Phase::kLoading);
     bool timed_out = false;
-    for (int i = 0; i < 75; ++i) {
+    for (int i = 0; i < 92; ++i) {
         if (tr.Step(100).loading_timed_out) timed_out = true;
     }
     assert(timed_out);
 
-    // 5. Test RobiGameHub request-id cancellation & mic-mute gate
+    // 5. Test RobiGameHub request-id cancellation, anti-repeat rolling memory, & mic-mute gate
     auto& hub = robi::RobiGameHub::GetInstance();
     uint32_t r1 = hub.NextTriviaRequestId();
     uint32_t r2 = hub.NextTriviaRequestId();
@@ -582,6 +585,33 @@ void TestSfxSynthAndGamesEngine() {
     hub.DeliverAsyncTriviaDeck(r2, custom_qs);
     assert(hub.PopAsyncTriviaDeck(r2, popped_qs) && popped_qs.size() == 4);
     assert(!hub.PopAsyncTriviaDeck(r2, popped_qs));
+
+    // Verify rolling 40-question anti-repeat history & offline unseen prioritization
+    std::vector<robi::TriviaQuestionItem> many_qs;
+    for (int i = 0; i < 48; ++i) {
+        many_qs.push_back({"שאלת בדיקה #" + std::to_string(i), {"א", "ב", "ג", "ד"}, 0});
+    }
+    hub.RecordPlayedTriviaQuestions(many_qs);
+    auto recent16 = hub.GetRecentTriviaQuestions(16);
+    assert(recent16.size() == 16);
+    assert(recent16.front() == "שאלת בדיקה #32");
+    assert(recent16.back() == "שאלת בדיקה #47");  // Most recent at back
+    auto recent_all = hub.GetRecentTriviaQuestions(50);
+    assert(recent_all.size() == 40);  // Capped at rolling 40
+
+    // Offline Mega-Mix deck should pick 8 completely unseen questions in Round 2!
+    robi::TriviaEngine tr_r1;
+    tr_r1.SeedRng(1001u);
+    tr_r1.StartOfflineDeck(-1, false, "לביא", "אורי", false, 8);
+    std::vector<std::string> seen_r1;
+    for (const auto& item : tr_r1.deck()) seen_r1.push_back(item.question);
+    robi::TriviaEngine tr_r2;
+    tr_r2.SeedRng(1001u);  // Even with identical RNG seed, avoid_questions forces 8 fresh questions!
+    tr_r2.StartOfflineDeck(-1, false, "לביא", "אורי", false, 8, seen_r1);
+    assert(tr_r2.deck().size() == 8);
+    for (const auto& item : tr_r2.deck()) {
+        assert(std::find(seen_r1.begin(), seen_r1.end(), item.question) == seen_r1.end());
+    }
 
     hub.SetMicMutedForScreenGame(true);
     assert(hub.IsMicMutedForScreenGame());

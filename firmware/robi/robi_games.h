@@ -514,7 +514,8 @@ public:
 
     void StartOfflineDeck(int cat_index, bool head_to_head,
                           const std::string& p1, const std::string& p2,
-                          bool english, size_t round_questions = 8) {
+                          bool english, size_t round_questions = 8,
+                          const std::vector<std::string>& avoid_questions = {}) {
         std::string title;
         if (cat_index >= 0 && cat_index < 5) {
             title = english ? kTriviaCategories[cat_index].title_en
@@ -525,6 +526,22 @@ public:
         ConfigurePlayersAndReset(title, head_to_head, p1, p2, english);
         std::vector<TriviaQuestionItem> pool = BuildOfflinePool(cat_index, english);
         ShuffleQuestions(pool, /*preserve_first=*/false);
+        if (!avoid_questions.empty() && pool.size() > round_questions) {
+            std::vector<TriviaQuestionItem> fresh;
+            std::vector<TriviaQuestionItem> seen;
+            for (auto& item : pool) {
+                bool was_seen = std::find(avoid_questions.begin(), avoid_questions.end(),
+                                          item.question) != avoid_questions.end();
+                if (was_seen) {
+                    seen.push_back(std::move(item));
+                } else {
+                    fresh.push_back(std::move(item));
+                }
+            }
+            fresh.insert(fresh.end(), std::make_move_iterator(seen.begin()),
+                         std::make_move_iterator(seen.end()));
+            pool = std::move(fresh);
+        }
         size_t take = std::min(std::max<size_t>(2, round_questions), pool.size());
         pool.resize(take);
         for (auto& q : pool) {
@@ -608,6 +625,8 @@ public:
         return scores_[idx & 1];
     }
 
+    const std::vector<TriviaQuestionItem>& deck() const { return deck_; }
+
     const TriviaQuestionItem* CurrentQuestion() const {
         if (q_index_ >= deck_.size()) return nullptr;
         return &deck_[q_index_];
@@ -648,7 +667,7 @@ public:
         }
         if (phase_ == Phase::kLoading) {
             loading_ms_ += dt_ms;
-            if (loading_ms_ >= 7200) {
+            if (loading_ms_ >= 9000) {
                 ev.loading_timed_out = true;
             }
             return ev;
@@ -693,13 +712,13 @@ public:
         int q_tot = static_cast<int>(deck_.size());
         if (head_to_head_) {
             std::snprintf(buf, sizeof(buf),
-                          english_ ? "%s's Turn  •  %d/%d"
-                                   : "תור %s  •  %d/%d",
+                          english_ ? "%s • %d/%d"
+                                   : "תור %s • %d/%d",
                           CurrentPlayerName().c_str(), q_num, q_tot);
         } else {
             std::snprintf(buf, sizeof(buf),
-                          english_ ? "Q %d/%d  •  Score: %d"
-                                   : "שאלה %d/%d  •  ניקוד: %d",
+                          english_ ? "%d/%d • Score: %d"
+                                   : "%d/%d • ניקוד: %d",
                           q_num, q_tot, scores_[0]);
         }
         return std::string(buf);
@@ -710,7 +729,7 @@ public:
             return {};
         }
         char buf[128];
-        std::snprintf(buf, sizeof(buf), "%s: %d   •   %s: %d",
+        std::snprintf(buf, sizeof(buf), "%s: %d | %s: %d",
                       player_names_[0].c_str(), scores_[0],
                       player_names_[1].c_str(), scores_[1]);
         return std::string(buf);
@@ -937,11 +956,36 @@ public:
         return true;
     }
 
+    void RecordPlayedTriviaQuestions(const std::vector<TriviaQuestionItem>& items) {
+        std::lock_guard<std::mutex> lk(mutex_);
+        for (const auto& it : items) {
+            if (it.question.empty()) continue;
+            if (std::find(recent_trivia_qs_.begin(), recent_trivia_qs_.end(), it.question) !=
+                recent_trivia_qs_.end()) {
+                continue;
+            }
+            if (recent_trivia_qs_.size() >= 40) {
+                recent_trivia_qs_.erase(recent_trivia_qs_.begin());
+            }
+            recent_trivia_qs_.push_back(it.question);
+        }
+    }
+
+    std::vector<std::string> GetRecentTriviaQuestions(size_t max_count = 16) const {
+        std::lock_guard<std::mutex> lk(mutex_);
+        if (recent_trivia_qs_.size() <= max_count) {
+            return recent_trivia_qs_;
+        }
+        return std::vector<std::string>(
+            recent_trivia_qs_.end() - static_cast<std::ptrdiff_t>(max_count),
+            recent_trivia_qs_.end());
+    }
+
 private:
     RobiGameHub() = default;
 
     std::atomic<bool> mic_muted_for_game_{false};
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
 
     uint32_t next_req_id_ = 1;
     uint32_t delivered_req_id_ = 0;
@@ -954,6 +998,8 @@ private:
     bool has_pending_headsup_ = false;
     std::string pending_headsup_topic_;
     std::vector<std::string> pending_headsup_words_;
+
+    std::vector<std::string> recent_trivia_qs_;
 };
 
 }  // namespace robi
