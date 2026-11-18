@@ -2248,19 +2248,19 @@ void GeminiLiveProtocol::RequestAsyncAiTriviaDeck(uint32_t req_id, const std::st
                         prompt =
                             "Generate a JSON array of 8 fresh, fun, accurate multiple-choice trivia questions in English about: " +
                             req->topic_desc + ". Audience: " + audience +
-                            ". Return ONLY a valid JSON array with this exact schema: "
-                            "[{\"q\":\"Short clear question max 72 chars?\",\"o\":[\"Right answer\",\"Wrong 2\",\"Wrong 3\",\"Wrong 4\"],\"c\":0}]. "
-                            "Rules: 4 short button options per question (1-3 words, max 20 chars each), c is the 0-based index of the 100% factually correct option, vary difficulty nicely, no duplicate questions.";
+                            ". Return ONLY a compact JSON array with this exact schema: "
+                            "[{\"q\":\"Short question max 50 chars?\",\"o\":[\"Right answer\",\"Wrong 2\",\"Wrong 3\",\"Wrong 4\"],\"c\":0}]. "
+                            "Rules: 4 short button options per question (1-3 words, max 18 chars each), c is the 0-based index of the 100% factually correct option, no duplicate questions.";
                     } else {
                         prompt =
-                            "צור מערך JSON של 8 שאלות טריוויה חדשות, מהנות, מגוונות ומדויקות בעברית תקנית בנושא: " +
+                            "צור מערך JSON קומפקטי של 8 שאלות טריוויה חדשות, מהנות ומדויקות בעברית תקנית בנושא: " +
                             req->topic_desc + ". מותאם עבור: " + audience +
-                            ". החזר אך ורק מערך JSON תקין במבנה המדויק הבא: "
-                            "[{\"q\":\"שאלה קצרה וברורה עד 72 תווים?\",\"o\":[\"תשובה נכונה\",\"מסיח 2\",\"מסיח 3\",\"מסיח 4\"],\"c\":0}]. "
-                            "חוקים: בדיוק 4 אפשרויות קצרות בכל שאלה (1 עד 3 מילים, עד 20 תווים לכפתור), ודא עובדתית שהתשובה באינדקס c נכונה ב-100%, גוון בין שאלות מפתיעות ומהנות, ללא חזרות.";
+                            ". החזר אך ורק מערך JSON תקין במבנה: "
+                            "[{\"q\":\"שאלה קצרה עד 48 תווים?\",\"o\":[\"תשובה נכונה\",\"מסיח 2\",\"מסיח 3\",\"מסיח 4\"],\"c\":0}]. "
+                            "חוקים: בדיוק 4 אפשרויות קצרות בכל שאלה (1 עד 3 מילים, עד 18 תווים לכפתור), ודא עובדתית שהתשובה באינדקס c נכונה ב-100%, גוון ללא חזרות.";
                     }
 
-                    const char* models[2] = {"gemini-2.5-flash", "gemini-2.0-flash"};
+                    const char* models[2] = {"gemini-2.5-flash-lite", "gemini-2.5-flash"};
                     for (int m_idx = 0; m_idx < 2 && parsed_items.size() < 4; ++m_idx) {
                         cJSON* jroot = cJSON_CreateObject();
                         cJSON* contents = cJSON_CreateArray();
@@ -2276,8 +2276,8 @@ void GeminiLiveProtocol::RequestAsyncAiTriviaDeck(uint32_t req_id, const std::st
                         cJSON* gcfg = cJSON_CreateObject();
                         cJSON_AddStringToObject(gcfg, "responseMimeType", "application/json");
                         cJSON_AddNumberToObject(gcfg, "temperature", 0.9);
-                        cJSON_AddNumberToObject(gcfg, "maxOutputTokens", 1200);
-                        if (m_idx == 0) {
+                        cJSON_AddNumberToObject(gcfg, "maxOutputTokens", 2048);
+                        if (m_idx == 1) {
                             cJSON* tcfg = cJSON_CreateObject();
                             cJSON_AddNumberToObject(tcfg, "thinkingBudget", 0);
                             cJSON_AddItemToObject(gcfg, "thinkingConfig", tcfg);

@@ -40,6 +40,7 @@
 
     lv_obj_t* robi_trivia_box_ = nullptr;
     lv_obj_t* robi_trivia_hdr_ = nullptr;
+    lv_obj_t* robi_trivia_score_ = nullptr;
     lv_obj_t* robi_trivia_q_ = nullptr;
     lv_obj_t* robi_trivia_opts_[4] = {};
     lv_obj_t* robi_trivia_again_ = nullptr;
@@ -95,6 +96,16 @@
         if (lbl != nullptr) {
             lv_label_set_text(lbl, txt);
         }
+    }
+
+    static void SetLabelBaseDir(lv_obj_t* lbl, bool english) {
+        if (lbl == nullptr) return;
+        lv_obj_set_style_base_dir(lbl, english ? LV_BASE_DIR_LTR : LV_BASE_DIR_RTL, 0);
+    }
+
+    static void SetButtonBaseDir(lv_obj_t* btn, bool english) {
+        if (btn == nullptr) return;
+        SetLabelBaseDir(lv_obj_get_child(btn, 0), english);
     }
 
     static lv_obj_t* RobiPillBtnPx(lv_obj_t* parent, const char* text, uint32_t border_hex,
@@ -161,6 +172,10 @@
         SetButtonLabelText(robi_hu_cat_btns_[5], en ? "Mega Mix" : "ערבוב הכל");
         SetButtonLabelText(robi_hu_ai_btn_, en ? "Voice Custom Topic" : "נושא חופשי בקול");
         SetButtonLabelText(robi_hu_back_btn_, en ? "Back" : "חזרה");
+        SetLabelBaseDir(robi_hu_menu_title_, en);
+        for (int i = 0; i < 6; ++i) SetButtonBaseDir(robi_hu_cat_btns_[i], en);
+        SetButtonBaseDir(robi_hu_ai_btn_, en);
+        SetButtonBaseDir(robi_hu_back_btn_, en);
     }
 
     void RobiRefreshGameLocaleLocked() {
@@ -169,9 +184,13 @@
         const bool en = (cfg.language == "en-US");
 
         lv_label_set_text(robi_arcade_title_, en ? "Robi Games" : "משחקי רובי");
+        SetLabelBaseDir(robi_arcade_title_, en);
         SetButtonLabelText(robi_games_home_btn_, en ? "Games" : "משחקים");
+        SetButtonBaseDir(robi_games_home_btn_, en);
         SetButtonLabelText(robi_arcade_btn_hu_, en ? "Heads Up! (Tilt Game)" : "נחש מה על המצח!");
+        SetButtonBaseDir(robi_arcade_btn_hu_, en);
         SetButtonLabelText(robi_arcade_btn_tr1_, en ? "Live Screen Trivia" : "טריוויה חיה — יחיד");
+        SetButtonBaseDir(robi_arcade_btn_tr1_, en);
         if (cfg.kids.size() >= 2) {
             std::string h2h = en ? ("Battle: " + cfg.kids[0].name + " vs " + cfg.kids[1].name)
                                  : ("ראש בראש: " + cfg.kids[0].name + " מול " + cfg.kids[1].name);
@@ -179,17 +198,32 @@
         } else {
             SetButtonLabelText(robi_arcade_btn_tr2_, en ? "2-Player Trivia Battle" : "טריוויה — ראש בראש");
         }
+        SetButtonBaseDir(robi_arcade_btn_tr2_, en);
         SetButtonLabelText(robi_arcade_btn_back_, en ? "Back" : "חזרה");
+        SetButtonBaseDir(robi_arcade_btn_back_, en);
 
         RobiRefreshPickerLabelsLocked();
 
+        SetLabelBaseDir(robi_hu_top_lbl_, en);
+        SetLabelBaseDir(robi_hu_word_lbl_, en);
+        SetLabelBaseDir(robi_hu_sub_lbl_, en);
         SetButtonLabelText(robi_hu_btn_skip_, en ? "Skip" : "דלג");
+        SetButtonBaseDir(robi_hu_btn_skip_, en);
         SetButtonLabelText(robi_hu_btn_ok_, en ? "Correct!" : "נכון!");
+        SetButtonBaseDir(robi_hu_btn_ok_, en);
         SetButtonLabelText(robi_hu_btn_again_, en ? "Again!" : "שוב!");
+        SetButtonBaseDir(robi_hu_btn_again_, en);
         SetButtonLabelText(robi_hu_btn_exit_, en ? "Done" : "סיום");
+        SetButtonBaseDir(robi_hu_btn_exit_, en);
 
+        SetLabelBaseDir(robi_trivia_hdr_, en);
+        SetLabelBaseDir(robi_trivia_score_, en);
+        SetLabelBaseDir(robi_trivia_q_, en);
+        for (int i = 0; i < 4; ++i) SetButtonBaseDir(robi_trivia_opts_[i], en);
         SetButtonLabelText(robi_trivia_again_, en ? "Again!" : "שוב!");
+        SetButtonBaseDir(robi_trivia_again_, en);
         SetButtonLabelText(robi_trivia_done_, en ? "Done" : "סיום");
+        SetButtonBaseDir(robi_trivia_done_, en);
     }
 
     void RobiUpdateMicGameMuteLocked() {
@@ -431,19 +465,27 @@
 
         const auto ph = trivia_.phase();
         const bool en = trivia_.english();
+        const bool h2h = trivia_.head_to_head();
 
         uint32_t ring_col = 0x00E5FF;
         if (ph == robi::TriviaEngine::Phase::kSummary) {
             ring_col = 0x10B981;
-        } else if (trivia_.head_to_head() && trivia_.CurrentPlayerIndex() == 1) {
+        } else if (h2h && trivia_.CurrentPlayerIndex() == 1) {
             ring_col = 0xF59E0B;
         }
         lv_obj_set_style_border_color(robi_trivia_box_, lv_color_hex(ring_col), 0);
+
+        SetLabelBaseDir(robi_trivia_hdr_, en);
+        SetLabelBaseDir(robi_trivia_score_, en);
+        SetLabelBaseDir(robi_trivia_q_, en);
 
         std::string hdr = trivia_.FormatHeaderText();
         lv_label_set_text(robi_trivia_hdr_, hdr.c_str());
 
         if (ph == robi::TriviaEngine::Phase::kLoading) {
+            lv_obj_align(robi_trivia_hdr_, LV_ALIGN_TOP_MID, 0, 34);
+            RobiSetHidden(robi_trivia_score_, true);
+            lv_obj_set_style_max_height(robi_trivia_q_, 160, 0);
             lv_obj_align(robi_trivia_q_, LV_ALIGN_CENTER, 0, -10);
             lv_label_set_text(robi_trivia_q_,
                               en ? "Robi is preparing\n8 fresh trivia questions..."
@@ -455,6 +497,9 @@
             RobiSetHidden(robi_trivia_done_, true);
             RobiSetHidden(robi_trivia_x_, false);
         } else if (ph == robi::TriviaEngine::Phase::kSummary) {
+            lv_obj_align(robi_trivia_hdr_, LV_ALIGN_TOP_MID, 0, 44);
+            RobiSetHidden(robi_trivia_score_, true);
+            lv_obj_set_style_max_height(robi_trivia_q_, 160, 0);
             lv_obj_align(robi_trivia_q_, LV_ALIGN_TOP_MID, 0, 118);
             std::string body = trivia_.FormatSummaryBody();
             lv_label_set_text(robi_trivia_q_, body.c_str());
@@ -465,16 +510,32 @@
             RobiSetHidden(robi_trivia_done_, false);
             RobiSetHidden(robi_trivia_x_, true);
         } else {
-            // kQuestion or kReveal
-            lv_obj_align(robi_trivia_q_, LV_ALIGN_TOP_MID, 0, 66);
+            // kQuestion or kReveal: strict non-overlapping row bands
+            lv_obj_align(robi_trivia_hdr_, LV_ALIGN_TOP_MID, 0, 22);
+            std::string sc_txt = trivia_.FormatScoreText();
+            if (h2h && !sc_txt.empty()) {
+                lv_label_set_text(robi_trivia_score_, sc_txt.c_str());
+                RobiSetHidden(robi_trivia_score_, false);
+                lv_obj_set_style_max_height(robi_trivia_q_, 90, 0);
+                lv_obj_align(robi_trivia_q_, LV_ALIGN_TOP_MID, 0, 94);
+            } else {
+                RobiSetHidden(robi_trivia_score_, true);
+                lv_obj_set_style_max_height(robi_trivia_q_, 106, 0);
+                lv_obj_align(robi_trivia_q_, LV_ALIGN_TOP_MID, 0, 66);
+            }
+
             const auto* cur = trivia_.CurrentQuestion();
             lv_label_set_text(robi_trivia_q_, cur ? cur->question.c_str() : "");
 
-            uint32_t idle_border = (trivia_.head_to_head() && trivia_.CurrentPlayerIndex() == 1)
-                                       ? 0xF59E0B
-                                       : 0x00E5FF;
+            uint32_t idle_border = (h2h && trivia_.CurrentPlayerIndex() == 1) ? 0xF59E0B : 0x00E5FF;
+            const int opt_y0 = h2h ? 188 : 174;
+            const int opt_pitch = h2h ? 50 : 52;
+            const int opt_h = h2h ? 44 : 46;
             for (int i = 0; i < 4; ++i) {
                 if (cur != nullptr && i < static_cast<int>(cur->options.size())) {
+                    lv_obj_set_height(robi_trivia_opts_[i], opt_h);
+                    lv_obj_align(robi_trivia_opts_[i], LV_ALIGN_TOP_MID, 0, opt_y0 + i * opt_pitch);
+                    SetButtonBaseDir(robi_trivia_opts_[i], en);
                     SetButtonLabelText(robi_trivia_opts_[i], cur->options[static_cast<size_t>(i)].c_str());
                     uint32_t bg_hex = 0x0B172E;
                     uint32_t bd_hex = idle_border;
@@ -945,10 +1006,10 @@
         if (scr == nullptr) return;
         lv_obj_add_event_cb(scr, OnScreenGesture, LV_EVENT_GESTURE, nullptr);
 
-        // 0. Home Screen Quick "משחקים" (Games) Pill Button at top center
-        robi_games_home_btn_ = RobiPillBtnPx(scr, "משחקים", 0x10B981, 132, 40,
+        // 0. Home Screen Quick "משחקים" (Games) Pill Button cleanly below kid buttons (zero overlap with top status bar!)
+        robi_games_home_btn_ = RobiPillBtnPx(scr, "משחקים", 0x10B981, 156, 42,
                                              OnHomeOpenArcadeBtn, nullptr);
-        lv_obj_align(robi_games_home_btn_, LV_ALIGN_TOP_MID, 0, 18);
+        lv_obj_align(robi_games_home_btn_, LV_ALIGN_BOTTOM_MID, 0, -56);
 
         // 1. Robi Arcade Main Menu (466x466 circular layout)
         robi_arcade_scr_ = lv_obj_create(scr);
@@ -1044,8 +1105,11 @@
         lv_obj_set_style_radius(robi_hu_ring_, LV_RADIUS_CIRCLE, 0);
 
         robi_hu_top_lbl_ = lv_label_create(robi_hu_stage_);
+        lv_label_set_long_mode(robi_hu_top_lbl_, LV_LABEL_LONG_CLIP);
+        lv_obj_set_size(robi_hu_top_lbl_, 256, 36);
+        lv_obj_set_style_text_align(robi_hu_top_lbl_, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_style_text_color(robi_hu_top_lbl_, lv_color_hex(0x38BDF8), 0);
-        lv_obj_align(robi_hu_top_lbl_, LV_ALIGN_TOP_MID, 0, 44);
+        lv_obj_align(robi_hu_top_lbl_, LV_ALIGN_TOP_MID, 0, 40);
 
         robi_hu_btn_x_ = RobiPillBtnPx(robi_hu_stage_, "X", 0x64748B, 52, 42, OnArcadeBack, nullptr);
         lv_obj_align(robi_hu_btn_x_, LV_ALIGN_TOP_MID, 0, 92);
@@ -1101,25 +1165,34 @@
         lv_obj_remove_flag(robi_trivia_box_, LV_OBJ_FLAG_SCROLLABLE);
 
         robi_trivia_hdr_ = lv_label_create(robi_trivia_box_);
-        lv_label_set_long_mode(robi_trivia_hdr_, LV_LABEL_LONG_DOT);
-        lv_obj_set_width(robi_trivia_hdr_, 256);
+        lv_label_set_long_mode(robi_trivia_hdr_, LV_LABEL_LONG_CLIP);
+        lv_obj_set_size(robi_trivia_hdr_, 244, 36);
         lv_obj_set_style_text_align(robi_trivia_hdr_, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_style_text_color(robi_trivia_hdr_, lv_color_hex(0xFBBF24), 0);
-        lv_obj_align(robi_trivia_hdr_, LV_ALIGN_TOP_MID, 0, 26);
+        lv_obj_align(robi_trivia_hdr_, LV_ALIGN_TOP_MID, 0, 22);
+
+        robi_trivia_score_ = lv_label_create(robi_trivia_box_);
+        lv_label_set_long_mode(robi_trivia_score_, LV_LABEL_LONG_CLIP);
+        lv_obj_set_size(robi_trivia_score_, 286, 34);
+        lv_obj_set_style_text_align(robi_trivia_score_, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_color(robi_trivia_score_, lv_color_hex(0x38BDF8), 0);
+        lv_obj_align(robi_trivia_score_, LV_ALIGN_TOP_MID, 0, 56);
+        lv_obj_add_flag(robi_trivia_score_, LV_OBJ_FLAG_HIDDEN);
 
         robi_trivia_q_ = lv_label_create(robi_trivia_box_);
         lv_label_set_long_mode(robi_trivia_q_, LV_LABEL_LONG_WRAP);
-        lv_obj_set_width(robi_trivia_q_, 336);
+        lv_obj_set_width(robi_trivia_q_, 344);
+        lv_obj_set_style_max_height(robi_trivia_q_, 92, 0);
         lv_obj_set_style_text_align(robi_trivia_q_, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_style_text_color(robi_trivia_q_, lv_color_hex(0xF8FAFC), 0);
-        lv_obj_align(robi_trivia_q_, LV_ALIGN_TOP_MID, 0, 66);
+        lv_obj_align(robi_trivia_q_, LV_ALIGN_TOP_MID, 0, 94);
 
-        const int opt_widths[4] = {348, 356, 348, 316};
+        const int opt_widths[4] = {348, 356, 344, 304};
         for (int i = 0; i < 4; ++i) {
             robi_trivia_opts_[i] = RobiPillBtnPx(
-                robi_trivia_box_, "", 0x00E5FF, opt_widths[i], 46, OnTriviaPickOption,
+                robi_trivia_box_, "", 0x00E5FF, opt_widths[i], 44, OnTriviaPickOption,
                 reinterpret_cast<void*>(static_cast<intptr_t>(i)));
-            lv_obj_align(robi_trivia_opts_[i], LV_ALIGN_TOP_MID, 0, 172 + i * 52);
+            lv_obj_align(robi_trivia_opts_[i], LV_ALIGN_TOP_MID, 0, 188 + i * 50);
         }
 
         robi_trivia_again_ = RobiPillBtnPx(robi_trivia_box_, "שוב!", 0x10B981, 144, 50,
@@ -1132,9 +1205,9 @@
         lv_obj_align(robi_trivia_done_, LV_ALIGN_TOP_MID, -80, 298);
         lv_obj_add_flag(robi_trivia_done_, LV_OBJ_FLAG_HIDDEN);
 
-        robi_trivia_x_ = RobiPillBtnPx(robi_trivia_box_, "X", 0x475569, 68, 38,
+        robi_trivia_x_ = RobiPillBtnPx(robi_trivia_box_, "X", 0x475569, 68, 36,
                                        OnTriviaClose, nullptr);
-        lv_obj_align(robi_trivia_x_, LV_ALIGN_TOP_MID, 0, 386);
+        lv_obj_align(robi_trivia_x_, LV_ALIGN_TOP_MID, 0, 392);
         lv_obj_add_flag(robi_trivia_box_, LV_OBJ_FLAG_HIDDEN);
 
         RobiRefreshGameLocaleLocked();

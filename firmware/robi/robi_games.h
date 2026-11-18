@@ -648,7 +648,7 @@ public:
         }
         if (phase_ == Phase::kLoading) {
             loading_ms_ += dt_ms;
-            if (loading_ms_ >= 5800) {
+            if (loading_ms_ >= 7200) {
                 ev.loading_timed_out = true;
             }
             return ev;
@@ -693,17 +693,26 @@ public:
         int q_tot = static_cast<int>(deck_.size());
         if (head_to_head_) {
             std::snprintf(buf, sizeof(buf),
-                          english_ ? "%d/%d %s | %s:%d %s:%d"
-                                   : "%d/%d %s • %s:%d %s:%d",
-                          q_num, q_tot, CurrentPlayerName().c_str(),
-                          player_names_[0].c_str(), scores_[0],
-                          player_names_[1].c_str(), scores_[1]);
+                          english_ ? "%s's Turn  •  %d/%d"
+                                   : "תור %s  •  %d/%d",
+                          CurrentPlayerName().c_str(), q_num, q_tot);
         } else {
             std::snprintf(buf, sizeof(buf),
                           english_ ? "Q %d/%d  •  Score: %d"
                                    : "שאלה %d/%d  •  ניקוד: %d",
                           q_num, q_tot, scores_[0]);
         }
+        return std::string(buf);
+    }
+
+    std::string FormatScoreText() const {
+        if (!head_to_head_ || phase_ == Phase::kLoading || phase_ == Phase::kSummary) {
+            return {};
+        }
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), "%s: %d   •   %s: %d",
+                      player_names_[0].c_str(), scores_[0],
+                      player_names_[1].c_str(), scores_[1]);
         return std::string(buf);
     }
 

@@ -565,8 +565,8 @@ private:
         bool has_buttons = (robi_profiles_ != nullptr);
         bool menu_open = RobiIsAnyMenuOpen();
 
-        float idle_scale = menu_open ? 0.84f : (has_buttons ? 0.96f : 1.06f);
-        float idle_fy = menu_open ? 148.0f : (has_buttons ? 196.0f : 228.0f);
+        float idle_scale = menu_open ? 0.84f : (has_buttons ? 0.88f : 0.98f);
+        float idle_fy = menu_open ? 148.0f : (has_buttons ? 180.0f : 204.0f);
         float tgt_scale = (robi_face_mode_ == robi::ROBI_MODE_IDLE) ? idle_scale : (voice_in ? 1.05f : 1.02f);
         float tgt_fy = (robi_face_mode_ == robi::ROBI_MODE_IDLE) ? idle_fy : 228.0f;
         float tgt_talk = (robi_face_mode_ == robi::ROBI_MODE_SPEAKING) ? 1.0f : 0.0f;
@@ -1238,7 +1238,7 @@ private:
             lv_obj_set_height(robi_profiles_, 54);
             lv_obj_set_flex_align(robi_profiles_, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
             lv_obj_set_style_pad_column(robi_profiles_, (n_kids == 3) ? 8 : 16, 0);
-            lv_obj_align(robi_profiles_, LV_ALIGN_BOTTOM_MID, 0, -62);
+            lv_obj_align(robi_profiles_, LV_ALIGN_BOTTOM_MID, 0, -108);
 
             for (size_t i = 0; i < n_kids; ++i) {
                 const auto& kid = cfg.kids[i];
@@ -1390,6 +1390,7 @@ private:
         out += ",\"visor\":" + rect_str(visor_bar_);
         out += ",\"mouth_mid\":" + rect_str(mouth_seg_[4]);
         out += ",\"profiles_box\":" + rect_str(robi_profiles_);
+        out += ",\"games_btn\":" + rect_str(robi_games_home_btn_);
         out += ",\"hint_pill\":" + rect_str(robi_setup_hint_);
         if (open_menu >= 0) {
             out += ",\"active_menu\":" + rect_str(robi_menus_[open_menu]);

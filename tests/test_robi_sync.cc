@@ -524,6 +524,7 @@ void TestSfxSynthAndGamesEngine() {
         slot_seen[q->correct_index] = true;
 
         // Lavi (even turns: 0,2,4,6) answers 3/4 right; Ori (odd turns: 1,3,5,7) answers 4/4 right!
+        assert(!tr.FormatScoreText().empty() && IsStrictlyValidUtf8(tr.FormatScoreText()));
         int pick = (qi == 2) ? ((q->correct_index + 1) % 4) : q->correct_index;
         assert(tr.SubmitAnswer(pick));
         assert(tr.phase() == robi::TriviaEngine::Phase::kReveal);
@@ -566,7 +567,7 @@ void TestSfxSynthAndGamesEngine() {
     tr.BeginLoading("חלל", false, "לביא", "אורי", false);
     assert(tr.phase() == robi::TriviaEngine::Phase::kLoading);
     bool timed_out = false;
-    for (int i = 0; i < 60; ++i) {
+    for (int i = 0; i < 75; ++i) {
         if (tr.Step(100).loading_timed_out) timed_out = true;
     }
     assert(timed_out);
