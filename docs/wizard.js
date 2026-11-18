@@ -606,7 +606,8 @@ export function buildConfigObject({ includeSecrets = true } = {}) {
     })),
   };
   if (includeSecrets) {
-    obj.gemini_key = state.gemini_key.trim();
+    const trimmedKey = state.gemini_key.trim();
+    obj.gemini_key = trimmedKey.length >= 20 ? trimmedKey : "__KEEP__";
     obj.wifi_ssid = state.wifi_ssid.trim();
     obj.wifi_pass = state.wifi_pass;
   }

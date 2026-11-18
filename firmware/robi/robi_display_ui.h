@@ -1022,6 +1022,11 @@ private:
         auto dev_state = app.GetDeviceState();
         if (dev_state == kDeviceStateListening) {
             if (auto* proto = GeminiLiveProtocol::GetActiveInstance()) {
+                if (proto->IsStreamingSpeech()) {
+                    ESP_LOGI(TAG, "Robi face tap in listening: committing active speech turn");
+                    proto->CommitListeningUtterance();
+                    return;
+                }
                 if (proto->CanExitListeningByTap()) {
                     ESP_LOGI(TAG, "Robi face tap in listening: return to standby");
                     app.ToggleChatState();

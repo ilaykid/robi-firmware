@@ -6,7 +6,7 @@ Usage:
 Key features:
 - 100% Zero-Server standalone architecture: connects directly from ESP32-S3 over TLS WebSocket
   to Google Gemini Live API (BidiGenerateContent) with uncompressed 16kHz in / 24kHz out PCM,
-  TCP_NODELAY + WMM QoS low-latency socket tuning, and a sample-synced 512 KB PSRAM jitter ring.
+  TCP_NODELAY low-latency socket tuning, and a sample-synced 512 KB PSRAM jitter ring.
 - On-device configuration via NVS ("robi_cfg") + WebSerial flash sector 0x010000 ("ROBICFG1"),
   so a single pre-built firmware binary works for everyone without compiling C++.
 - Built-in local Hebrew RTL Parent Management Portal (http://robi.local + LAN IP) with hot-reload
@@ -74,7 +74,7 @@ must_replace(
     "endif()\n",
     "if(NOT CMAKE_BUILD_EARLY_EXPANSION)\n"
     "    target_compile_options(${COMPONENT_LIB} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-std=gnu++23>)\n"
-    '    target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=esp_tls_conn_new_sync" "-Wl,--wrap=esp_tls_conn_read")\n'
+    '    target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=esp_tls_conn_new_sync" "-Wl,--wrap=esp_tls_conn_read" "-Wl,--wrap=esp_wifi_scan_start")\n'
     "endif()\n",
 )
 
@@ -84,14 +84,15 @@ extra = [
     "CONFIG_LV_USE_BIDI=y",
     "CONFIG_LV_BIDI_DIR_AUTO=y",
     "CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y",
-    "CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=4",
-    "CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=8",
-    "CONFIG_ESP_WIFI_RX_BA_WIN=4",
+    "CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=10",
+    "CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=32",
+    "CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=32",
+    "CONFIG_ESP_WIFI_RX_BA_WIN=6",
     "CONFIG_LWIP_MAX_SOCKETS=16",
-    "CONFIG_LWIP_TCP_WND_DEFAULT=24576",
-    "CONFIG_LWIP_TCP_SND_BUF_DEFAULT=12288",
-    "CONFIG_LWIP_TCP_RECVMBOX_SIZE=24",
-    "CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=24",
+    "CONFIG_LWIP_TCP_WND_DEFAULT=32768",
+    "CONFIG_LWIP_TCP_SND_BUF_DEFAULT=24576",
+    "CONFIG_LWIP_TCP_RECVMBOX_SIZE=32",
+    "CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=32",
 ]
 if wake == "heyrobby":
     extra += [
@@ -474,7 +475,7 @@ must_replace(
 )
 
 # 8. Firmware version
-version = os.environ.get("ROBI_VERSION", "3.1.1")
+version = os.environ.get("ROBI_VERSION", "3.1.2")
 must_replace(fw / "CMakeLists.txt", 'set(PROJECT_VER "2.5.2")', f'set(PROJECT_VER "{version}")')
 
 print("HeyRobi standalone patch completed successfully!")

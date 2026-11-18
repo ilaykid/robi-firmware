@@ -224,30 +224,69 @@ void TestAdaptiveSpeechTracker() {
         assert(!tracker.in_speech());
     }
 
-    // 4. Quiet bedroom (75 RMS) adapts noise floor down rapidly so soft child whisper (390 RMS) triggers cleanly
+    // 4. Real Waveshare 3D-enclosure telemetry (9..15 RMS ambient, 921 RMS speech) + soft 85 RMS speech
     {
         tracker.ResetSession();
-        for (int i = 0; i < 8; ++i) {
-            auto d = tracker.OnFrame(75.0f, 60);
-            assert(!d.in_speech);
+        for (int i = 0; i < 6; ++i) {
+            auto idle = tracker.OnFrame((i & 1) ? 15.0f : 9.0f, 60);
+            assert(!idle.in_speech && !idle.start_utterance);
         }
-        assert(tracker.noise_floor_rms() < 115.0f);
-        auto w1 = tracker.OnFrame(390.0f, 60);
+        assert(tracker.noise_floor_rms() <= 16.0f);
+        assert(tracker.current_onset_thresh() <= 70.0f);
+
+        // Even soft speech (85 RMS) triggers onset in 2 frames (120ms) and commits cleanly at 11 RMS
+        auto w1 = tracker.OnFrame(85.0f, 60);
         assert(!w1.start_utterance);
-        auto w2 = tracker.OnFrame(390.0f, 60);
+        auto w2 = tracker.OnFrame(95.0f, 60);
         assert(w2.start_utterance && w2.in_speech);
+
+        for (int i = 0; i < 6; ++i) {
+            auto d = tracker.OnFrame(140.0f, 60);
+            assert(d.in_speech && !d.commit_utterance);
+        }
         bool committed = false;
-        for (int i = 0; i < 12; ++i) {
-            if (tracker.OnFrame(80.0f, 60).commit_utterance) committed = true;
+        for (int i = 0; i < 10; ++i) {
+            if (tracker.OnFrame(11.0f, 60).commit_utterance) committed = true;
         }
         assert(committed);
     }
 
-    // 5. Extreme continuous background shouting (1800 RMS non-stop) hits 9.0s safety cap instead of hanging forever
+    // 5. Immediate speech on Frame #1 right after OGG_POPUP (360 RMS) triggers on Frame #2 (120ms)
+    {
+        tracker.ResetSession();
+        auto s1 = tracker.OnFrame(360.0f, 60);
+        assert(!s1.start_utterance);
+        auto s2 = tracker.OnFrame(380.0f, 60);
+        assert(s2.start_utterance && s2.in_speech);
+    }
+
+    // 6. Speech pre-gain normalizer boosts soft 200 RMS speech cleanly and leaves 2400 RMS untouched
+    {
+        std::vector<int16_t> quiet(160, 200);
+        for (size_t i = 0; i < quiet.size(); ++i) {
+            quiet[i] = (i & 1) ? 200 : -200;
+        }
+        float gain = 1.0f;
+        for (int f = 0; f < 6; ++f) {
+            std::fill(quiet.begin(), quiet.end(), static_cast<int16_t>(200));
+            for (size_t i = 0; i < quiet.size(); ++i) quiet[i] = (i & 1) ? 200 : -200;
+            robi::NormalizeSpeechPcm(quiet.data(), quiet.size(), 200.0f, gain);
+        }
+        assert(gain > 3.5f && gain <= 4.6f);
+        assert(std::abs(quiet[0]) >= 700 && std::abs(quiet[0]) <= 1000);
+
+        float loud_gain = 1.0f;
+        std::vector<int16_t> loud(160, 2400);
+        robi::NormalizeSpeechPcm(loud.data(), loud.size(), 2400.0f, loud_gain);
+        assert(loud_gain <= 1.01f);
+        assert(loud[0] == 2400);
+    }
+
+    // 7. Extreme continuous background shouting (1800 RMS non-stop) hits 8.0s safety cap instead of hanging forever
     {
         tracker.ResetSession();
         int cap_commits = 0;
-        for (int i = 0; i < 160; ++i) {  // 160 * 60ms = 9.6s
+        for (int i = 0; i < 145; ++i) {  // 145 * 60ms = 8.7s
             if (tracker.OnFrame(1800.0f, 60).commit_utterance) ++cap_commits;
         }
         assert(cap_commits == 1);

@@ -14,6 +14,7 @@
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <esp_tls.h>
+#include <esp_wifi.h>
 #include <mbedtls/base64.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -37,7 +38,7 @@ int __wrap_esp_tls_conn_new_sync(const char* hostname, int hostlen, int port,
     if (cfg != nullptr) {
         esp_tls_cfg_t patched = *cfg;
         if (patched.timeout_ms <= 0) {
-            patched.timeout_ms = 8000;
+            patched.timeout_ms = 5000;
         }
         rc = __real_esp_tls_conn_new_sync(hostname, hostlen, port, &patched, tls);
     } else {
@@ -48,11 +49,10 @@ int __wrap_esp_tls_conn_new_sync(const char* hostname, int hostlen, int port,
         if (esp_tls_get_conn_sockfd(tls, &sockfd) == ESP_OK && sockfd >= 0) {
             // Disable Nagle's algorithm so 64ms audio chunks, audioStreamEnd, and toolResponses
             // never stall 65-200ms waiting for a prior TCP ACK over WiFi.
+            // Note: Do NOT set IP_TOS = 0xA0 (CS5/WMM), which stalls/drops frames on home routers
+            // with QoS Map Supported = 0 on congested 2.4GHz channels.
             int nodelay = 1;
             setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
-            // Tag packets for 802.11e WMM low-latency Voice/Video queue on home routers.
-            int tos = 0xA0;
-            setsockopt(sockfd, IPPROTO_IP, IP_TOS, &tos, sizeof(tos));
         }
     }
     return rc;
@@ -81,9 +81,11 @@ constexpr EventBits_t kDoneAll = kDoneRx | kDoneTx | kDonePlay;
 
 constexpr size_t kPsramRingSamples = 262144;    // 512 KB = 10.92s @ 24kHz
 constexpr size_t kFallbackRingSamples = 48000;
-constexpr size_t kPreBufferSamples = 4800;      // 200ms @ 24kHz cushion before starting speaker
-constexpr size_t kRebufferSamples = 4800;       // 200ms @ 24kHz cushion if network stalls mid-turn
-constexpr size_t kPlaybackFrameSamples = 1200;  // 50ms @ 24kHz (divides 2400/4800 evenly)
+constexpr size_t kPreBufferStrongSamples = 10800;  // 450ms @ 24kHz cushion on good WiFi
+constexpr size_t kPreBufferWeakSamples = 16800;    // 700ms @ 24kHz cushion on weak WiFi (<-76 dBm)
+constexpr size_t kRebufferStrongSamples = 9600;    // 400ms @ 24kHz recovery cushion
+constexpr size_t kRebufferWeakSamples = 14400;     // 600ms @ 24kHz recovery cushion on weak WiFi
+constexpr size_t kPlaybackFrameSamples = 1200;     // 50ms @ 24kHz (divides 2400/4800/9600 evenly)
 constexpr size_t kUplinkBatchBytes = 2048;      // 64ms @ 16kHz int16
 constexpr int64_t kPostPlaybackGuardUs = 180000LL;  // 180ms OGG_POPUP / speaker room-reverb settle
 
@@ -103,6 +105,24 @@ std::string Base64Encode(const uint8_t* src, size_t len) {
     }
     out.resize(olen);
     return out;
+}
+
+bool IsWifiOnlineWithIp() {
+    auto& wm = WifiManager::GetInstance();
+    return wm.IsConnected() && !wm.GetIpAddress().empty();
+}
+
+bool WaitForWifiOnline(int max_wait_ms) {
+    if (IsWifiOnlineWithIp()) return true;
+    ESP_LOGW(TAG, "WiFi not connected when opening session; nudging reconnect (up to %d ms)", max_wait_ms);
+    esp_wifi_connect();
+    for (int waited = 0; waited < max_wait_ms; waited += 200) {
+        vTaskDelay(pdMS_TO_TICKS(200));
+        if (IsWifiOnlineWithIp()) {
+            return true;
+        }
+    }
+    return IsWifiOnlineWithIp();
 }
 
 }  // namespace
@@ -448,9 +468,9 @@ std::string GeminiLiveProtocol::BuildClientTurnJson(const std::string& text) {
     return out;
 }
 
-bool GeminiLiveProtocol::TryConnectModel(const std::string& api_key, const std::string& model_name,
-                                         const std::string& voice_name,
-                                         const std::string& lang_code, bool include_lang_code) {
+GeminiLiveProtocol::ConnectResult GeminiLiveProtocol::TryConnectModel(
+    const std::string& api_key, const std::string& model_name, const std::string& voice_name,
+    const std::string& lang_code, bool include_lang_code) {
     StopSessionInternal(false);
 
     stopping_.store(false);
@@ -469,12 +489,14 @@ bool GeminiLiveProtocol::TryConnectModel(const std::string& api_key, const std::
     idle_farewell_sent_ = false;
     last_activity_us_.store(boot_now_us);
     last_mic_rms_.store(0, std::memory_order_relaxed);
-    last_noise_floor_rms_.store(220, std::memory_order_relaxed);
+    peak_mic_rms_.store(0, std::memory_order_relaxed);
+    last_noise_floor_rms_.store(95, std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> ulk(uplink_mutex_);
         pre_roll_.clear();
         tx_pcm_batch_.clear();
         speech_tracker_.ResetSession();
+        speech_pre_gain_ = 1.0f;
     }
     {
         std::lock_guard<std::mutex> clk(client_turn_mutex_);
@@ -489,11 +511,16 @@ bool GeminiLiveProtocol::TryConnectModel(const std::string& api_key, const std::
     xEventGroupClearBits(event_group_, kEvtSetupComplete | kEvtWsClosed);
     xEventGroupClearBits(worker_done_group_, kDoneAll);
 
+    if (!IsWifiOnlineWithIp()) {
+        ESP_LOGW(TAG, "WiFi is disconnected; aborting TLS connect");
+        return ConnectResult::kNetworkUnreachable;
+    }
+
     auto network = Board::GetInstance().GetNetwork();
     websocket_ = network->CreateWebSocket(1);
     if (websocket_ == nullptr) {
         ESP_LOGE(TAG, "Failed to create WebSocket instance");
-        return false;
+        return ConnectResult::kNetworkUnreachable;
     }
 
     websocket_->OnData([this](const char* data, size_t len, bool binary) {
@@ -530,26 +557,12 @@ bool GeminiLiveProtocol::TryConnectModel(const std::string& api_key, const std::
         api_key;
 
     ESP_LOGI(TAG, "Connecting to Gemini Live (%s / %s)...", model_name.c_str(), voice_name.c_str());
-    bool ws_ok = false;
-    for (int attempt = 0; attempt < 2; ++attempt) {
-        if (WifiManager::GetInstance().GetIpAddress().empty()) {
-            ESP_LOGW(TAG, "WiFi has no IP address; aborting TLS connect");
-            break;
-        }
-        auto connected = websocket_->Connect(url.c_str());
-        if (connected) {
-            ws_ok = true;
-            break;
-        }
-        ESP_LOGW(TAG, "Connect attempt %d failed (%s): %s", attempt + 1, model_name.c_str(),
+    auto connected = websocket_->Connect(url.c_str());
+    if (!connected) {
+        ESP_LOGW(TAG, "TLS/WebSocket connect failed (%s): %s", model_name.c_str(),
                  connected.error().ToString().c_str());
-        if (attempt == 0) {
-            vTaskDelay(pdMS_TO_TICKS(250));
-        }
-    }
-    if (!ws_ok) {
         websocket_.reset();
-        return false;
+        return ConnectResult::kNetworkUnreachable;
     }
 
     ws_connected_.store(true);
@@ -562,7 +575,7 @@ bool GeminiLiveProtocol::TryConnectModel(const std::string& api_key, const std::
             xEventGroupSetBits(self->worker_done_group_, kDoneRx);
             vTaskDelete(nullptr);
         },
-        "gemini_rx", 16384, this, 3, rx_stack_, rx_tcb_);
+        "gemini_rx", 16384, this, 5, rx_stack_, rx_tcb_);
 
     tx_task_ = xTaskCreateStatic(
         [](void* arg) {
@@ -571,7 +584,7 @@ bool GeminiLiveProtocol::TryConnectModel(const std::string& api_key, const std::
             xEventGroupSetBits(self->worker_done_group_, kDoneTx);
             vTaskDelete(nullptr);
         },
-        "gemini_tx", 10240, this, 3, tx_stack_, tx_tcb_);
+        "gemini_tx", 10240, this, 4, tx_stack_, tx_tcb_);
 
     play_task_ = xTaskCreateStatic(
         [](void* arg) {
@@ -580,17 +593,17 @@ bool GeminiLiveProtocol::TryConnectModel(const std::string& api_key, const std::
             xEventGroupSetBits(self->worker_done_group_, kDonePlay);
             vTaskDelete(nullptr);
         },
-        "gemini_play", 10240, this, 4, play_stack_, play_tcb_);
+        "gemini_play", 10240, this, 6, play_stack_, play_tcb_);
 
     std::string setup_msg = BuildSetupJson(model_name, voice_name, lang_code, include_lang_code);
     if (!websocket_->Send(setup_msg)) {
         ESP_LOGW(TAG, "Failed to send Gemini setup message (%s)", model_name.c_str());
         StopSessionInternal(false);
-        return false;
+        return ConnectResult::kNetworkUnreachable;
     }
 
     EventBits_t bits = xEventGroupWaitBits(event_group_, kEvtSetupComplete | kEvtWsClosed, pdTRUE,
-                                           pdFALSE, pdMS_TO_TICKS(7500));
+                                           pdFALSE, pdMS_TO_TICKS(6000));
     if (bits & kEvtSetupComplete) {
         ESP_LOGI(TAG, "Gemini Live ready! (%s / %s)", model_name.c_str(), voice_name.c_str());
         {
@@ -608,13 +621,13 @@ bool GeminiLiveProtocol::TryConnectModel(const std::string& api_key, const std::
         channel_opened_.store(true);
         if (on_connected_) on_connected_();
         if (on_audio_channel_opened_) on_audio_channel_opened_();
-        return true;
+        return ConnectResult::kConnected;
     }
 
     ESP_LOGW(TAG, "Gemini setup did not complete for %s (bits=0x%x)", model_name.c_str(),
              static_cast<unsigned>(bits));
     StopSessionInternal(false);
-    return false;
+    return ConnectResult::kSetupRejected;
 }
 
 bool GeminiLiveProtocol::OpenAudioChannel() {
@@ -626,6 +639,11 @@ bool GeminiLiveProtocol::OpenAudioChannel() {
             msg += " או http://" + ip;
         }
         SetError(msg);
+        return false;
+    }
+
+    if (!WaitForWifiOnline(4000)) {
+        SetError("אין חיבור ל-WiFi כרגע — מנסה להתחבר מחדש...");
         return false;
     }
 
@@ -662,34 +680,57 @@ bool GeminiLiveProtocol::OpenAudioChannel() {
 
     int64_t now_us = esp_timer_get_time();
     bool tried_in_first_pass[3] = {false, false, false};
+    bool network_failed = false;
 
     for (const auto& c : ordered) {
         if (now_us < g_model_cooldown_until_us[c.idx].load(std::memory_order_relaxed)) {
             continue;
         }
         tried_in_first_pass[c.idx] = true;
-        if (TryConnectModel(cfg.gemini_key, c.model, cfg.voice, cfg.language, c.with_lang)) {
+        auto res = TryConnectModel(cfg.gemini_key, c.model, cfg.voice, cfg.language, c.with_lang);
+        if (res == ConnectResult::kConnected) {
             g_model_cooldown_until_us[c.idx].store(0, std::memory_order_relaxed);
             return true;
         }
-        if (WifiManager::GetInstance().GetIpAddress().empty()) {
+        if (res == ConnectResult::kNetworkUnreachable) {
+            // All 3 models share generativelanguage.googleapis.com:443 — do 1 fast retry,
+            // never burn 48s across 3 models or poison model cooldowns on a WiFi glitch!
+            if (IsWifiOnlineWithIp()) {
+                vTaskDelay(pdMS_TO_TICKS(350));
+                if (TryConnectModel(cfg.gemini_key, c.model, cfg.voice, cfg.language, c.with_lang) ==
+                    ConnectResult::kConnected) {
+                    g_model_cooldown_until_us[c.idx].store(0, std::memory_order_relaxed);
+                    return true;
+                }
+            }
+            network_failed = true;
             break;
         }
         g_model_cooldown_until_us[c.idx].store(esp_timer_get_time() + 600LL * 1000000LL,
                                                std::memory_order_relaxed);
     }
 
-    // Only retry candidates that were skipped due to a prior cooldown (never double-try one that just failed!)
-    if (!WifiManager::GetInstance().GetIpAddress().empty()) {
+    if (!network_failed && IsWifiOnlineWithIp()) {
         for (const auto& c : ordered) {
             if (tried_in_first_pass[c.idx]) continue;
             g_model_cooldown_until_us[c.idx].store(0, std::memory_order_relaxed);
-            if (TryConnectModel(cfg.gemini_key, c.model, cfg.voice, cfg.language, c.with_lang)) {
+            auto res = TryConnectModel(cfg.gemini_key, c.model, cfg.voice, cfg.language, c.with_lang);
+            if (res == ConnectResult::kConnected) {
                 return true;
+            }
+            if (res == ConnectResult::kNetworkUnreachable) {
+                network_failed = true;
+                break;
             }
             g_model_cooldown_until_us[c.idx].store(esp_timer_get_time() + 600LL * 1000000LL,
                                                    std::memory_order_relaxed);
         }
+    }
+
+    if (network_failed && WifiManager::GetInstance().IsConnected()) {
+        // L2 association is alive while L3/DNS/TLS to Google failed twice: refresh WiFi link cleanly
+        ESP_LOGW(TAG, "TLS host unreachable while STA associated; refreshing WiFi link");
+        esp_wifi_disconnect();
     }
 
     SetError(Lang::Strings::SERVER_NOT_CONNECTED);
@@ -734,12 +775,23 @@ void GeminiLiveProtocol::EnqueuePcm16k(const uint8_t* pcm_bytes, size_t byte_len
 }
 
 void GeminiLiveProtocol::EnqueueSilence16k(size_t duration_ms) {
+    if (stopping_.load() || !ws_connected_.load() || duration_ms == 0) return;
+    constexpr size_t kSilenceFrameBytes = 4800;  // 150ms @ 16kHz int16 (avoids 13-packet TLS burst)
     size_t total_bytes = (duration_ms * 16000 / 1000) * sizeof(int16_t);
-    std::vector<uint8_t> zeros(std::min<size_t>(total_bytes, kUplinkBatchBytes), 0);
+    std::vector<uint8_t> zeros(std::min<size_t>(total_bytes, kSilenceFrameBytes), 0);
     size_t rem = total_bytes;
     while (rem > 0) {
         size_t chunk = std::min(rem, zeros.size());
-        EnqueuePcm16k(zeros.data(), chunk);
+        std::string b64 = Base64Encode(zeros.data(), chunk);
+        if (!b64.empty()) {
+            std::string msg;
+            msg.reserve(b64.size() + 80);
+            msg += "{\"realtimeInput\":{\"audio\":{\"mimeType\":\"audio/pcm;rate=16000\",\"data\":\"";
+            msg += b64;
+            msg += "\"}}}";
+            tx_audio_packets_.fetch_add(1, std::memory_order_relaxed);
+            EnqueueTxJson(std::move(msg), /*is_audio=*/true);
+        }
         rem -= chunk;
     }
 }
@@ -757,6 +809,7 @@ bool GeminiLiveProtocol::CanExitListeningByTap() const {
 void GeminiLiveProtocol::FinishSpeechUtterance() {
     streaming_speech_.store(false);
     speech_tracker_.ResetTurn();
+    speech_pre_gain_ = 1.0f;
     pre_roll_.clear();
     if (!tx_pcm_batch_.empty()) {
         EnqueuePcm16k(tx_pcm_batch_.data(), tx_pcm_batch_.size());
@@ -773,9 +826,10 @@ void GeminiLiveProtocol::FinishSpeechUtterance() {
     awaiting_response_.store(true);
     awaiting_since_us_.store(esp_timer_get_time());
     awaiting_nudges_.store(0);
-    // Feed 800ms of pure zero-PCM digital silence (~2x silenceDurationMs=420ms) WITHOUT closing
-    // the audio stream via audioStreamEnd, so Google's automaticActivityDetection commits cleanly!
-    EnqueueSilence16k(800);
+    // Feed 750ms of pure zero-PCM digital silence (5 compact 150ms frames, ~1.8x silenceDurationMs=420ms)
+    // ONCE right after speech. Never send delayed audioStreamEnd or clientContent mid-generation,
+    // which caused Gemini to interrupt its own first answer and reply twice on weak WiFi!
+    EnqueueSilence16k(750);
     EmitEmotion("thinking");
 }
 
@@ -821,14 +875,20 @@ bool GeminiLiveProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
     float ac_rms = robi::RemoveDcAndComputeRms(samples, sample_count);
     uint32_t frame_ms = std::clamp<uint32_t>(
         static_cast<uint32_t>((sample_count * 1000u) / 16000u), 10u, 120u);
-    last_mic_rms_.store(static_cast<int>(ac_rms + 0.5f), std::memory_order_relaxed);
+    int rms_int = static_cast<int>(ac_rms + 0.5f);
+    last_mic_rms_.store(rms_int, std::memory_order_relaxed);
+    if (rms_int > peak_mic_rms_.load(std::memory_order_relaxed)) {
+        peak_mic_rms_.store(rms_int, std::memory_order_relaxed);
+    }
 
     if (listening_mode_ == kListeningModeManualStop) {
         if (!streaming_speech_.exchange(true)) {
             drop_turn_.store(false);
-            EnqueueSilence16k(180);
+            speech_pre_gain_ = 1.0f;
+            EnqueueSilence16k(150);
             EmitEmotion("listening");
         }
+        robi::NormalizeSpeechPcm(samples, sample_count, ac_rms, speech_pre_gain_);
         idle_farewell_sent_ = false;
         last_activity_us_.store(now_us);
         turn_uplink_pcm_bytes_.fetch_add(static_cast<uint32_t>(packet->payload.size()));
@@ -841,8 +901,8 @@ bool GeminiLiveProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
     }
 
     // Turn-framed adaptive speech engine (immune to Waveshare ES7210 +30dB self-noise & VAD_MODE_0):
-    // Buffers a rolling ~420ms pre-roll locally during silence, frames speech onset with 180ms of pure
-    // 0x0000 digital silence + pre-roll, and commits end-of-speech after 600ms quiet with 800ms of 0x0000 silence.
+    // Buffers a rolling ~420ms pre-roll locally during silence, normalizes attenuated 3D-enclosure speech,
+    // and commits end-of-speech after 600ms quiet with pure 0x0000 digital silence + audioStreamEnd backstop.
     auto speech_dec = speech_tracker_.OnFrame(ac_rms, frame_ms);
     last_noise_floor_rms_.store(static_cast<int>(speech_tracker_.noise_floor_rms() + 0.5f),
                                 std::memory_order_relaxed);
@@ -857,18 +917,24 @@ bool GeminiLiveProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
     }
 
     if (speech_dec.start_utterance) {
-        ESP_LOGI(TAG, "Speech onset (rms=%.0f, floor=%.0f, preroll=%u)",
+        ESP_LOGI(TAG, "Speech onset (rms=%.0f, floor=%.0f, thresh=%.0f, preroll=%u)",
                  static_cast<double>(ac_rms),
                  static_cast<double>(speech_tracker_.noise_floor_rms()),
+                 static_cast<double>(speech_tracker_.current_onset_thresh()),
                  static_cast<unsigned>(pre_roll_.size()));
         streaming_speech_.store(true);
         idle_farewell_sent_ = false;
         drop_turn_.store(false);
         last_activity_us_.store(now_us);
+        speech_pre_gain_ = 1.0f;
 
-        EnqueueSilence16k(180);
+        EnqueueSilence16k(150);
         tx_pcm_batch_.clear();
-        for (const auto& old_frame : pre_roll_) {
+        for (auto& old_frame : pre_roll_) {
+            if (old_frame.size() >= sizeof(int16_t)) {
+                robi::NormalizeSpeechPcm(reinterpret_cast<int16_t*>(old_frame.data()),
+                                         old_frame.size() / sizeof(int16_t), ac_rms, speech_pre_gain_);
+            }
             turn_uplink_pcm_bytes_.fetch_add(static_cast<uint32_t>(old_frame.size()));
             tx_pcm_batch_.insert(tx_pcm_batch_.end(), old_frame.begin(), old_frame.end());
             if (tx_pcm_batch_.size() >= kUplinkBatchBytes) {
@@ -879,6 +945,7 @@ bool GeminiLiveProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
         pre_roll_.clear();
     }
 
+    robi::NormalizeSpeechPcm(samples, sample_count, ac_rms, speech_pre_gain_);
     idle_farewell_sent_ = false;
     last_activity_us_.store(now_us);
     turn_uplink_pcm_bytes_.fetch_add(static_cast<uint32_t>(packet->payload.size()));
@@ -889,7 +956,7 @@ bool GeminiLiveProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
     }
 
     if (speech_dec.commit_utterance) {
-        ESP_LOGI(TAG, "Speech utterance complete -> committing 800ms silence (rms=%.0f, floor=%.0f)",
+        ESP_LOGI(TAG, "Speech utterance complete -> committing silence + stream-end (rms=%.0f, floor=%.0f)",
                  static_cast<double>(ac_rms),
                  static_cast<double>(speech_tracker_.noise_floor_rms()));
         FinishSpeechUtterance();
@@ -1021,6 +1088,8 @@ void GeminiLiveProtocol::SendStartListening(ListeningMode mode) {
     pre_roll_.clear();
     tx_pcm_batch_.clear();
     speech_tracker_.ResetTurn();
+    speech_pre_gain_ = 1.0f;
+    peak_mic_rms_.store(0, std::memory_order_relaxed);
     streaming_speech_.store(false);
     receiving_model_audio_.store(false);
     int64_t now_us = esp_timer_get_time();
@@ -1121,53 +1190,37 @@ void GeminiLiveProtocol::TxWorkerLoop() {
 
         int64_t now_us = esp_timer_get_time();
 
-        // 1. Multi-stage turn recovery while awaiting Gemini's spoken reply:
-        //    - At 0.95s (voice turn): feed 400ms of pure zero-PCM silence to advance server VAD clock.
-        //    - At 1.85s (voice turn): if inputTranscription arrived (Proactive Audio stayed silent),
-        //      force an immediate spoken reply via clientContent; otherwise flush silence + audioStreamEnd.
-        //    - At 2.8s (clientContent turn): send single clientContent retry nudge.
-        //    - At 4.8s: unlock back to Listening; if 2 consecutive turns time out, cooldown model & reconnect.
+        // 1. Safe turn recovery while awaiting Gemini's spoken reply (ZERO duplicate-turn triggers!):
+        //    - Never send audioStreamEnd or clientContent once inputTranscription has arrived (which
+        //      proves Google already committed endOfSpeech and is generating audio over weak WiFi!).
+        //    - Only if 3.2s pass with ZERO inputTranscription and ZERO audio, send one audioStreamEnd.
+        //    - Unlock cleanly at 6.5s if WiFi dropped the turn completely.
         if (awaiting_response_.load() && !receiving_model_audio_.load() &&
             !speaking_active_.load() && jitter_ring_.Available() == 0 && !stopping_.load()) {
             int64_t waited_us = now_us - awaiting_since_us_.load();
             int nudges = awaiting_nudges_.load();
 
             if (user_turn_had_speech_.load()) {
-                if (waited_us > 950000LL && nudges == 0) {
-                    if (awaiting_nudges_.exchange(1) == 0) {
-                        EnqueueSilence16k(400);
-                        continue;
+                if (waited_us > 3200000LL && nudges == 0 && tool_hold_until_us_.load() == 0) {
+                    bool has_input_tr = false;
+                    {
+                        std::lock_guard<std::mutex> lk(transcript_mutex_);
+                        has_input_tr = !pending_user_transcript_.empty();
                     }
-                } else if (waited_us > 1850000LL && nudges == 1 && tool_hold_until_us_.load() == 0) {
-                    if (awaiting_nudges_.exchange(2) == 1) {
-                        std::string peek_tr;
-                        {
-                            std::lock_guard<std::mutex> lk(transcript_mutex_);
-                            peek_tr = robi::CleanTranscriptText(pending_user_transcript_);
-                        }
-                        if (robi::HasMeaningfulSpeechText(peek_tr) && !silent_nudge_used_.exchange(true)) {
-                            user_turn_had_speech_.store(false);
-                            FlushPendingTranscripts();
-                            ESP_LOGW(TAG, "Proactive silence 1.85s after '%s' — forcing spoken reply",
-                                     peek_tr.c_str());
-                            EnqueueSilentTurnNudge(peek_tr);
-                            awaiting_nudges_.store(2);
-                        } else {
-                            ESP_LOGW(TAG, "No audio 1.85s after speech — sending stream-end flush");
-                            EnqueueSilence16k(320);
-                            EnqueueAudioStreamEnd();
-                        }
+                    if (!has_input_tr && awaiting_nudges_.exchange(1) == 0) {
+                        ESP_LOGW(TAG, "No inputTranscription after 3.2s — sending single stream-end flush");
+                        EnqueueAudioStreamEnd();
                         continue;
                     }
                 }
-            } else if (waited_us > 2800000LL && nudges == 0 && tool_hold_until_us_.load() == 0) {
+            } else if (waited_us > 3800000LL && nudges == 0 && tool_hold_until_us_.load() == 0) {
                 std::string retry_text;
                 {
                     std::lock_guard<std::mutex> clk(client_turn_mutex_);
                     retry_text = last_client_turn_text_;
                 }
                 if (!retry_text.empty() && awaiting_nudges_.exchange(2) == 0) {
-                    ESP_LOGW(TAG, "No audio 2.8s after clientContent — sending single retry nudge");
+                    ESP_LOGW(TAG, "No audio 3.8s after clientContent — sending single retry nudge");
                     awaiting_since_us_.store(now_us);
                     std::string payload = BuildClientTurnJson(retry_text);
                     if (!payload.empty()) {
@@ -1177,7 +1230,7 @@ void GeminiLiveProtocol::TxWorkerLoop() {
                 }
             }
 
-            if (waited_us > 4800000LL) {
+            if (waited_us > 6500000LL) {
                 int timeouts = consecutive_timeouts_.fetch_add(1) + 1;
                 ESP_LOGW(TAG, "Awaiting response timed out after %.1fs (consecutive=%d)",
                          static_cast<double>(waited_us) / 1000000.0, timeouts);
@@ -1442,19 +1495,31 @@ void GeminiLiveProtocol::PlaybackFeederLoop() {
     bool speaking_active = false;
     bool rebuffer_needed = false;
     int initial_burst_left = 0;
+    int64_t next_feed_us = 0;
     uint32_t active_gen = 0;
 
+    auto current_prebuffer_samples = []() -> size_t {
+        int rssi = WifiManager::GetInstance().GetRssi();
+        return (rssi != 0 && rssi < -76) ? kPreBufferWeakSamples : kPreBufferStrongSamples;
+    };
+    auto current_rebuffer_samples = []() -> size_t {
+        int rssi = WifiManager::GetInstance().GetRssi();
+        return (rssi != 0 && rssi < -76) ? kRebufferWeakSamples : kRebufferStrongSamples;
+    };
+
     while (!stopping_.load()) {
+        const size_t prebuf_target = current_prebuffer_samples();
+        const size_t rebuf_target = current_rebuffer_samples();
         size_t min_needed = speaking_active
-                                ? (rebuffer_needed ? kRebufferSamples : kPlaybackFrameSamples)
-                                : kPreBufferSamples;
+                                ? (rebuffer_needed ? rebuf_target : kPlaybackFrameSamples)
+                                : prebuf_target;
         jitter_ring_.WaitFor(std::chrono::milliseconds(30),
                              [this, min_needed, speaking_active](size_t ring_count) {
                                  if (stopping_.load() || !ws_connected_.load()) return true;
                                  if (drop_turn_.load()) return true;
                                  if (turn_complete_.load() && (speaking_active || ring_count > 0)) return true;
                                  if (ring_count > 0 &&
-                                     (esp_timer_get_time() - last_rx_audio_us_.load()) > 260000LL) {
+                                     (esp_timer_get_time() - last_rx_audio_us_.load()) > 1500000LL) {
                                      return true;
                                  }
                                  return ring_count >= min_needed;
@@ -1478,12 +1543,12 @@ void GeminiLiveProtocol::PlaybackFeederLoop() {
         size_t avail = jitter_ring_.Available();
         int64_t idle_rx_us = esp_timer_get_time() - last_rx_audio_us_.load();
         if (!speaking_active) {
-            if (avail >= kPreBufferSamples ||
-                ((turn_complete_.load() || idle_rx_us > 260000LL) && avail > 0)) {
+            if (avail >= prebuf_target ||
+                ((turn_complete_.load() || idle_rx_us > 1500000LL) && avail > 0)) {
                 speaking_active = true;
                 speaking_active_.store(true);
                 rebuffer_needed = false;
-                initial_burst_left = 3;  // Preload 150ms (3 * 50ms) into AudioService DMA queue
+                initial_burst_left = 4;  // Preload 200ms (4 * 50ms) into AudioService DMA queue
                 active_gen = turn_gen_.load();
                 awaiting_response_.store(false);
                 awaiting_nudges_.store(0);
@@ -1510,6 +1575,7 @@ void GeminiLiveProtocol::PlaybackFeederLoop() {
                         });
                     }
                 }
+                next_feed_us = esp_timer_get_time();
             } else {
                 int64_t now_chk_us = esp_timer_get_time();
                 int64_t th_until = tool_hold_until_us_.load();
@@ -1559,12 +1625,13 @@ void GeminiLiveProtocol::PlaybackFeederLoop() {
 
         avail = jitter_ring_.Available();
         idle_rx_us = esp_timer_get_time() - last_rx_audio_us_.load();
-        size_t pop_threshold = rebuffer_needed ? kRebufferSamples : kPlaybackFrameSamples;
+        size_t pop_threshold = rebuffer_needed ? rebuf_target : kPlaybackFrameSamples;
         if (avail >= pop_threshold ||
-            ((turn_complete_.load() || idle_rx_us > 260000LL) && avail > 0)) {
+            ((turn_complete_.load() || idle_rx_us > 1500000LL) && avail > 0)) {
             if (rebuffer_needed) {
                 rebuffer_needed = false;
-                initial_burst_left = 3;
+                initial_burst_left = 4;
+                next_feed_us = esp_timer_get_time();
             }
             size_t to_pop = std::min(kPlaybackFrameSamples, avail);
             size_t got = jitter_ring_.PopSamples(frame_buf.data(), to_pop);
@@ -1595,14 +1662,28 @@ void GeminiLiveProtocol::PlaybackFeederLoop() {
                     pkt->frame_duration = 0;
                     pkt->payload.resize(got * sizeof(int16_t));
                     std::memcpy(pkt->payload.data(), frame_buf.data(), pkt->payload.size());
-                    vTaskDelay(pdMS_TO_TICKS(16));
+                    vTaskDelay(pdMS_TO_TICKS(10));
                 }
 
+                // PLL-locked microsecond pacing: keeps ~200ms (4 frames) in AudioService DMA queue
+                // while holding bulk seconds of audio in our 512 KB PSRAM jitter_ring_ (saving SRAM!)
+                const int64_t frame_dur_us = (static_cast<int64_t>(got) * 1000000LL) / 24000LL;
                 if (initial_burst_left > 0) {
                     --initial_burst_left;
+                    next_feed_us = esp_timer_get_time() + frame_dur_us;
                 } else {
-                    // Feed 50ms frames every 46ms so AudioService stays gently cushioned without draining PSRAM ring
-                    vTaskDelay(pdMS_TO_TICKS(46));
+                    int64_t now_feed_us = esp_timer_get_time();
+                    if (now_feed_us < next_feed_us) {
+                        int64_t sleep_ms = (next_feed_us - now_feed_us) / 1000LL;
+                        if (sleep_ms >= 10) {
+                            vTaskDelay(pdMS_TO_TICKS(sleep_ms));
+                        }
+                    }
+                    next_feed_us += frame_dur_us;
+                    int64_t after_us = esp_timer_get_time();
+                    if (after_us - next_feed_us > 150000LL) {
+                        next_feed_us = after_us;
+                    }
                 }
             }
             continue;
