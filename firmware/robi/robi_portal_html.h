@@ -80,6 +80,12 @@ button{cursor:pointer;border:none;border-radius:12px;padding:11px 16px;font-weig
         </select>
       </div>
     </div>
+    <label>מצב הפעלה ואופי של רובי</label>
+    <select id="personaMode" onchange="toggleKidsVis()">
+      <option value="hybrid">משולב למשפחה — לחיצה על הפנים = עוזר אישי חכם, לחיצה על שם ילד = מצב ילדים (מומלץ!)</option>
+      <option value="kids">חבר ומשחקייה לילדים בלבד</option>
+      <option value="assistant">עוזר אישי שולחני למבוגר בלבד (ללא כפתורי ילדים על המסך)</option>
+    </select>
     <label>מודל Gemini Live מועדף</label>
     <select id="preferredModel">
       <option value="auto">אוטומטי חכם — Gemini 3.8 Live ראשי + גיבוי אוטומטי (מומלץ!)</option>
@@ -125,6 +131,8 @@ button{cursor:pointer;border:none;border-radius:12px;padding:11px 16px;font-weig
       <button type="button" class="btn-sec" onclick="testEmo('cool')">😎 מגניב</button>
       <button type="button" class="btn-sec" onclick="testEmo('loving')">🥰 אוהב</button>
       <button type="button" class="btn-sec" onclick="testEmo('thinking')">🤔 חושב</button>
+      <button type="button" class="btn-sec" onclick="testEmo('dizzy')">😵 סחרחורת</button>
+      <button type="button" class="btn-sec" style="border-color:var(--cyan);color:var(--cyan)" onclick="testEmo('arcade:open')">🎮 פתח משחקים על המסך</button>
     </div>
   </div>
 
@@ -138,7 +146,7 @@ button{cursor:pointer;border:none;border-radius:12px;padding:11px 16px;font-weig
     <div id="topicsWrap" style="margin-top:8px"></div>
   </div>
 
-  <div class="card">
+  <div class="card" id="kidsCard">
     <h2>👧👦 ילדים וכפתורי נושאים על המסך (עד 3 ילדים)</h2>
     <div style="color:var(--muted);font-size:.84rem;margin-bottom:8px">אפשר להשאיר ללא ילדים (לחיצה על הפנים של רובי לשיחה חופשית), או להוסיף עד 3 ילדים עם תחומי עניין וכפתורי פעילות מותאמים.</div>
     <div id="kidsWrap"></div>
@@ -428,11 +436,18 @@ function renderModelsAndQuota(st){
   }
 }
 
+function toggleKidsVis(){
+  const pm=document.getElementById('personaMode').value;
+  const kc=document.getElementById('kidsCard');
+  if(kc)kc.style.display=(pm==='assistant')?'none':'block';
+}
+
 async function saveAll(){
   const keyVal=document.getElementById('geminiKey').value.trim();
   const payload={
     bot_name:document.getElementById('botName').value.trim()||'רובי',
     gemini_key:keyVal?keyVal:'__KEEP__',
+    persona_mode:document.getElementById('personaMode').value||'hybrid',
     preferred_model:document.getElementById('preferredModel').value,
     voice:document.getElementById('voice').value,
     language:document.getElementById('language').value,
@@ -483,6 +498,7 @@ async function loadAll(){
     const cfg=await cr.json();
     const st=await sr.json();
     document.getElementById('botName').value=cfg.bot_name||'רובי';
+    document.getElementById('personaMode').value=cfg.persona_mode||((cfg.kids&&cfg.kids.length)?'hybrid':'assistant');
     document.getElementById('preferredModel').value=cfg.preferred_model||'auto';
     document.getElementById('voice').value=cfg.voice||'Puck';
     document.getElementById('language').value=cfg.language||'he-IL';
@@ -496,6 +512,7 @@ async function loadAll(){
     renderThemes();
     renderTopics();
     renderKids();
+    toggleKidsVis();
 
     const actMod=st.active_model||st.last_model||'מוכן';
     document.getElementById('statusBar').innerHTML=`

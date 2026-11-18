@@ -157,7 +157,10 @@ must_replace(
     '#include "assets/lang_config.h"\n'
     '#include "robi/robi_config.h"\n'
     '#include "robi/robi_face_math.h"\n'
-    '#include "robi/robi_gemini_live.h"\n',
+    '#include "robi/robi_games.h"\n'
+    '#include "robi/robi_gemini_live.h"\n'
+    '#include "robi/robi_imu.h"\n'
+    '#include "robi/robi_sfx.h"\n',
 )
 robi_ui = (Path(__file__).resolve().parent / "robi_ui.inc").read_text(encoding="utf-8")
 must_replace(
@@ -218,6 +221,28 @@ must_replace(
     "            }\n"
     "            return ESP_OK;\n"
     "        };\n",
+)
+must_replace(
+    board_cc,
+    "        InitializeAxp2101();\n",
+    "        InitializeAxp2101();\n"
+    "        robi::RobiImuService::GetInstance().Initialize(i2c_bus_);\n",
+)
+must_replace(
+    board_cc,
+    "            if (app.GetDeviceState() == kDeviceStateStarting) {\n"
+    "                EnterWifiConfigMode();\n"
+    "                return;\n"
+    "            }\n"
+    "            app.ToggleChatState();\n",
+    "            if (app.GetDeviceState() == kDeviceStateStarting) {\n"
+    "                EnterWifiConfigMode();\n"
+    "                return;\n"
+    "            }\n"
+    "            if (app.GetDeviceState() == kDeviceStateIdle) {\n"
+    "                RobiConfig::GetInstance().ActivateDefaultWakeScope();\n"
+    "            }\n"
+    "            app.ToggleChatState();\n",
 )
 
 # 4. WiFi provisioning import from 0x010000 + "Robi-XXXX" AP branding + clean port-80 handoff
@@ -345,12 +370,34 @@ must_replace(
 app_cc = fw / "main/application.cc"
 must_replace(
     app_cc,
+    "    if (state == kDeviceStateIdle) {\n"
+    "        if (!protocol_->IsAudioChannelOpened()) {\n",
+    "    if (state == kDeviceStateIdle) {\n"
+    "        if (auto* gp = GeminiLiveProtocol::GetActiveInstance()) {\n"
+    "            if (gp->IsAudioChannelOpened() &&\n"
+    "                gp->GetOpenedScope() != RobiConfig::GetInstance().GetActiveScope()) {\n"
+    "                gp->CloseAudioChannel(false);\n"
+    "            }\n"
+    "        }\n"
+    "        if (!protocol_->IsAudioChannelOpened()) {\n",
+)
+must_replace(
+    app_cc,
     "void Application::BeginWakeWordInvoke(const std::string& wake_word) {\n"
     "    // Must run in the main task with the device in idle state\n"
     "    audio_service_.EncodeWakeWord();\n",
     "void Application::BeginWakeWordInvoke(const std::string& wake_word) {\n"
     "    // Stop MultiNet7/AEC immediately before connecting and skip unused Opus wake-word encoding\n"
-    "    audio_service_.EnableWakeWordDetection(false);\n",
+    "    audio_service_.EnableWakeWordDetection(false);\n"
+    "    if (robi::IsWakeWordToken(wake_word)) {\n"
+    "        RobiConfig::GetInstance().ActivateDefaultWakeScope();\n"
+    "    }\n"
+    "    if (auto* gp = GeminiLiveProtocol::GetActiveInstance()) {\n"
+    "        if (gp->IsAudioChannelOpened() &&\n"
+    "            gp->GetOpenedScope() != RobiConfig::GetInstance().GetActiveScope()) {\n"
+    "            gp->CloseAudioChannel(false);\n"
+    "        }\n"
+    "    }\n",
 )
 must_replace(
     app_cc,
@@ -475,7 +522,7 @@ must_replace(
 )
 
 # 8. Firmware version
-version = os.environ.get("ROBI_VERSION", "3.1.2")
+version = os.environ.get("ROBI_VERSION", "3.2.0")
 must_replace(fw / "CMakeLists.txt", 'set(PROJECT_VER "2.5.2")', f'set(PROJECT_VER "{version}")')
 
 print("HeyRobi standalone patch completed successfully!")

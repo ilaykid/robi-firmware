@@ -1,5 +1,7 @@
 #include "robi_gemini_live.h"
 #include "robi_config.h"
+#include "robi_face_math.h"
+#include "robi_games.h"
 #include "robi_utf8.h"
 
 #include "application.h"
@@ -92,6 +94,8 @@ constexpr int64_t kPostPlaybackGuardUs = 180000LL;  // 180ms OGG_POPUP / speaker
 std::atomic<int64_t> g_model_cooldown_until_us[3] = {{0}, {0}, {0}};
 std::mutex g_last_model_mutex;
 std::string g_last_connected_model;
+std::string g_fast_rest_model;
+std::atomic<uint32_t> g_trivia_round_counter{0};
 GeminiLiveProtocol* g_active_protocol = nullptr;
 
 std::string Base64Encode(const uint8_t* src, size_t len) {
@@ -123,6 +127,176 @@ bool WaitForWifiOnline(int max_wait_ms) {
         }
     }
     return IsWifiOnlineWithIp();
+}
+
+std::string DiscoverActiveFlashModel(const std::string& api_key) {
+    auto network = Board::GetInstance().GetNetwork();
+    auto http = network ? network->CreateHttp(0) : nullptr;
+    if (!http) return {};
+    std::string url =
+        "https://generativelanguage.googleapis.com/v1beta/models?pageSize=40&key=" + api_key;
+    std::string best_name;
+    int best_score = -1;
+    if (auto opened = http->Open("GET", url); opened) {
+        auto sc = http->GetStatusCode();
+        if (sc && *sc == 200) {
+            std::string raw = http->ReadAll();
+            cJSON* rj = cJSON_ParseWithLength(raw.data(), raw.size());
+            if (rj) {
+                const cJSON* models = cJSON_GetObjectItemCaseSensitive(rj, "models");
+                if (cJSON_IsArray(models)) {
+                    const cJSON* m = nullptr;
+                    cJSON_ArrayForEach(m, models) {
+                        const cJSON* nm = cJSON_GetObjectItemCaseSensitive(m, "name");
+                        const cJSON* methods = cJSON_GetObjectItemCaseSensitive(m, "supportedGenerationMethods");
+                        if (!cJSON_IsString(nm) || !nm->valuestring || !cJSON_IsArray(methods)) continue;
+                        bool supports_gen = false;
+                        const cJSON* mt = nullptr;
+                        cJSON_ArrayForEach(mt, methods) {
+                            if (cJSON_IsString(mt) && mt->valuestring &&
+                                std::strcmp(mt->valuestring, "generateContent") == 0) {
+                                supports_gen = true;
+                                break;
+                            }
+                        }
+                        if (!supports_gen) continue;
+                        std::string id = nm->valuestring;
+                        if (id.rfind("models/", 0) == 0) id = id.substr(7);
+                        if (id.find("gemini-") != 0) continue;
+                        if (id.find("live") != std::string::npos ||
+                            id.find("audio") != std::string::npos ||
+                            id.find("tts") != std::string::npos ||
+                            id.find("image") != std::string::npos ||
+                            id.find("embedding") != std::string::npos ||
+                            id.find("vision") != std::string::npos) {
+                            continue;
+                        }
+                        int score = 10;
+                        if (id.find("flash") != std::string::npos) score += 100;
+                        if (id.find("lite") != std::string::npos) score += 20;
+                        if (id.find("gemini-4") == 0) score += 60;
+                        else if (id.find("gemini-3") == 0) score += 45;
+                        else if (id.find("gemini-2") == 0) score -= 40;
+                        if (id.find("latest") != std::string::npos) score += 15;
+                        if (id.find("preview") != std::string::npos || id.find("exp") != std::string::npos) {
+                            score -= 10;
+                        }
+                        if (score > best_score || (score == best_score && id > best_name)) {
+                            best_score = score;
+                            best_name = id;
+                        }
+                    }
+                }
+                cJSON_Delete(rj);
+            }
+        } else {
+            ESP_LOGW(TAG, "ListModels discovery HTTP status=%d", sc ? *sc : -1);
+        }
+        http->Close();
+    }
+    if (!best_name.empty()) {
+        ESP_LOGI(TAG, "Auto-discovered active Gemini Flash REST model: %s", best_name.c_str());
+    }
+    return best_name;
+}
+
+bool CallGeminiFastRestGenerate(const std::string& api_key, const std::string& req_body,
+                                const char* purpose, std::string& text_out) {
+    text_out.clear();
+    if (api_key.empty() || !IsWifiOnlineWithIp()) return false;
+
+    std::vector<std::string> candidates;
+    {
+        std::lock_guard<std::mutex> lk(g_last_model_mutex);
+        if (!g_fast_rest_model.empty()) {
+            candidates.push_back(g_fast_rest_model);
+        }
+    }
+    static const char* const kDefaults[] = {
+        "gemini-3.5-flash-lite",
+        "gemini-flash-latest",
+        "gemini-3.8-flash",
+        "gemini-3.6-flash",
+    };
+    for (const char* d : kDefaults) {
+        if (std::find(candidates.begin(), candidates.end(), d) == candidates.end()) {
+            candidates.emplace_back(d);
+        }
+    }
+
+    auto try_one = [&](const std::string& model_id, int& status_out) -> bool {
+        status_out = -1;
+        auto network = Board::GetInstance().GetNetwork();
+        auto http = network ? network->CreateHttp(0) : nullptr;
+        if (!http) return false;
+        http->SetHeader("Content-Type", "application/json");
+        http->SetContent(std::string(req_body));
+        std::string url = "https://generativelanguage.googleapis.com/v1beta/models/" +
+                          model_id + ":generateContent?key=" + api_key;
+        bool ok = false;
+        if (auto opened = http->Open("POST", url); opened) {
+            auto sc = http->GetStatusCode();
+            status_out = sc ? *sc : -1;
+            if (status_out == 200) {
+                std::string raw = http->ReadAll();
+                cJSON* rj = cJSON_ParseWithLength(raw.data(), raw.size());
+                if (rj) {
+                    const cJSON* cands = cJSON_GetObjectItemCaseSensitive(rj, "candidates");
+                    const cJSON* cand0 = cJSON_IsArray(cands) ? cJSON_GetArrayItem(cands, 0) : nullptr;
+                    const cJSON* cont = cand0 ? cJSON_GetObjectItemCaseSensitive(cand0, "content") : nullptr;
+                    const cJSON* rparts = cont ? cJSON_GetObjectItemCaseSensitive(cont, "parts") : nullptr;
+                    if (cJSON_IsArray(rparts)) {
+                        const cJSON* rp = nullptr;
+                        cJSON_ArrayForEach(rp, rparts) {
+                            if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(rp, "thought"))) {
+                                continue;
+                            }
+                            const cJSON* txt = cJSON_GetObjectItemCaseSensitive(rp, "text");
+                            if (cJSON_IsString(txt) && txt->valuestring != nullptr) {
+                                text_out += txt->valuestring;
+                            }
+                        }
+                    }
+                    cJSON_Delete(rj);
+                }
+                if (!text_out.empty()) {
+                    std::lock_guard<std::mutex> lk(g_last_model_mutex);
+                    g_fast_rest_model = model_id;
+                    ESP_LOGI(TAG, "%s OK on %s (%u bytes)", purpose, model_id.c_str(),
+                             static_cast<unsigned>(text_out.size()));
+                    ok = true;
+                }
+            } else {
+                ESP_LOGW(TAG, "%s HTTP status=%d on %s", purpose, status_out, model_id.c_str());
+            }
+            http->Close();
+        } else {
+            ESP_LOGW(TAG, "%s HTTP open failed on %s", purpose, model_id.c_str());
+        }
+        return ok;
+    };
+
+    bool saw_404 = false;
+    for (const auto& m : candidates) {
+        int st = -1;
+        if (try_one(m, st)) return true;
+        if (st == 404) {
+            saw_404 = true;
+        } else if (st == -1) {
+            // Network/TLS unreachable: don't burn multiple TLS timeouts
+            return false;
+        }
+    }
+
+    if (saw_404) {
+        std::string disc = DiscoverActiveFlashModel(api_key);
+        if (!disc.empty() &&
+            std::find(candidates.begin(), candidates.end(), disc) == candidates.end()) {
+            int st = -1;
+            if (try_one(disc, st)) return true;
+        }
+    }
+    return false;
 }
 
 }  // namespace
@@ -201,6 +375,11 @@ int GeminiLiveProtocol::GetLiveVoiceLevel(int64_t now_us) const {
 std::string GeminiLiveProtocol::GetActiveModel() const {
     std::lock_guard<std::mutex> lk(model_mutex_);
     return active_model_;
+}
+
+std::string GeminiLiveProtocol::GetOpenedScope() const {
+    std::lock_guard<std::mutex> lk(model_mutex_);
+    return opened_scope_;
 }
 
 std::string GeminiLiveProtocol::GetLastConnectedModel() {
@@ -325,7 +504,8 @@ void GeminiLiveProtocol::HandleFatalSocketError(const char* reason) {
 std::string GeminiLiveProtocol::BuildSetupJson(const std::string& model_name,
                                                const std::string& voice_name,
                                                const std::string& lang_code,
-                                               bool include_lang_code) const {
+                                               bool include_lang_code,
+                                               bool include_google_search) const {
     std::string sys_prompt = RobiConfig::GetInstance().BuildSystemPrompt();
 
     cJSON* root = cJSON_CreateObject();
@@ -414,7 +594,7 @@ std::string GeminiLiveProtocol::BuildSetupJson(const std::string& model_name,
         cJSON_AddStringToObject(fn, "name", "save_memory");
         cJSON_AddStringToObject(
             fn, "description",
-            "Save a short note (up to 200 chars) ONLY when discovering a meaningful new personal fact about the child (family, friends, hobbies, curiosities, fears) or reaching a story chapter milestone. Do NOT call on routine math/quiz answers. Call AFTER finishing your spoken reply.");
+            "Save a short note (up to 200 chars) ONLY when discovering a meaningful new personal fact or preference, or reaching a story chapter milestone. Do NOT call on routine math/quiz answers. Call AFTER finishing your spoken reply.");
         cJSON* params = cJSON_CreateObject();
         cJSON_AddStringToObject(params, "type", "OBJECT");
         cJSON* props = cJSON_CreateObject();
@@ -430,6 +610,123 @@ std::string GeminiLiveProtocol::BuildSetupJson(const std::string& model_name,
         cJSON_AddItemToArray(fdecls, fn);
     }
 
+    {
+        cJSON* fn = cJSON_CreateObject();
+        cJSON_AddStringToObject(fn, "name", "start_trivia_game");
+        cJSON_AddStringToObject(
+            fn, "description",
+            "Launch an interactive 8-question touch trivia game on Robi's round AMOLED screen when the user asks by voice to play trivia on any topic. Pass 8 fun, accurate 4-option questions.");
+        cJSON* params = cJSON_CreateObject();
+        cJSON_AddStringToObject(params, "type", "OBJECT");
+        cJSON* props = cJSON_CreateObject();
+
+        cJSON* top_prop = cJSON_CreateObject();
+        cJSON_AddStringToObject(top_prop, "type", "STRING");
+        cJSON_AddStringToObject(top_prop, "description", "Short trivia topic title");
+        cJSON_AddItemToObject(props, "topic", top_prop);
+
+        cJSON* h2h_prop = cJSON_CreateObject();
+        cJSON_AddStringToObject(h2h_prop, "type", "BOOLEAN");
+        cJSON_AddStringToObject(h2h_prop, "description", "true for 2-player head-to-head battle, false for solo");
+        cJSON_AddItemToObject(props, "head_to_head", h2h_prop);
+
+        cJSON* qs_prop = cJSON_CreateObject();
+        cJSON_AddStringToObject(qs_prop, "type", "ARRAY");
+        cJSON_AddStringToObject(qs_prop, "description", "8 multiple-choice trivia questions with 4 short options each");
+        cJSON* q_item = cJSON_CreateObject();
+        cJSON_AddStringToObject(q_item, "type", "OBJECT");
+        cJSON* q_props = cJSON_CreateObject();
+
+        cJSON* qq = cJSON_CreateObject();
+        cJSON_AddStringToObject(qq, "type", "STRING");
+        cJSON_AddStringToObject(qq, "description", "Concise trivia question (up to 75 chars)");
+        cJSON_AddItemToObject(q_props, "question", qq);
+
+        cJSON* qo = cJSON_CreateObject();
+        cJSON_AddStringToObject(qo, "type", "ARRAY");
+        cJSON_AddStringToObject(qo, "description", "4 short answer labels (1-3 words each)");
+        cJSON* qo_it = cJSON_CreateObject();
+        cJSON_AddStringToObject(qo_it, "type", "STRING");
+        cJSON_AddItemToObject(qo, "items", qo_it);
+        cJSON_AddItemToObject(q_props, "options", qo);
+
+        cJSON* qc = cJSON_CreateObject();
+        cJSON_AddStringToObject(qc, "type", "INTEGER");
+        cJSON_AddStringToObject(qc, "description", "0-based index of the correct option (0..3)");
+        cJSON_AddItemToObject(q_props, "correct_index", qc);
+
+        cJSON_AddItemToObject(q_item, "properties", q_props);
+        cJSON* q_req = cJSON_CreateArray();
+        cJSON_AddItemToArray(q_req, cJSON_CreateString("question"));
+        cJSON_AddItemToArray(q_req, cJSON_CreateString("options"));
+        cJSON_AddItemToArray(q_req, cJSON_CreateString("correct_index"));
+        cJSON_AddItemToObject(q_item, "required", q_req);
+        cJSON_AddItemToObject(qs_prop, "items", q_item);
+        cJSON_AddItemToObject(props, "questions", qs_prop);
+
+        cJSON_AddItemToObject(params, "properties", props);
+        cJSON* req = cJSON_CreateArray();
+        cJSON_AddItemToArray(req, cJSON_CreateString("topic"));
+        cJSON_AddItemToArray(req, cJSON_CreateString("questions"));
+        cJSON_AddItemToObject(params, "required", req);
+        cJSON_AddItemToObject(fn, "parameters", params);
+        cJSON_AddItemToArray(fdecls, fn);
+    }
+
+    {
+        cJSON* fn = cJSON_CreateObject();
+        cJSON_AddStringToObject(fn, "name", "start_heads_up_round");
+        cJSON_AddStringToObject(
+            fn, "description",
+            "Launch a 60-second 'Heads Up' forehead tilt game on Robi's screen using 12-18 generated words on the requested topic. Call right before saying a short 1-sentence kickoff.");
+        cJSON* params = cJSON_CreateObject();
+        cJSON_AddStringToObject(params, "type", "OBJECT");
+        cJSON* props = cJSON_CreateObject();
+
+        cJSON* top_prop = cJSON_CreateObject();
+        cJSON_AddStringToObject(top_prop, "type", "STRING");
+        cJSON_AddStringToObject(top_prop, "description", "Short topic title");
+        cJSON_AddItemToObject(props, "topic", top_prop);
+
+        cJSON* w_prop = cJSON_CreateObject();
+        cJSON_AddStringToObject(w_prop, "type", "ARRAY");
+        cJSON_AddStringToObject(w_prop, "description", "12 to 18 fun recognizable words for forehead charades");
+        cJSON* w_item = cJSON_CreateObject();
+        cJSON_AddStringToObject(w_item, "type", "STRING");
+        cJSON_AddItemToObject(w_prop, "items", w_item);
+        cJSON_AddItemToObject(props, "words", w_prop);
+
+        cJSON_AddItemToObject(params, "properties", props);
+        cJSON* req = cJSON_CreateArray();
+        cJSON_AddItemToArray(req, cJSON_CreateString("topic"));
+        cJSON_AddItemToArray(req, cJSON_CreateString("words"));
+        cJSON_AddItemToObject(params, "required", req);
+        cJSON_AddItemToObject(fn, "parameters", params);
+        cJSON_AddItemToArray(fdecls, fn);
+    }
+
+    {
+        cJSON* fn = cJSON_CreateObject();
+        cJSON_AddStringToObject(fn, "name", "web_search");
+        cJSON_AddStringToObject(
+            fn, "description",
+            "Search Google in real time for live weather, sports scores, current events, dates, holidays, prices, or up-to-date facts.");
+        cJSON* params = cJSON_CreateObject();
+        cJSON_AddStringToObject(params, "type", "OBJECT");
+        cJSON* props = cJSON_CreateObject();
+        cJSON* q_prop = cJSON_CreateObject();
+        cJSON_AddStringToObject(q_prop, "type", "STRING");
+        cJSON_AddStringToObject(q_prop, "description", "Focused Google search query");
+        cJSON_AddItemToObject(props, "query", q_prop);
+        cJSON_AddItemToObject(params, "properties", props);
+        cJSON* req = cJSON_CreateArray();
+        cJSON_AddItemToArray(req, cJSON_CreateString("query"));
+        cJSON_AddItemToObject(params, "required", req);
+        cJSON_AddItemToObject(fn, "parameters", params);
+        cJSON_AddItemToArray(fdecls, fn);
+    }
+
+    (void)include_google_search;
     cJSON_AddItemToObject(tools_obj, "functionDeclarations", fdecls);
     cJSON_AddItemToArray(tools_arr, tools_obj);
     cJSON_AddItemToObject(setup, "tools", tools_arr);
@@ -470,7 +767,7 @@ std::string GeminiLiveProtocol::BuildClientTurnJson(const std::string& text) {
 
 GeminiLiveProtocol::ConnectResult GeminiLiveProtocol::TryConnectModel(
     const std::string& api_key, const std::string& model_name, const std::string& voice_name,
-    const std::string& lang_code, bool include_lang_code) {
+    const std::string& lang_code, bool include_lang_code, bool include_google_search) {
     StopSessionInternal(false);
 
     stopping_.store(false);
@@ -479,6 +776,7 @@ GeminiLiveProtocol::ConnectResult GeminiLiveProtocol::TryConnectModel(
     turn_complete_.store(false);
     close_after_turn_.store(false);
     ResetTurnRuntimeFlags();
+    server_ack_received_.store(false);
     silent_nudge_used_.store(false);
     consecutive_timeouts_.store(0);
     awaiting_since_us_.store(0);
@@ -595,7 +893,8 @@ GeminiLiveProtocol::ConnectResult GeminiLiveProtocol::TryConnectModel(
         },
         "gemini_play", 10240, this, 6, play_stack_, play_tcb_);
 
-    std::string setup_msg = BuildSetupJson(model_name, voice_name, lang_code, include_lang_code);
+    std::string setup_msg =
+        BuildSetupJson(model_name, voice_name, lang_code, include_lang_code, include_google_search);
     if (!websocket_->Send(setup_msg)) {
         ESP_LOGW(TAG, "Failed to send Gemini setup message (%s)", model_name.c_str());
         StopSessionInternal(false);
@@ -605,10 +904,12 @@ GeminiLiveProtocol::ConnectResult GeminiLiveProtocol::TryConnectModel(
     EventBits_t bits = xEventGroupWaitBits(event_group_, kEvtSetupComplete | kEvtWsClosed, pdTRUE,
                                            pdFALSE, pdMS_TO_TICKS(6000));
     if (bits & kEvtSetupComplete) {
-        ESP_LOGI(TAG, "Gemini Live ready! (%s / %s)", model_name.c_str(), voice_name.c_str());
+        ESP_LOGI(TAG, "Gemini Live ready! (%s / %s, search=%d)", model_name.c_str(),
+                 voice_name.c_str(), include_google_search ? 1 : 0);
         {
             std::lock_guard<std::mutex> lk(model_mutex_);
             active_model_ = model_name;
+            opened_scope_ = RobiConfig::GetInstance().GetActiveScope();
         }
         {
             std::lock_guard<std::mutex> lk(g_last_model_mutex);
@@ -687,7 +988,7 @@ bool GeminiLiveProtocol::OpenAudioChannel() {
             continue;
         }
         tried_in_first_pass[c.idx] = true;
-        auto res = TryConnectModel(cfg.gemini_key, c.model, cfg.voice, cfg.language, c.with_lang);
+        auto res = TryConnectModel(cfg.gemini_key, c.model, cfg.voice, cfg.language, c.with_lang, false);
         if (res == ConnectResult::kConnected) {
             g_model_cooldown_until_us[c.idx].store(0, std::memory_order_relaxed);
             return true;
@@ -714,7 +1015,7 @@ bool GeminiLiveProtocol::OpenAudioChannel() {
         for (const auto& c : ordered) {
             if (tried_in_first_pass[c.idx]) continue;
             g_model_cooldown_until_us[c.idx].store(0, std::memory_order_relaxed);
-            auto res = TryConnectModel(cfg.gemini_key, c.model, cfg.voice, cfg.language, c.with_lang);
+            auto res = TryConnectModel(cfg.gemini_key, c.model, cfg.voice, cfg.language, c.with_lang, false);
             if (res == ConnectResult::kConnected) {
                 return true;
             }
@@ -756,6 +1057,17 @@ void GeminiLiveProtocol::EnqueueTxJson(std::string&& json_str, bool is_audio) {
         tx_queue_.push_back(std::move(json_str));
     }
     tx_cv_.notify_one();
+}
+
+void GeminiLiveProtocol::PurgeQueuedClientContent() {
+    std::lock_guard<std::mutex> lk(tx_mutex_);
+    for (auto it = tx_queue_.begin(); it != tx_queue_.end();) {
+        if (it->find("\"clientContent\"") != std::string::npos) {
+            it = tx_queue_.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 void GeminiLiveProtocol::EnqueuePcm16k(const uint8_t* pcm_bytes, size_t byte_len) {
@@ -818,6 +1130,7 @@ void GeminiLiveProtocol::FinishSpeechUtterance() {
     drop_turn_.store(false);
     turn_downlink_samples_.store(0);
     user_turn_had_speech_.store(true);
+    server_ack_received_.store(false);
     silent_nudge_used_.store(false);
     {
         std::lock_guard<std::mutex> clk(client_turn_mutex_);
@@ -846,6 +1159,13 @@ bool GeminiLiveProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
     }
     auto& app = Application::GetInstance();
     if (app.GetDeviceState() != kDeviceStateListening) {
+        return true;
+    }
+
+    // Mute microphone uplink while interactive touch games (Trivia / Heads-Up) are on screen
+    // so family room cheering/shouting never triggers parallel voice turns!
+    if (robi::RobiGameHub::GetInstance().IsMicMutedForScreenGame()) {
+        streaming_speech_.store(false);
         return true;
     }
 
@@ -975,6 +1295,7 @@ void GeminiLiveProtocol::EnqueueClientTextTurn(const std::string& text) {
     turn_complete_.store(false);
     turn_downlink_samples_.store(0);
     user_turn_had_speech_.store(false);
+    server_ack_received_.store(false);
     awaiting_response_.store(true);
     awaiting_since_us_.store(now_us);
     awaiting_nudges_.store(0);
@@ -986,6 +1307,7 @@ void GeminiLiveProtocol::EnqueueClientTextTurn(const std::string& text) {
     RobiConfig::GetInstance().AddDialogueTurn("user", clean_text);
     EmitEmotion("thinking");
 
+    PurgeQueuedClientContent();
     std::string payload = BuildClientTurnJson(clean_text);
     if (!payload.empty()) {
         EnqueueTxJson(std::move(payload));
@@ -1001,6 +1323,7 @@ void GeminiLiveProtocol::EnqueueSilentTurnNudge(const std::string& user_text) {
     turn_complete_.store(false);
     turn_downlink_samples_.store(0);
     user_turn_had_speech_.store(false);
+    server_ack_received_.store(false);
     awaiting_response_.store(true);
     awaiting_since_us_.store(now_us);
     awaiting_nudges_.store(1);
@@ -1028,6 +1351,13 @@ bool GeminiLiveProtocol::InjectUserPromptTurn(const std::string& text) {
     if (text.empty()) return false;
     Application::GetInstance().Schedule([this, text]() {
         auto& app = Application::GetInstance();
+        std::string desired_scope = RobiConfig::GetInstance().GetActiveScope();
+        if (app.GetDeviceState() != kDeviceStateIdle && IsAudioChannelOpened() &&
+            GetOpenedScope() != desired_scope) {
+            ESP_LOGI(TAG, "Persona scope changed (%s -> %s): reopening Gemini Live session",
+                     GetOpenedScope().c_str(), desired_scope.c_str());
+            CloseAudioChannel(false);
+        }
         if (app.GetDeviceState() == kDeviceStateIdle || !IsAudioChannelOpened()) {
             app.WakeWordInvoke(text);
         } else {
@@ -1038,6 +1368,24 @@ bool GeminiLiveProtocol::InjectUserPromptTurn(const std::string& text) {
         }
     });
     return true;
+}
+
+void GeminiLiveProtocol::CancelPendingTurnAudio() {
+    PurgeQueuedClientContent();
+    auto& app = Application::GetInstance();
+    if (app.GetDeviceState() == kDeviceStateSpeaking) {
+        app.AbortSpeaking(kAbortReasonNone);
+        return;
+    }
+    if (speaking_active_.load() || receiving_model_audio_.load() ||
+        awaiting_response_.load() || jitter_ring_.Available() > 0) {
+        turn_gen_.fetch_add(1);
+        drop_turn_.store(true);
+        turn_complete_.store(false);
+        ResetTurnRuntimeFlags();
+        jitter_ring_.Clear();
+        jitter_ring_.NotifyAll();
+    }
 }
 
 bool GeminiLiveProtocol::SimulateMicUtterance(int duration_ms) {
@@ -1115,6 +1463,7 @@ void GeminiLiveProtocol::SendStopListening() {
 
 void GeminiLiveProtocol::SendAbortSpeaking(AbortReason reason) {
     (void)reason;
+    PurgeQueuedClientContent();
     turn_gen_.fetch_add(1);
     drop_turn_.store(true);
     turn_complete_.store(false);
@@ -1213,30 +1562,18 @@ void GeminiLiveProtocol::TxWorkerLoop() {
                         continue;
                     }
                 }
-            } else if (waited_us > 3800000LL && nudges == 0 && tool_hold_until_us_.load() == 0) {
-                std::string retry_text;
-                {
-                    std::lock_guard<std::mutex> clk(client_turn_mutex_);
-                    retry_text = last_client_turn_text_;
-                }
-                if (!retry_text.empty() && awaiting_nudges_.exchange(2) == 0) {
-                    ESP_LOGW(TAG, "No audio 3.8s after clientContent — sending single retry nudge");
-                    awaiting_since_us_.store(now_us);
-                    std::string payload = BuildClientTurnJson(retry_text);
-                    if (!payload.empty()) {
-                        EnqueueTxJson(std::move(payload));
-                    }
-                    continue;
-                }
             }
+            // Note: Never re-send clientContent over an open TCP/TLS WebSocket; TCP guarantees
+            // reliable ordered delivery, and re-sending caused Gemini to speak questions twice!
 
-            if (waited_us > 6500000LL) {
+            if (waited_us > 11000000LL) {
                 int timeouts = consecutive_timeouts_.fetch_add(1) + 1;
                 ESP_LOGW(TAG, "Awaiting response timed out after %.1fs (consecutive=%d)",
                          static_cast<double>(waited_us) / 1000000.0, timeouts);
                 awaiting_response_.store(false);
                 awaiting_nudges_.store(0);
                 user_turn_had_speech_.store(false);
+                server_ack_received_.store(false);
                 tool_hold_until_us_.store(0);
                 if (timeouts >= 2) {
                     CooldownModelByName(GetActiveModel(), 600);
@@ -1252,6 +1589,7 @@ void GeminiLiveProtocol::TxWorkerLoop() {
         // 3. Periodic 90s idle farewell check while channel is sitting quiet in Listening
         int64_t idle_us = now_us - last_activity_us_.load();
         if (!idle_farewell_sent_ && channel_opened_.load() && !awaiting_response_.load() &&
+            !robi::RobiGameHub::GetInstance().IsMicMutedForScreenGame() &&
             Application::GetInstance().GetDeviceState() == kDeviceStateListening &&
             idle_us > 90LL * 1000000LL) {
             idle_farewell_sent_ = true;
@@ -1311,6 +1649,7 @@ void GeminiLiveProtocol::RxWorkerLoop() {
         const cJSON* tool_call = cJSON_GetObjectItemCaseSensitive(msg, "toolCall");
         if (cJSON_IsObject(tool_call)) {
             consecutive_timeouts_.store(0);
+            server_ack_received_.store(true);
             HandleToolCalls(tool_call);
         }
 
@@ -1320,10 +1659,24 @@ void GeminiLiveProtocol::RxWorkerLoop() {
             continue;
         }
         consecutive_timeouts_.store(0);
+        server_ack_received_.store(true);
 
         if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(sc, "interrupted"))) {
             if (listening_mode_ != kListeningModeRealtime) {
-                ESP_LOGI(TAG, "Ignoring server-side interrupted flag in turn-based mode");
+                if (awaiting_response_.load() && !speaking_active_.load()) {
+                    // Flush any residual chunks from a previously-aborted turn right at Google's
+                    // interruption boundary so the new clientContent response starts 100% clean!
+                    jitter_ring_.Clear();
+                    {
+                        std::lock_guard<std::mutex> lk(transcript_mutex_);
+                        pending_bot_transcript_.clear();
+                    }
+                    clause_buf.clear();
+                    clause_had_emoji = false;
+                    last_emo.clear();
+                } else {
+                    ESP_LOGI(TAG, "Ignoring server-side interrupted flag in turn-based mode");
+                }
                 cJSON_Delete(msg);
                 continue;
             }
@@ -1793,16 +2146,96 @@ void GeminiLiveProtocol::HandleToolCalls(const cJSON* tool_call) {
             close_after_turn_.store(true);
             cJSON_AddStringToObject(res_obj, "result", "session_will_close_after_turn");
         } else if (name == "save_memory") {
-            if (!speaking_active_.load() && turn_downlink_samples_.load() == 0) {
+            bool already_spoke = speaking_active_.load() || receiving_model_audio_.load() ||
+                                 turn_downlink_samples_.load() > 0;
+            if (!already_spoke) {
                 expect_continuation = true;
             }
             const cJSON* n = args ? cJSON_GetObjectItemCaseSensitive(args, "note") : nullptr;
             if (cJSON_IsString(n) && n->valuestring != nullptr) {
                 RobiConfig::GetInstance().AddMemoryNote(n->valuestring);
-                cJSON_AddStringToObject(res_obj, "result", "saved");
+                cJSON_AddStringToObject(res_obj, "result",
+                                        already_spoke ? "saved_silently_turn_already_spoken" : "saved");
             } else {
                 cJSON_AddStringToObject(res_obj, "result", "ignored");
             }
+        } else if (name == "start_trivia_game") {
+            expect_continuation = true;
+            robi::VoiceTriviaStartCmd cmd;
+            const cJSON* top = args ? cJSON_GetObjectItemCaseSensitive(args, "topic") : nullptr;
+            if (cJSON_IsString(top) && top->valuestring != nullptr) {
+                cmd.topic = top->valuestring;
+            }
+            const cJSON* h2h = args ? cJSON_GetObjectItemCaseSensitive(args, "head_to_head") : nullptr;
+            if (cJSON_IsBool(h2h)) {
+                cmd.head_to_head = cJSON_IsTrue(h2h);
+            }
+            const cJSON* qs = args ? cJSON_GetObjectItemCaseSensitive(args, "questions") : nullptr;
+            if (cJSON_IsArray(qs)) {
+                const cJSON* qit = nullptr;
+                cJSON_ArrayForEach(qit, qs) {
+                    if (cmd.questions.size() >= 10) break;
+                    if (!cJSON_IsObject(qit)) continue;
+                    robi::TriviaQuestionItem item;
+                    const cJSON* qstr = cJSON_GetObjectItemCaseSensitive(qit, "question");
+                    if (cJSON_IsString(qstr) && qstr->valuestring != nullptr) {
+                        item.question = robi::Utf8SafeTruncate(qstr->valuestring, 115);
+                    }
+                    const cJSON* oarr = cJSON_GetObjectItemCaseSensitive(qit, "options");
+                    if (cJSON_IsArray(oarr)) {
+                        const cJSON* o = nullptr;
+                        cJSON_ArrayForEach(o, oarr) {
+                            if (item.options.size() >= 4) break;
+                            if (cJSON_IsString(o) && o->valuestring != nullptr && o->valuestring[0] != '\0') {
+                                item.options.push_back(robi::Utf8SafeTruncate(o->valuestring, 36));
+                            }
+                        }
+                    }
+                    const cJSON* ci = cJSON_GetObjectItemCaseSensitive(qit, "correct_index");
+                    if (cJSON_IsNumber(ci)) {
+                        item.correct_index = ci->valueint;
+                    }
+                    if (!item.question.empty() && item.options.size() >= 2) {
+                        cmd.questions.push_back(std::move(item));
+                    }
+                }
+            }
+            std::string first_q = (cmd.questions.size() >= 4) ? cmd.questions[0].question : "";
+            robi::RobiGameHub::GetInstance().SetMicMutedForScreenGame(true);
+            robi::RobiGameHub::GetInstance().QueueVoiceTriviaStart(std::move(cmd));
+            if (!first_q.empty()) {
+                std::string instr =
+                    "Trivia card #1/8 is now live on Robi's screen! Enthusiastically read ONLY Question #1 aloud in ONE short sentence without revealing the answer: " +
+                    first_q;
+                cJSON_AddStringToObject(res_obj, "result", instr.c_str());
+            } else {
+                cJSON_AddStringToObject(res_obj, "result",
+                                        "trivia_deck_loading_give_a_1_sentence_cheerful_kickoff");
+            }
+        } else if (name == "start_heads_up_round") {
+            if (!speaking_active_.load() && turn_downlink_samples_.load() == 0) {
+                expect_continuation = true;
+            }
+            close_after_turn_.store(true);
+            std::string topic;
+            const cJSON* top = args ? cJSON_GetObjectItemCaseSensitive(args, "topic") : nullptr;
+            if (cJSON_IsString(top) && top->valuestring != nullptr) {
+                topic = top->valuestring;
+            }
+            std::vector<std::string> words;
+            const cJSON* w_arr = args ? cJSON_GetObjectItemCaseSensitive(args, "words") : nullptr;
+            if (cJSON_IsArray(w_arr)) {
+                const cJSON* w = nullptr;
+                cJSON_ArrayForEach(w, w_arr) {
+                    if (words.size() >= 25) break;
+                    if (cJSON_IsString(w) && w->valuestring != nullptr && w->valuestring[0] != '\0') {
+                        words.emplace_back(w->valuestring);
+                    }
+                }
+            }
+            robi::RobiGameHub::GetInstance().QueueCustomHeadsUp(topic, words);
+            cJSON_AddStringToObject(res_obj, "result",
+                                    "round_queued_say_one_short_kickoff_sentence_now");
         } else {
             expect_continuation = true;
             if (name == "set_volume") {
@@ -1830,6 +2263,55 @@ void GeminiLiveProtocol::HandleToolCalls(const cJSON* tool_call) {
             } else if (name == "get_device_status") {
                 std::string st = Board::GetInstance().GetDeviceStatusJson();
                 cJSON_AddStringToObject(res_obj, "status", st.c_str());
+            } else if (name == "web_search") {
+                EmitEmotion("thinking");
+                const cJSON* q_it = args ? cJSON_GetObjectItemCaseSensitive(args, "query") : nullptr;
+                std::string query = (cJSON_IsString(q_it) && q_it->valuestring != nullptr)
+                                        ? robi::Utf8SafeTruncate(q_it->valuestring, 180)
+                                        : "";
+                std::string answer;
+                auto cfg = RobiConfig::GetInstance().Get();
+                if (!query.empty() && !cfg.gemini_key.empty() && IsWifiOnlineWithIp()) {
+                    cJSON* s_root = cJSON_CreateObject();
+                    cJSON* contents = cJSON_CreateArray();
+                    cJSON* c0 = cJSON_CreateObject();
+                    cJSON* parts = cJSON_CreateArray();
+                    cJSON* p0 = cJSON_CreateObject();
+                    std::string full_q =
+                        (cfg.language == "en-US")
+                            ? (query + " (Give a concise, factual, up-to-date summary in 2-3 sentences.)")
+                            : (query + " (תן סיכום עובדתי עדכני, מדויק וקצר בעברית ב-2 עד 3 משפטים.)");
+                    cJSON_AddStringToObject(p0, "text", full_q.c_str());
+                    cJSON_AddItemToArray(parts, p0);
+                    cJSON_AddItemToObject(c0, "parts", parts);
+                    cJSON_AddItemToArray(contents, c0);
+                    cJSON_AddItemToObject(s_root, "contents", contents);
+
+                    cJSON* s_tools = cJSON_CreateArray();
+                    cJSON* gs = cJSON_CreateObject();
+                    cJSON_AddItemToObject(gs, "google_search", cJSON_CreateObject());
+                    cJSON_AddItemToArray(s_tools, gs);
+                    cJSON_AddItemToObject(s_root, "tools", s_tools);
+
+                    cJSON* gcfg = cJSON_CreateObject();
+                    cJSON_AddNumberToObject(gcfg, "maxOutputTokens", 320);
+                    cJSON_AddNumberToObject(gcfg, "temperature", 0.1);
+                    cJSON_AddItemToObject(s_root, "generationConfig", gcfg);
+
+                    char* req_str = cJSON_PrintUnformatted(s_root);
+                    std::string req_body = req_str ? req_str : "{}";
+                    if (req_str) cJSON_free(req_str);
+                    cJSON_Delete(s_root);
+
+                    CallGeminiFastRestGenerate(cfg.gemini_key, req_body, "web_search", answer);
+                }
+                answer = robi::Utf8SafeTruncate(answer, 900);
+                if (!answer.empty()) {
+                    cJSON_AddStringToObject(res_obj, "search_results", answer.c_str());
+                } else {
+                    cJSON_AddStringToObject(res_obj, "search_results",
+                                            "Live search unavailable right now; answer briefly from general knowledge.");
+                }
             } else {
                 cJSON_AddStringToObject(res_obj, "result", "unknown_tool");
             }
@@ -1861,4 +2343,174 @@ void GeminiLiveProtocol::HandleToolCalls(const cJSON* tool_call) {
         cJSON_free(printed);
     }
     cJSON_Delete(root);
+}
+
+void GeminiLiveProtocol::RequestAsyncAiTriviaDeck(uint32_t req_id, const std::string& topic_desc,
+                                                  bool head_to_head, bool english) {
+    struct AsyncDeckReq {
+        uint32_t req_id;
+        std::string topic_desc;
+        bool head_to_head;
+        bool english;
+    };
+    auto* ctx = new AsyncDeckReq{req_id, topic_desc, head_to_head, english};
+    if (xTaskCreate(
+            [](void* arg) {
+                std::unique_ptr<AsyncDeckReq> req(static_cast<AsyncDeckReq*>(arg));
+                std::vector<robi::TriviaQuestionItem> parsed_items;
+
+                auto cfg = RobiConfig::GetInstance().Get();
+                if (!cfg.gemini_key.empty() && IsWifiOnlineWithIp()) {
+                    std::string audience;
+                    if (cfg.persona_mode != "assistant" && !cfg.kids.empty()) {
+                        for (size_t i = 0; i < cfg.kids.size(); ++i) {
+                            if (i > 0) audience += ", ";
+                            audience += cfg.kids[i].name + " (age " + std::to_string(cfg.kids[i].age) + ")";
+                        }
+                    } else {
+                        audience = req->english ? "smart family & adults" : "משפחה ומבוגרים";
+                    }
+
+                    const uint32_t rnd_num =
+                        g_trivia_round_counter.fetch_add(1) +
+                        static_cast<uint32_t>(esp_timer_get_time() & 0xFFFFu);
+                    static const char* const kAnglesHe[] = {
+                        "שיאי עולם מדהימים ועובדות מפתיעות",
+                        "שאלות טריקיות ומפתיעות שלא שואלים בדרך כלל",
+                        "סיפורים מרתקים, המצאות ותגליות",
+                        "זיהוי לפי רמזים קצרים ומקוריים",
+                        "השוואות מפתיעות (הכי גדול, הכי מהיר, הכי עתיק)",
+                        "עובדות שכיף לספר לחברים בבית ספר",
+                    };
+                    static const char* const kAnglesEn[] = {
+                        "amazing world records and surprising facts",
+                        "clever less-common twists and fun surprises",
+                        "cool inventions, discoveries, and records",
+                        "short creative clue-based questions",
+                        "surprising comparisons (fastest, oldest, biggest)",
+                        "fun mind-blowing facts kids love sharing",
+                    };
+                    const char* angle = req->english
+                                            ? kAnglesEn[rnd_num % (sizeof(kAnglesEn) / sizeof(kAnglesEn[0]))]
+                                            : kAnglesHe[rnd_num % (sizeof(kAnglesHe) / sizeof(kAnglesHe[0]))];
+
+                    auto recent_qs = robi::RobiGameHub::GetInstance().GetRecentTriviaQuestions(14);
+                    std::string avoid_block;
+                    if (!recent_qs.empty()) {
+                        avoid_block = req->english ? "\nDO NOT repeat or paraphrase any of these recent questions: "
+                                                   : "\nאל תחזור ואל תשאל שאלות דומות לאלו שכבר נשאלו לאחרונה: ";
+                        for (size_t i = 0; i < recent_qs.size(); ++i) {
+                            if (i > 0) avoid_block += " | ";
+                            avoid_block += recent_qs[i];
+                        }
+                    }
+
+                    std::string prompt;
+                    if (req->english) {
+                        prompt =
+                            "Generate a JSON array of 8 fresh, creative, factually accurate multiple-choice trivia questions in English about: " +
+                            req->topic_desc + ". Creative angle for Round #" + std::to_string(rnd_num) + ": " + angle +
+                            ". Audience: " + audience +
+                            ". Return ONLY a compact JSON array with this exact schema: "
+                            "[{\"q\":\"Short question max 48 chars?\",\"o\":[\"Right answer\",\"Wrong 2\",\"Wrong 3\",\"Wrong 4\"],\"c\":0}]. "
+                            "Rules: 4 short button options per question (1-3 words, max 18 chars each), c is the 0-based index of the 100% factually correct option." +
+                            avoid_block;
+                    } else {
+                        prompt =
+                            "צור מערך JSON קומפקטי של 8 שאלות טריוויה חדשות, מקוריות, מפתיעות ומדויקות בעברית תקנית בנושא: " +
+                            req->topic_desc + ". זווית מיוחדת לסיבוב #" + std::to_string(rnd_num) + ": " + angle +
+                            ". מותאם עבור: " + audience +
+                            ". החזר אך ורק מערך JSON תקין במבנה: "
+                            "[{\"q\":\"שאלה קצרה עד 46 תווים?\",\"o\":[\"תשובה נכונה\",\"מסיח 2\",\"מסיח 3\",\"מסיח 4\"],\"c\":0}]. "
+                            "חוקים: בדיוק 4 אפשרויות קצרות בכל שאלה (1 עד 3 מילים, עד 18 תווים לכפתור), ודא עובדתית שהתשובה באינדקס c נכונה ב-100%, גוון והימנע משאלות בנאליות." +
+                            avoid_block;
+                    }
+
+                    cJSON* jroot = cJSON_CreateObject();
+                    cJSON* contents = cJSON_CreateArray();
+                    cJSON* c0 = cJSON_CreateObject();
+                    cJSON* parts = cJSON_CreateArray();
+                    cJSON* p0 = cJSON_CreateObject();
+                    cJSON_AddStringToObject(p0, "text", prompt.c_str());
+                    cJSON_AddItemToArray(parts, p0);
+                    cJSON_AddItemToObject(c0, "parts", parts);
+                    cJSON_AddItemToArray(contents, c0);
+                    cJSON_AddItemToObject(jroot, "contents", contents);
+
+                    cJSON* gcfg = cJSON_CreateObject();
+                    cJSON_AddStringToObject(gcfg, "responseMimeType", "application/json");
+                    cJSON_AddNumberToObject(gcfg, "temperature", 0.95);
+                    cJSON_AddNumberToObject(gcfg, "maxOutputTokens", 3072);
+                    cJSON_AddItemToObject(jroot, "generationConfig", gcfg);
+
+                    char* body_c = cJSON_PrintUnformatted(jroot);
+                    std::string body = body_c ? body_c : "{}";
+                    if (body_c) cJSON_free(body_c);
+                    cJSON_Delete(jroot);
+
+                    std::string json_txt;
+                    if (CallGeminiFastRestGenerate(cfg.gemini_key, body, "AI trivia", json_txt)) {
+                        size_t lb = json_txt.find('[');
+                        size_t rb = json_txt.rfind(']');
+                        if (lb != std::string::npos && rb != std::string::npos && rb > lb) {
+                            std::string slice = json_txt.substr(lb, rb - lb + 1);
+                            cJSON* arr = cJSON_ParseWithLength(slice.data(), slice.size());
+                            if (cJSON_IsArray(arr)) {
+                                const cJSON* it = nullptr;
+                                cJSON_ArrayForEach(it, arr) {
+                                    if (parsed_items.size() >= 8) break;
+                                    if (!cJSON_IsObject(it)) continue;
+                                    robi::TriviaQuestionItem qi;
+                                    const cJSON* qf = cJSON_GetObjectItemCaseSensitive(it, "q");
+                                    if (!qf) qf = cJSON_GetObjectItemCaseSensitive(it, "question");
+                                    if (cJSON_IsString(qf) && qf->valuestring != nullptr) {
+                                        qi.question = robi::Utf8SafeTruncate(qf->valuestring, 115);
+                                    }
+                                    const cJSON* of = cJSON_GetObjectItemCaseSensitive(it, "o");
+                                    if (!of) of = cJSON_GetObjectItemCaseSensitive(it, "options");
+                                    if (cJSON_IsArray(of)) {
+                                        const cJSON* opt = nullptr;
+                                        cJSON_ArrayForEach(opt, of) {
+                                            if (qi.options.size() >= 4) break;
+                                            if (cJSON_IsString(opt) && opt->valuestring != nullptr &&
+                                                opt->valuestring[0] != '\0') {
+                                                qi.options.push_back(robi::Utf8SafeTruncate(opt->valuestring, 36));
+                                            }
+                                        }
+                                    }
+                                    const cJSON* cf = cJSON_GetObjectItemCaseSensitive(it, "c");
+                                    if (!cf) cf = cJSON_GetObjectItemCaseSensitive(it, "correct_index");
+                                    if (cJSON_IsNumber(cf)) {
+                                        qi.correct_index = cf->valueint;
+                                    }
+                                    bool dup = std::find(recent_qs.begin(), recent_qs.end(), qi.question) !=
+                                               recent_qs.end();
+                                    if (!dup) {
+                                        for (const auto& existing : parsed_items) {
+                                            if (existing.question == qi.question) {
+                                                dup = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    if (!dup && !qi.question.empty() && qi.options.size() >= 2) {
+                                        parsed_items.push_back(std::move(qi));
+                                    }
+                                }
+                            }
+                            if (arr) cJSON_Delete(arr);
+                        }
+                    }
+                }
+
+                ESP_LOGI(TAG, "Async AI trivia deck ready (req=%lu, count=%u)",
+                         static_cast<unsigned long>(req->req_id),
+                         static_cast<unsigned>(parsed_items.size()));
+                robi::RobiGameHub::GetInstance().DeliverAsyncTriviaDeck(req->req_id, std::move(parsed_items));
+                vTaskDelete(nullptr);
+            },
+            "robi_triv_ai", 7168, ctx, 4, nullptr) != pdPASS) {
+        delete ctx;
+        robi::RobiGameHub::GetInstance().DeliverAsyncTriviaDeck(req_id, {});
+    }
 }

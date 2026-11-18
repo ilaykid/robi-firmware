@@ -44,6 +44,7 @@ public:
     // Live diagnostics & hardware stress-test control hooks
     static GeminiLiveProtocol* GetActiveInstance();
     std::string GetActiveModel() const;
+    std::string GetOpenedScope() const;
     static std::string GetLastConnectedModel();
     static int GetModelCooldownSec(int idx);
     static void ResetModelCooldowns();
@@ -60,7 +61,10 @@ public:
     bool CanExitListeningByTap() const;
     bool CommitListeningUtterance();
     bool InjectUserPromptTurn(const std::string& text);
+    void CancelPendingTurnAudio();
     bool SimulateMicUtterance(int duration_ms);
+    static void RequestAsyncAiTriviaDeck(uint32_t req_id, const std::string& topic_desc,
+                                         bool head_to_head, bool english);
 
 protected:
     bool SendText(const std::string& text) override;
@@ -74,9 +78,10 @@ private:
 
     ConnectResult TryConnectModel(const std::string& api_key, const std::string& model_name,
                                   const std::string& voice_name, const std::string& lang_code,
-                                  bool include_lang_code);
+                                  bool include_lang_code, bool include_google_search = true);
     std::string BuildSetupJson(const std::string& model_name, const std::string& voice_name,
-                               const std::string& lang_code, bool include_lang_code) const;
+                               const std::string& lang_code, bool include_lang_code,
+                               bool include_google_search = true) const;
     static std::string BuildClientTurnJson(const std::string& text);
     static void CooldownModelByName(const std::string& model_name, int64_t cooldown_sec);
     void StopSessionInternal(bool notify_closed);
@@ -84,6 +89,7 @@ private:
     void ResetTurnRuntimeFlags();
 
     void EnqueueTxJson(std::string&& json_str, bool is_audio = false);
+    void PurgeQueuedClientContent();
     void EnqueueClientTextTurn(const std::string& text);
     void EnqueueSilentTurnNudge(const std::string& user_text);
     void EnqueuePcm16k(const uint8_t* pcm_bytes, size_t byte_len);
@@ -119,6 +125,7 @@ private:
     std::atomic<bool> speaking_audio_ready_{false};
     std::atomic<bool> streaming_speech_{false};
     std::atomic<bool> user_turn_had_speech_{false};
+    std::atomic<bool> server_ack_received_{false};
     std::atomic<bool> silent_nudge_used_{false};
     std::atomic<int> consecutive_timeouts_{0};
     std::atomic<int> awaiting_nudges_{0};
@@ -144,6 +151,7 @@ private:
     std::atomic<uint32_t> turn_server_tokens_{0};
     mutable std::mutex model_mutex_;
     std::string active_model_;
+    std::string opened_scope_;
 
     ListeningMode listening_mode_ = kListeningModeAutoStop;
 

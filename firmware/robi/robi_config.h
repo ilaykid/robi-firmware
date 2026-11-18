@@ -43,6 +43,7 @@ struct RobiConfigData {
     std::string bot_name = "רובי";
     std::string gemini_key;
     std::string preferred_model = "auto";
+    std::string persona_mode = "hybrid";  // "kids" | "assistant" | "hybrid"
     std::string voice = "Puck";
     std::string language = "he-IL";
     std::string theme = "cyber_cyan";
@@ -55,9 +56,10 @@ struct RobiConfigData {
 
     bool HasSameSessionParams(const RobiConfigData& o) const {
         if (bot_name != o.bot_name || gemini_key != o.gemini_key ||
-            preferred_model != o.preferred_model || voice != o.voice ||
-            language != o.language || custom_topics != o.custom_topics ||
-            custom_prompt != o.custom_prompt || kids.size() != o.kids.size()) {
+            preferred_model != o.preferred_model || persona_mode != o.persona_mode ||
+            voice != o.voice || language != o.language ||
+            custom_topics != o.custom_topics || custom_prompt != o.custom_prompt ||
+            kids.size() != o.kids.size()) {
             return false;
         }
         for (size_t i = 0; i < kids.size(); ++i) {
@@ -82,16 +84,25 @@ public:
     bool HasApiKey() const;
     bool HasKids() const;
 
+    // Active conversation persona scope:
+    // - "assistant"    -> Adult personal assistant mode
+    // - "kid:<Name>"   -> Specific child profile & memory vault
+    // - "kids"         -> General kids companion mode
+    void SetActiveScope(const std::string& scope);
+    std::string GetActiveScope() const;
+    void ActivateDefaultWakeScope();
+    void ActivateKidScope(size_t kid_idx);
+
     bool UpdateFromJson(const std::string& json_str, bool from_flash_sector, std::string& err_out,
                         bool* session_params_changed_out = nullptr);
     std::string ExportJson(bool mask_api_key) const;
 
-    // Persistent short-term memory notes stored in NVS ("robi_mem")
+    // Scoped persistent memory notes stored in NVS ("robi_mem" / "scoped_v2")
     void AddMemoryNote(const std::string& note);
     std::vector<std::string> GetMemoryNotes() const;
     void ClearMemoryNotes();
 
-    // Rolling in-RAM conversation history across reconnects
+    // Scoped rolling conversation history across reconnects
     void AddDialogueTurn(const std::string& role, const std::string& text);
     std::vector<std::pair<std::string, std::string>> GetDialogue() const;
     void ClearDialogue();
@@ -104,7 +115,7 @@ public:
     std::string GetUsageDay() const;
     std::vector<RobiModelUsage> GetModelUsage() const;
 
-    // Builds full system instruction for Gemini Live
+    // Builds full system instruction for Gemini Live tailored to active persona scope
     std::string BuildSystemPrompt() const;
 
     // Live UI reload & telemetry hooks (registered by CustomLcdDisplay)
@@ -118,11 +129,16 @@ public:
 private:
     RobiConfig() = default;
 
+    using TurnPair = std::pair<std::string, std::string>;
+
     bool ParseIntoLocked(const std::string& json_str, bool keep_existing_key_if_sentinel,
                          std::string& wifi_ssid_out, std::string& wifi_pass_out,
                          std::string& err_out);
     std::string SerializeLocked(bool mask_api_key) const;
     bool SaveConfigToNvsLocked(const std::string& serialized);
+    std::string EffectiveScopeLocked() const;
+    std::vector<std::string>& FindOrCreateScopeMemoriesLocked(const std::string& scope);
+    std::vector<TurnPair>& FindOrCreateScopeDialogueLocked(const std::string& scope);
     void LoadMemoriesFromNvsLocked();
     void SaveMemoriesToNvsLocked();
     void LoadUsageFromNvsLocked();
@@ -135,8 +151,9 @@ private:
     mutable std::mutex mutex_;
     bool loaded_ = false;
     RobiConfigData data_;
-    std::vector<std::string> memories_;
-    std::vector<std::pair<std::string, std::string>> dialogue_;
+    std::string active_scope_;
+    std::vector<std::pair<std::string, std::vector<std::string>>> scoped_memories_;
+    std::vector<std::pair<std::string, std::vector<TurnPair>>> scoped_dialogue_;
     std::string usage_day_ = "today";
     std::vector<RobiModelUsage> model_usage_;
     std::function<void()> ui_reload_cb_;

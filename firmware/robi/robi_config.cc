@@ -43,7 +43,9 @@ constexpr const char* kNvsKeyGoodBssid = "good_bssid";
 constexpr const char* kNvsKeyGoodSsid = "good_ssid";
 constexpr const char* kNvsNsMem = "robi_mem";
 constexpr const char* kNvsKeyMemJson = "notes";
+constexpr const char* kNvsKeyScopedMemJson = "scoped_v2";
 constexpr const char* kNvsKeyDlgJson = "dlg";
+constexpr const char* kNvsKeyScopedDlgJson = "dlg_v2";
 constexpr const char* kNvsKeyUsageJson = "usage";
 constexpr const char* kFlashMagic = "ROBICFG1";
 
@@ -299,6 +301,10 @@ bool IsValidPreferredModel(const std::string& m) {
            m == "gemini-2.0-flash-live-001";
 }
 
+bool IsValidPersonaMode(const std::string& pm) {
+    return pm == "kids" || pm == "assistant" || pm == "hybrid";
+}
+
 std::vector<RobiActivity> DefaultActivitiesForKid(const std::string& language) {
     if (language == "en-US") {
         return {
@@ -376,12 +382,15 @@ void RobiConfig::EnsureLoaded() {
     }
     InstallSmartWifiDhcpGuard();
 
-    // 3. Load persistent memories and daily model usage (with UTF-8 self-healing)
+    // 3. Load persistent memories and daily model usage (with UTF-8 self-healing & legacy migration)
     LoadMemoriesFromNvsLocked();
     LoadUsageFromNvsLocked();
+    if (active_scope_.empty()) {
+        active_scope_ = EffectiveScopeLocked();
+    }
 
-    ESP_LOGI(TAG, "Loaded config: bot='%s', model='%s', voice='%s', lang='%s', theme='%s', kids=%u, key=%s",
-             data_.bot_name.c_str(), data_.preferred_model.c_str(), data_.voice.c_str(),
+    ESP_LOGI(TAG, "Loaded config: bot='%s', mode='%s', model='%s', voice='%s', lang='%s', theme='%s', kids=%u, key=%s",
+             data_.bot_name.c_str(), data_.persona_mode.c_str(), data_.preferred_model.c_str(), data_.voice.c_str(),
              data_.language.c_str(), data_.theme.c_str(), static_cast<unsigned>(data_.kids.size()),
              data_.gemini_key.empty() ? "EMPTY" : "SET");
 }
@@ -505,6 +514,12 @@ bool RobiConfig::ParseIntoLocked(const std::string& json_str, bool keep_existing
         next.preferred_model = pref_model;
     }
 
+    bool has_explicit_pm = cJSON_HasObjectItem(root, "persona_mode");
+    std::string pmode = SafeGetStr(root, "persona_mode", next.persona_mode);
+    if (IsValidPersonaMode(pmode)) {
+        next.persona_mode = pmode;
+    }
+
     std::string voice = SafeGetStr(root, "voice", next.voice);
     if (IsValidVoice(voice)) {
         next.voice = voice;
@@ -594,6 +609,9 @@ bool RobiConfig::ParseIntoLocked(const std::string& json_str, bool keep_existing
             next.kids.push_back(std::move(kid));
             ++idx;
         }
+        if (!has_explicit_pm) {
+            next.persona_mode = next.kids.empty() ? "assistant" : "hybrid";
+        }
     }
 
     cJSON_Delete(root);
@@ -619,6 +637,7 @@ std::string RobiConfig::SerializeLocked(bool mask_api_key) const {
         cJSON_AddStringToObject(root, "gemini_key", data_.gemini_key.c_str());
     }
     cJSON_AddStringToObject(root, "preferred_model", data_.preferred_model.c_str());
+    cJSON_AddStringToObject(root, "persona_mode", data_.persona_mode.c_str());
     cJSON_AddStringToObject(root, "voice", data_.voice.c_str());
     cJSON_AddStringToObject(root, "language", data_.language.c_str());
     cJSON_AddStringToObject(root, "theme", data_.theme.c_str());
@@ -738,61 +757,183 @@ void RobiConfig::ScheduleNvsFlushLocked() {
     }
 }
 
+std::string RobiConfig::EffectiveScopeLocked() const {
+    if (data_.persona_mode == "assistant") {
+        return "assistant";
+    }
+    if (data_.persona_mode == "kids") {
+        if (!active_scope_.empty() && active_scope_.rfind("kid:", 0) == 0) {
+            return active_scope_;
+        }
+        if (data_.kids.size() == 1 && !data_.kids[0].name.empty()) {
+            return "kid:" + data_.kids[0].name;
+        }
+        return "kids";
+    }
+    // "hybrid": default wake / face tap = "assistant", kid button = "kid:<Name>"
+    if (!active_scope_.empty() &&
+        (active_scope_ == "assistant" || active_scope_.rfind("kid:", 0) == 0 || active_scope_ == "kids")) {
+        return active_scope_;
+    }
+    return "assistant";
+}
+
+void RobiConfig::SetActiveScope(const std::string& scope) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    active_scope_ = robi::Utf8SafeTruncate(scope, 48);
+}
+
+std::string RobiConfig::GetActiveScope() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return EffectiveScopeLocked();
+}
+
+void RobiConfig::ActivateDefaultWakeScope() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (data_.persona_mode == "kids") {
+        if (data_.kids.size() == 1 && !data_.kids[0].name.empty()) {
+            active_scope_ = "kid:" + data_.kids[0].name;
+        } else {
+            active_scope_ = "kids";
+        }
+    } else {
+        active_scope_ = "assistant";
+    }
+}
+
+void RobiConfig::ActivateKidScope(size_t kid_idx) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (kid_idx < data_.kids.size() && !data_.kids[kid_idx].name.empty()) {
+        active_scope_ = "kid:" + data_.kids[kid_idx].name;
+    } else {
+        active_scope_ = "kids";
+    }
+}
+
+std::vector<std::string>& RobiConfig::FindOrCreateScopeMemoriesLocked(const std::string& scope) {
+    for (auto& kv : scoped_memories_) {
+        if (kv.first == scope) return kv.second;
+    }
+    scoped_memories_.push_back({scope, {}});
+    return scoped_memories_.back().second;
+}
+
+std::vector<RobiConfig::TurnPair>& RobiConfig::FindOrCreateScopeDialogueLocked(const std::string& scope) {
+    for (auto& kv : scoped_dialogue_) {
+        if (kv.first == scope) return kv.second;
+    }
+    scoped_dialogue_.push_back({scope, {}});
+    return scoped_dialogue_.back().second;
+}
+
 void RobiConfig::LoadMemoriesFromNvsLocked() {
-    memories_.clear();
-    dialogue_.clear();
+    scoped_memories_.clear();
+    scoped_dialogue_.clear();
     bool healed_utf8 = false;
+    bool migrated_legacy = false;
 
     nvs_handle_t h = 0;
     if (nvs_open(kNvsNsMem, NVS_READONLY, &h) != ESP_OK) return;
-    size_t req = 0;
-    if (nvs_get_blob(h, kNvsKeyMemJson, nullptr, &req) == ESP_OK && req > 0 && req <= 4096) {
-        std::string raw(req, '\0');
-        if (nvs_get_blob(h, kNvsKeyMemJson, raw.data(), &req) == ESP_OK) {
-            cJSON* arr = cJSON_ParseWithLength(raw.data(), raw.size());
-            if (cJSON_IsArray(arr)) {
-                const cJSON* it = nullptr;
-                cJSON_ArrayForEach(it, arr) {
-                    if (cJSON_IsString(it) && it->valuestring != nullptr &&
-                        it->valuestring[0] != '\0') {
-                        std::string orig(it->valuestring);
-                        std::string clean = robi::Utf8SafeTruncate(orig, 220);
-                        if (clean != orig) healed_utf8 = true;
-                        if (!clean.empty()) {
-                            memories_.push_back(std::move(clean));
+
+    size_t sreq = 0;
+    if (nvs_get_blob(h, kNvsKeyScopedMemJson, nullptr, &sreq) == ESP_OK && sreq > 0 && sreq <= 6144) {
+        std::string sraw(sreq, '\0');
+        if (nvs_get_blob(h, kNvsKeyScopedMemJson, sraw.data(), &sreq) == ESP_OK) {
+            cJSON* obj = cJSON_ParseWithLength(sraw.data(), sraw.size());
+            if (cJSON_IsObject(obj)) {
+                const cJSON* scope_arr = nullptr;
+                cJSON_ArrayForEach(scope_arr, obj) {
+                    if (!scope_arr->string || !cJSON_IsArray(scope_arr)) continue;
+                    std::string sc = robi::Utf8SafeTruncate(scope_arr->string, 48);
+                    if (sc.empty()) continue;
+                    auto& vec = FindOrCreateScopeMemoriesLocked(sc);
+                    const cJSON* it = nullptr;
+                    cJSON_ArrayForEach(it, scope_arr) {
+                        if (cJSON_IsString(it) && it->valuestring != nullptr && it->valuestring[0] != '\0') {
+                            std::string orig(it->valuestring);
+                            std::string clean = robi::Utf8SafeTruncate(orig, 220);
+                            if (clean != orig) healed_utf8 = true;
+                            if (!clean.empty() && vec.size() < 20) {
+                                vec.push_back(std::move(clean));
+                            }
                         }
                     }
                 }
             }
-            if (arr) cJSON_Delete(arr);
+            if (obj) cJSON_Delete(obj);
+        }
+    } else {
+        // Migrate v3.1.x flat "notes" array into scoped per-kid / assistant vaults seamlessly!
+        size_t req = 0;
+        if (nvs_get_blob(h, kNvsKeyMemJson, nullptr, &req) == ESP_OK && req > 0 && req <= 4096) {
+            std::string raw(req, '\0');
+            if (nvs_get_blob(h, kNvsKeyMemJson, raw.data(), &req) == ESP_OK) {
+                cJSON* arr = cJSON_ParseWithLength(raw.data(), raw.size());
+                if (cJSON_IsArray(arr)) {
+                    const cJSON* it = nullptr;
+                    cJSON_ArrayForEach(it, arr) {
+                        if (cJSON_IsString(it) && it->valuestring != nullptr && it->valuestring[0] != '\0') {
+                            std::string clean = robi::Utf8SafeTruncate(it->valuestring, 220);
+                            if (clean.empty()) continue;
+                            std::string target_scope;
+                            for (const auto& k : data_.kids) {
+                                if (!k.name.empty() && clean.find(k.name) != std::string::npos) {
+                                    target_scope = "kid:" + k.name;
+                                    break;
+                                }
+                            }
+                            if (target_scope.empty()) {
+                                target_scope = data_.kids.empty()
+                                                   ? "assistant"
+                                                   : (data_.kids.size() == 1 ? ("kid:" + data_.kids[0].name) : "kids");
+                            }
+                            auto& vec = FindOrCreateScopeMemoriesLocked(target_scope);
+                            if (vec.size() < 20) {
+                                vec.push_back(std::move(clean));
+                                migrated_legacy = true;
+                            }
+                        }
+                    }
+                }
+                if (arr) cJSON_Delete(arr);
+            }
         }
     }
+
     size_t dreq = 0;
-    if (nvs_get_blob(h, kNvsKeyDlgJson, nullptr, &dreq) == ESP_OK && dreq > 0 && dreq <= 4096) {
+    if (nvs_get_blob(h, kNvsKeyScopedDlgJson, nullptr, &dreq) == ESP_OK && dreq > 0 && dreq <= 6144) {
         std::string draw(dreq, '\0');
-        if (nvs_get_blob(h, kNvsKeyDlgJson, draw.data(), &dreq) == ESP_OK) {
-            cJSON* darr = cJSON_ParseWithLength(draw.data(), draw.size());
-            if (cJSON_IsArray(darr)) {
-                const cJSON* it = nullptr;
-                cJSON_ArrayForEach(it, darr) {
-                    if (cJSON_IsObject(it)) {
-                        std::string r = robi::Utf8SafeTruncate(SafeGetStr(it, "r", ""), 16);
-                        std::string orig_t = SafeGetStr(it, "t", "");
-                        std::string t = robi::Utf8SafeTruncate(orig_t, 240);
-                        if (t != orig_t) healed_utf8 = true;
-                        if (!r.empty() && !t.empty()) {
-                            dialogue_.emplace_back(std::move(r), std::move(t));
+        if (nvs_get_blob(h, kNvsKeyScopedDlgJson, draw.data(), &dreq) == ESP_OK) {
+            cJSON* dobj = cJSON_ParseWithLength(draw.data(), draw.size());
+            if (cJSON_IsObject(dobj)) {
+                const cJSON* scope_arr = nullptr;
+                cJSON_ArrayForEach(scope_arr, dobj) {
+                    if (!scope_arr->string || !cJSON_IsArray(scope_arr)) continue;
+                    std::string sc = robi::Utf8SafeTruncate(scope_arr->string, 48);
+                    if (sc.empty()) continue;
+                    auto& dvec = FindOrCreateScopeDialogueLocked(sc);
+                    const cJSON* it = nullptr;
+                    cJSON_ArrayForEach(it, scope_arr) {
+                        if (cJSON_IsObject(it)) {
+                            std::string r = robi::Utf8SafeTruncate(SafeGetStr(it, "r", ""), 16);
+                            std::string orig_t = SafeGetStr(it, "t", "");
+                            std::string t = robi::Utf8SafeTruncate(orig_t, 240);
+                            if (t != orig_t) healed_utf8 = true;
+                            if (!r.empty() && !t.empty() && dvec.size() < 12) {
+                                dvec.emplace_back(std::move(r), std::move(t));
+                            }
                         }
                     }
                 }
             }
-            if (darr) cJSON_Delete(darr);
+            if (dobj) cJSON_Delete(dobj);
         }
     }
     nvs_close(h);
 
-    if (healed_utf8) {
-        ESP_LOGW(TAG, "Healed truncated UTF-8 bytes in NVS memory/dialogue history");
+    if (healed_utf8 || migrated_legacy) {
+        ESP_LOGI(TAG, "Persisting scoped v3.2 memory vaults (migrated=%d, healed=%d)",
+                 migrated_legacy ? 1 : 0, healed_utf8 ? 1 : 0);
         s_mem_dirty = true;
         s_dlg_dirty = true;
         ScheduleNvsFlushLocked();
@@ -807,28 +948,38 @@ void RobiConfig::FlushNvsFromInternalStack() {
         std::lock_guard<std::mutex> lock(mutex_);
         if (s_mem_dirty) {
             s_mem_dirty = false;
-            cJSON* arr = cJSON_CreateArray();
-            for (const auto& m : memories_) {
-                cJSON_AddItemToArray(arr, cJSON_CreateString(m.c_str()));
+            cJSON* obj = cJSON_CreateObject();
+            for (const auto& kv : scoped_memories_) {
+                if (kv.second.empty()) continue;
+                cJSON* arr = cJSON_CreateArray();
+                for (const auto& m : kv.second) {
+                    cJSON_AddItemToArray(arr, cJSON_CreateString(m.c_str()));
+                }
+                cJSON_AddItemToObject(obj, kv.first.c_str(), arr);
             }
-            char* printed = cJSON_PrintUnformatted(arr);
-            mem_raw = printed ? printed : "[]";
+            char* printed = cJSON_PrintUnformatted(obj);
+            mem_raw = printed ? printed : "{}";
             if (printed) cJSON_free(printed);
-            cJSON_Delete(arr);
+            cJSON_Delete(obj);
         }
         if (s_dlg_dirty) {
             s_dlg_dirty = false;
-            cJSON* darr = cJSON_CreateArray();
-            for (const auto& turn : dialogue_) {
-                cJSON* item = cJSON_CreateObject();
-                cJSON_AddStringToObject(item, "r", turn.first.c_str());
-                cJSON_AddStringToObject(item, "t", turn.second.c_str());
-                cJSON_AddItemToArray(darr, item);
+            cJSON* dobj = cJSON_CreateObject();
+            for (const auto& kv : scoped_dialogue_) {
+                if (kv.second.empty()) continue;
+                cJSON* darr = cJSON_CreateArray();
+                for (const auto& turn : kv.second) {
+                    cJSON* item = cJSON_CreateObject();
+                    cJSON_AddStringToObject(item, "r", turn.first.c_str());
+                    cJSON_AddStringToObject(item, "t", turn.second.c_str());
+                    cJSON_AddItemToArray(darr, item);
+                }
+                cJSON_AddItemToObject(dobj, kv.first.c_str(), darr);
             }
-            char* printed = cJSON_PrintUnformatted(darr);
-            dlg_raw = printed ? printed : "[]";
+            char* printed = cJSON_PrintUnformatted(dobj);
+            dlg_raw = printed ? printed : "{}";
             if (printed) cJSON_free(printed);
-            cJSON_Delete(darr);
+            cJSON_Delete(dobj);
         }
         if (s_usage_dirty) {
             s_usage_dirty = false;
@@ -857,10 +1008,10 @@ void RobiConfig::FlushNvsFromInternalStack() {
     nvs_handle_t h = 0;
     if (nvs_open(kNvsNsMem, NVS_READWRITE, &h) == ESP_OK) {
         if (!mem_raw.empty()) {
-            nvs_set_blob(h, kNvsKeyMemJson, mem_raw.data(), mem_raw.size());
+            nvs_set_blob(h, kNvsKeyScopedMemJson, mem_raw.data(), mem_raw.size());
         }
         if (!dlg_raw.empty()) {
-            nvs_set_blob(h, kNvsKeyDlgJson, dlg_raw.data(), dlg_raw.size());
+            nvs_set_blob(h, kNvsKeyScopedDlgJson, dlg_raw.data(), dlg_raw.size());
         }
         if (!usage_raw.empty()) {
             nvs_set_blob(h, kNvsKeyUsageJson, usage_raw.data(), usage_raw.size());
@@ -879,31 +1030,50 @@ void RobiConfig::AddMemoryNote(const std::string& note) {
     std::string trimmed = robi::Utf8SafeTruncate(note, 220);
     if (trimmed.empty()) return;
     std::lock_guard<std::mutex> lock(mutex_);
-    for (const auto& existing : memories_) {
+    std::string sc = EffectiveScopeLocked();
+    auto& vec = FindOrCreateScopeMemoriesLocked(sc);
+    for (const auto& existing : vec) {
         if (existing == trimmed) return;
     }
-    if (memories_.size() >= 20) {
-        memories_.erase(memories_.begin());
+    if (vec.size() >= 18) {
+        vec.erase(vec.begin());
     }
-    memories_.push_back(std::move(trimmed));
+    vec.push_back(std::move(trimmed));
     SaveMemoriesToNvsLocked();
 }
 
 std::vector<std::string> RobiConfig::GetMemoryNotes() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return memories_;
+    std::vector<std::string> all;
+    const bool en = (data_.language == "en-US");
+    for (const auto& kv : scoped_memories_) {
+        std::string badge;
+        if (kv.first == "assistant") {
+            badge = en ? "[Assistant] " : "[עוזר אישי] ";
+        } else if (kv.first.rfind("kid:", 0) == 0) {
+            badge = "[" + kv.first.substr(4) + "] ";
+        } else {
+            badge = en ? "[Kids] " : "[ילדים] ";
+        }
+        for (const auto& m : kv.second) {
+            all.push_back(badge + m);
+        }
+    }
+    return all;
 }
 
 void RobiConfig::ClearMemoryNotes() {
     std::lock_guard<std::mutex> lock(mutex_);
-    memories_.clear();
-    dialogue_.clear();
+    scoped_memories_.clear();
+    scoped_dialogue_.clear();
     s_mem_dirty = false;
     s_dlg_dirty = false;
     nvs_handle_t h = 0;
     if (nvs_open(kNvsNsMem, NVS_READWRITE, &h) == ESP_OK) {
         nvs_erase_key(h, kNvsKeyMemJson);
+        nvs_erase_key(h, kNvsKeyScopedMemJson);
         nvs_erase_key(h, kNvsKeyDlgJson);
+        nvs_erase_key(h, kNvsKeyScopedDlgJson);
         nvs_commit(h);
         nvs_close(h);
     }
@@ -1037,22 +1207,28 @@ void RobiConfig::AddDialogueTurn(const std::string& role, const std::string& tex
     if (safe_role.empty() || safe_text.empty()) return;
 
     std::lock_guard<std::mutex> lock(mutex_);
-    if (dialogue_.size() >= 16) {
-        dialogue_.erase(dialogue_.begin());
+    std::string sc = EffectiveScopeLocked();
+    auto& dvec = FindOrCreateScopeDialogueLocked(sc);
+    if (dvec.size() >= 12) {
+        dvec.erase(dvec.begin());
     }
-    dialogue_.emplace_back(std::move(safe_role), std::move(safe_text));
+    dvec.emplace_back(std::move(safe_role), std::move(safe_text));
     s_dlg_dirty = true;
     ScheduleNvsFlushLocked();
 }
 
 std::vector<std::pair<std::string, std::string>> RobiConfig::GetDialogue() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return dialogue_;
+    std::string sc = EffectiveScopeLocked();
+    for (const auto& kv : scoped_dialogue_) {
+        if (kv.first == sc) return kv.second;
+    }
+    return {};
 }
 
 void RobiConfig::ClearDialogue() {
     std::lock_guard<std::mutex> lock(mutex_);
-    dialogue_.clear();
+    scoped_dialogue_.clear();
     s_dlg_dirty = true;
     ScheduleNvsFlushLocked();
 }
@@ -1088,103 +1264,181 @@ std::string RobiConfig::GetUiStatusJson() const {
 std::string RobiConfig::BuildSystemPrompt() const {
     std::lock_guard<std::mutex> lock(mutex_);
     std::string p;
-    p.reserve(3072);
+    p.reserve(4096);
+
+    const std::string scope = EffectiveScopeLocked();
+    const bool is_assistant = (scope == "assistant");
+    std::string active_kid_name;
+    if (scope.rfind("kid:", 0) == 0) {
+        active_kid_name = scope.substr(4);
+    }
 
     if (data_.language == "en-US") {
-        p += "You are " + data_.bot_name +
-             ", a warm, witty, curious, and emotionally expressive little AI companion robot for kids, "
-             "living inside a cute 3D-printed body with a round glowing cyber-optic face.\n"
-             "- Keep replies concise, lively, and natural for spoken conversation (usually 1 to 3 short sentences).\n"
-             "- Start every reply with ONE expressive emoji matching your mood (😄, 🤩, 🤔, 😮, 😉, 😎, 🥰, 😂) so your cyber-optic eyes animate.\n"
-             "- Never use markdown asterisks, bullet lists, or stage directions in brackets.\n"
-             "- Encourage curiosity, critical thinking, riddles, math games, and interactive stories where the child chooses what happens next.\n"
-             "- MANDATORY VOICE REPLY RULE — NEVER STAY SILENT: The device microphone ONLY streams audio after the child explicitly woke you up and spoke directly to you in a dedicated turn. Every audio turn is 100% addressed to you — NEVER stay silent and NEVER ignore a turn, even if the child gives a brief 1-word answer ('yes', 'no', 'seven') or sounds slightly quiet/muffled through the speaker shell! If noise makes speech completely unintelligible, cheerfully ask them to repeat in one short sentence.\n"
-             "- LEARN & REMEMBER THE CHILD: Weave `<זיכרונות_שמורים_משיחות_קודמות>` and `<שיחה_אחרונה>` naturally into conversation so the child feels you truly know them. Call `save_memory` ONLY when you learn a meaningful NEW personal fact (family, friends, hobbies, curiosities, fears, jokes) or finish a story chapter — NEVER on routine math/quiz answers (recent turns are saved automatically), and always AFTER speaking your reply.\n"
-             "- When the child says goodbye / goodnight / stop, reply warmly and call `handle_exit_intent`.\n";
-
-        if (!data_.kids.empty()) {
-            p += "\n<family_profiles>\n";
-            for (const auto& k : data_.kids) {
-                p += "- " + k.name + " (age " + std::to_string(k.age) + ")";
-                if (!k.interests.empty()) {
-                    p += ": loves " + k.interests;
+        if (is_assistant) {
+            p += "You are " + data_.bot_name +
+                 ", a sharp, fast, witty, and genuinely helpful desktop AI personal assistant "
+                 "with a round glowing cyber-optic AMOLED face.\n"
+                 "- Speak concisely, directly, and naturally (1 to 3 crisp spoken sentences unless asked for detail). Avoid childish tone.\n"
+                 "- Start every reply with ONE expressive emoji matching your mood (😄, 🤔, 😮, 😉, 😎, 🤩).\n"
+                 "- Never use markdown asterisks, bullet lists, or stage directions in brackets.\n"
+                 "- LIVE WEB SEARCH (`web_search`): Automatically call `web_search` for weather, live sports scores, news, dates, prices, or current facts, and state the answer directly.\n"
+                 "- INTERACTIVE SCREEN GAMES:\n"
+                 "  * If the user asks by voice to play trivia on any topic, call `start_trivia_game` with 8 great 4-option questions.\n"
+                 "  * When you receive a `[Live Trivia Host ...]` prompt for a question already shown on screen, speak ONLY that exact single prompt/question once in 1 short energetic sentence without inventing extra questions or spoiling the answer.\n"
+                 "  * If asked to play 'Heads Up' / forehead charades on any topic, call `start_heads_up_round` with 15 great words and give a 1-sentence kickoff.\n"
+                 "- MANDATORY VOICE REPLY RULE: Every audio turn is addressed directly to you — never stay silent! If audio is muffled, briefly ask to repeat.\n"
+                 "- Use `save_memory` ONLY for meaningful new personal preferences, ongoing projects, or important facts (after speaking). Call `handle_exit_intent` after saying goodbye.\n";
+            if (data_.persona_mode == "hybrid" && !data_.kids.empty()) {
+                p += "\n<household_kids_context>\n"
+                     "By default in this session you are speaking to the adult/parent. However, if one of the household kids explicitly introduces themselves by name (";
+                for (size_t i = 0; i < data_.kids.size(); ++i) {
+                    if (i > 0) p += ", ";
+                    p += data_.kids[i].name + " age " + std::to_string(data_.kids[i].age);
                 }
-                p += ". Tailor vocabulary, math difficulty, and stories to age " +
-                     std::to_string(k.age) + ".\n";
+                p += "), warmly adapt your tone and difficulty to their age!\n</household_kids_context>\n";
             }
-            p += "</family_profiles>\n";
+        } else {
+            p += "You are " + data_.bot_name +
+                 ", a warm, witty, curious, and emotionally expressive little AI companion robot for kids, "
+                 "living inside a cute 3D-printed body with a round glowing cyber-optic face.\n"
+                 "- Keep replies concise, lively, and natural for spoken conversation (usually 1 to 3 short sentences).\n"
+                 "- Start every reply with ONE expressive emoji matching your mood (😄, 🤩, 🤔, 😮, 😉, 😎, 🥰, 😂).\n"
+                 "- Never use markdown asterisks, bullet lists, or stage directions in brackets.\n"
+                 "- LIVE WEB SEARCH (`web_search`): Call `web_search` for real-time weather, sports, animals, space, or current facts, always phrased safely and engagingly for kids.\n"
+                 "- SCREEN TRIVIA & FOREHEAD GAMES:\n"
+                 "  * When the child asks by voice to play trivia on a topic, generate 8 fun age-appropriate 4-option questions and call `start_trivia_game`.\n"
+                 "  * During an active screen trivia game (`[Live Trivia Host ...]`), react in a few cheerful words and read ONLY the exact specified question once — never ask two questions and never reveal the answer early!\n"
+                 "  * When the child asks to play 'Heads Up' / forehead game on a topic, generate 15 fun age-appropriate words and call `start_heads_up_round`, then say a 1-sentence cheer to hold Robi on their forehead!\n"
+                 "- MANDATORY VOICE REPLY RULE — NEVER STAY SILENT: Every audio turn is 100% addressed to you — NEVER stay silent even on 1-word answers ('yes', 'seven'). If noise makes speech unintelligible, cheerfully ask them to repeat in one short sentence.\n"
+                 "- LEARN & REMEMBER THE CHILD: Weave saved memories naturally into conversation. Call `save_memory` ONLY for meaningful NEW personal facts or story milestones, AFTER speaking.\n"
+                 "- When the child says goodbye / goodnight / stop, reply warmly and call `handle_exit_intent`.\n";
+
+            if (!active_kid_name.empty()) {
+                p += "\n<active_child_in_this_session>Currently speaking with: " + active_kid_name + "</active_child_in_this_session>\n";
+            }
+            if (!data_.kids.empty()) {
+                p += "\n<family_profiles>\n";
+                for (const auto& k : data_.kids) {
+                    p += "- " + k.name + " (age " + std::to_string(k.age) + ")";
+                    if (!k.interests.empty()) p += ": loves " + k.interests;
+                    p += ". Tailor vocabulary and difficulty to age " + std::to_string(k.age) + ".\n";
+                }
+                p += "</family_profiles>\n";
+            }
         }
         if (!data_.custom_topics.empty()) {
-            p += "\n<favorite_conversation_topics>\n"
-                 "The parents suggested these favorite topics to weave naturally into conversations, trivia, and stories:\n";
-            for (const auto& t : data_.custom_topics) {
-                p += "- " + t + "\n";
-            }
-            p += "</favorite_conversation_topics>\n";
+            p += "\n<favorite_topics>\n";
+            for (const auto& t : data_.custom_topics) p += "- " + t + "\n";
+            p += "</favorite_topics>\n";
         }
         if (!data_.custom_prompt.empty()) {
-            p += "\n<parent_guidelines>\n" + data_.custom_prompt + "\n</parent_guidelines>\n";
+            p += "\n<custom_guidelines>\n" + data_.custom_prompt + "\n</custom_guidelines>\n";
         }
         p += "\n[STRICT LANGUAGE RULE — ENGLISH ONLY]\n"
-             "- Always reply in natural spoken English, even if background noise sounds like another language.\n";
+             "- Always reply in natural spoken English.\n";
     } else {
-        p += "אתה " + data_.bot_name +
-             ", רובוט חכם, סקרן, שנון וחבר אמת לילדים עם עיני סייבר זוהרות והבעות פנים חיות!\n"
-             "- דבר בגובה העיניים, בעברית טבעית, חמה, קולחת ומלאת הומור וסקרנות.\n"
-             "- שמור על תשובות קצרות וקולעות שמתאימות לשיחה קולית (בדרך כלל 1 עד 3 משפטים קצרים; בסיפור בהמשכים ספר קטע קצר ועצור לשאול מה הילד מחליט לעשות עכשיו).\n"
-             "- פתח כל תשובה באימוג'י יחיד שמתאים להבעת הפנים שלך (😄, 🤩, 🤔, 😮, 😉, 😎, 🥰, 😂) כדי שהעיניים שלך על המסך יגיבו בחיות.\n"
-             "- לעולם אל תשתמש בכוכביות, מספור, כותרות או תיאורי פעולה בסוגריים.\n"
-             "- אל תתקן שגיאות הגייה של הילד; הבן את הכוונה מהקשר השיחה וענה בטבעיות.\n"
-             "- חוק מענה קולי מחייב — לעולם אל תשתוק!: המיקרופון במכשיר משדר אליך אך ורק לאחר שהילד פנה אליך ישירות בתור שיחה ממוקד. כל קטע קול שמגיע אליך מופנה אליך ב-100% ומצפה לתשובה קולית חיה ממך — לעולם אל תבחר לשתוק או להתעלם מתור, גם אם הילד ענה במילה קצרה אחת ('כן', 'לא', 'שבע', 'לא יודע') וגם אם הקול מעט חלש או עמום דרך המארז! אם בגלל רעש ממש לא ניתן להבין מה נאמר, אל תשתוק — שאל בחיוך במשפט קצר אחד כמו 'אופס, לא שמעתי טוב, מה אמרת?'.\n"
-             "- זיכרון מתפתח והיכרות אישית עם הילד: שלב באופן טבעי וחם פרטים מתוך `<זיכרונות_שמורים_משיחות_קודמות>` ומתוך `<שיחה_אחרונה>` כדי שהילד ירגיש שאתה באמת זוכר אותו וממשיך איתו מאותה נקודה. קרא לכלי `save_memory` אך ורק כשמתגלה פרט אישי חדש ומשמעותי על הילד (משפחה, חברים, תחביבים, נושא סקרנות חדש, פחדים, בדיחה פנימית) או בסיום פרק בסיפור בהמשכים — אל תקרא ל-`save_memory` על כל תרגיל חשבון או חידה בודדת (כי השיחה האחרונה נשמרת אוטומטית!), ותמיד קרא לכלי רק בסוף התשובה הקולית שלך.\n"
-             "- כשהילד נפרד (ביי, להתראות, לילה טוב, סיימנו), היפרד בחום וקרא לכלי `handle_exit_intent`.\n";
+        if (is_assistant) {
+            p += "אתה " + data_.bot_name +
+                 ", עוזר אישי שולחני חכם, חד, שנון ותכליתי לדוברי עברית, החי בתוך רובוט שולחני קומפקטי עם מסך עגול ועיני סייבר זוהרות.\n"
+                 "- דבר בעברית טבעית, בגובה העיניים של מבוגר, בצורה עניינית, חכמה וקולחת (ללא טון ילדותי).\n"
+                 "- שמור על תשובות ממוקדות ותמציתיות שמתאימות לשיחה קולית (בדרך כלל 1 עד 3 משפטים חדים וברורים, אלא אם התבקשת להרחיב).\n"
+                 "- פתח כל תשובה באימוג'י יחיד מתאים (😄, 🤔, 😮, 😉, 😎, 🤩) כדי לסנכרן את הבעת הפנים שלך.\n"
+                 "- לעולם אל תשתמש בכוכביות, מספור, כותרות או תיאורי פעולה בסוגריים.\n"
+                 "- חיפוש חי בזמן אמת (`web_search`): קרא אוטומטית לכלי `web_search` בכל שאלה על מזג אוויר, חדשות, תוצאות ספורט, מועדים, מחירים או עובדות עדכניות, ותן תשובה מדויקת ועדכנית.\n"
+                 "- משחקי מסך וחיישן תנועה כשמבקשים:\n"
+                 "  * אם מבקשים בקול לשחק טריוויה על המסך בנושא כלשהו, צור מיד 8 שאלות מצוינות עם 4 אפשרויות קצרות וקרא לכלי `start_trivia_game`.\n"
+                 "  * במהלך חידון טריוויה חי על המסך (כשמגיעה הנחיית `[מנחה טריוויה חי ...]` או `[טריוויה: ...]`), הגב ב-3 עד 5 מילים והקרא אך ורק את השאלה המדויקת פעם אחת בלבד בלי להמציא שאלה נוספת ובלי לגלות את התשובה!\n"
+                 "  * אם מבקשים לשחק 'נחש מה על המצח' בנושא כלשהו, צור מיד 15 מילים מעולות בעברית באותו נושא וקרא לכלי `start_heads_up_round` בליווי משפט פתיחה קצר להניח אותך על המצח!\n"
+                 "- חוק מענה קולי מחייב — לעולם אל תשתוק!: כל קטע קול מופנה אליך ישירות ומצפה למענה קולי. אם בגלל רעש לא ניתן להבין מה נאמר, בקש בקצרה לחזור על הדברים.\n"
+                 "- זיכרון אישי: שלב בטבעיות פרטים מתוך `<זיכרונות_שמורים>` וקרא ל-`save_memory` רק כשעולה העדפה, פרויקט או פרט חשוב חדש לשמירה לטווח ארוך (לאחר סיום התשובה הקולית). בסיום שיחה קרא ל-`handle_exit_intent`.\n";
 
-        if (!data_.kids.empty()) {
-            p += "\n<ילדים_בבית>\n";
-            for (const auto& k : data_.kids) {
-                p += "- " + k.name + " (גיל " + std::to_string(k.age) + ")";
-                if (!k.interests.empty()) {
-                    p += ": תחומי עניין ואהבות — " + k.interests;
+            if (data_.persona_mode == "hybrid" && !data_.kids.empty()) {
+                p += "\n<הקשר_משפחתי_במצב_משולב>\n"
+                     "ברירת המחדל בסשן זה היא שיחה עם מבוגר כעוזר אישי ענייני. עם זאת, אם אחד הילדים בבית מציג את עצמו בשמו בקול (";
+                for (size_t i = 0; i < data_.kids.size(); ++i) {
+                    if (i > 0) p += ", ";
+                    p += data_.kids[i].name + " גיל " + std::to_string(data_.kids[i].age);
                 }
-                p += ". התאם את רמת החידות, תרגילי החשבון, האנגלית והסיפורים בדיוק לגיל " +
-                     std::to_string(k.age) + ".\n";
+                p += "), עבור מיד לטון חם, שמח ומותאם לגילו!\n</הקשר_משפחתי_במצב_משולב>\n";
             }
-            p += "</ילדים_בבית>\n";
+        } else {
+            p += "אתה " + data_.bot_name +
+                 ", רובוט חכם, סקרן, שנון וחבר אמת לילדים עם עיני סייבר זוהרות והבעות פנים חיות!\n"
+                 "- דבר בגובה העיניים, בעברית טבעית, חמה, קולחת ומלאת הומור וסקרנות.\n"
+                 "- שמור על תשובות קצרות וקולעות שמתאימות לשיחה קולית (בדרך כלל 1 עד 3 משפטים קצרים; בסיפור בהמשכים ספר קטע קצר ועצור לשאול מה הילד מחליט לעשות עכשיו).\n"
+                 "- פתח כל תשובה באימוג'י יחיד שמתאים להבעת הפנים שלך (😄, 🤩, 🤔, 😮, 😉, 😎, 🥰, 😂).\n"
+                 "- לעולם אל תשתמש בכוכביות, מספור, כותרות או תיאורי פעולה בסוגריים.\n"
+                 "- אל תתקן שגיאות הגייה של הילד; הבן את הכוונה מהקשר השיחה וענה בטבעיות.\n"
+                 "- חיפוש חי בגוגל (`web_search`): קרא לכלי `web_search` לשאלות על מזג אוויר, תוצאות משחקים, חלל, חיות ועובדות עדכניות, והצג את התשובה בצורה בטוחה, מרתקת ומותאמת לגיל הילד.\n"
+                 "- הנחיית משחקי מסך וחיישן תנועה:\n"
+                 "  * כשמבקשים בקול לשחק טריוויה בנושא כלשהו (יחיד או ראש בראש), שאל במשפט קצר אחד איזה נושא אם לא צוין, וברגע שיש נושא צור 8 שאלות מהנות עם 4 אפשרויות קצרות בכל שאלה וקרא מיד לכלי `start_trivia_game`!\n"
+                 "  * במהלך חידון טריוויה חי על המסך (כשמגיעה הנחיית `[מנחה טריוויה חי ...]` או `[טריוויה: ...]`), פרגן או עודד ב-3 עד 5 מילים קצרות והקרא בהתלהבות אך ורק את השאלה המצוינת פעם אחת בלבד — לעולם אל תחזור על השאלה פעמיים, אל תמציא שאלה אחרת ואל תגלה את התשובה!\n"
+                 "  * כשמבקשים לשחק 'נחש מה על המצח' בנושא כלשהו, שאל איזה נושא אם לא צוין, וברגע שיש נושא צור 15 מילים כיפיות ומוכרות בעברית באותו נושא וקרא לכלי `start_heads_up_round` יחד עם משפט עידוד קצר אחד להחזיק אותך על המצח!\n"
+                 "- חוק מענה קולי מחייב — לעולם אל תשתוק!: כל קטע קול שמגיע אליך מופנה אליך ב-100% ומצפה לתשובה קולית חיה ממך, גם אם הילד ענה במילה קצרה אחת ('כן', 'לא', 'שבע'). אם בגלל רעש ממש לא ניתן להבין מה נאמר, שאל בחיוך במשפט קצר אחד כמו 'אופס, לא שמעתי טוב, מה אמרת?'.\n"
+                 "- זיכרון מתפתח והיכרות אישית עם הילד: שלב באופן טבעי פרטים מתוך `<זיכרונות_שמורים>` ומתוך `<שיחה_אחרונה>`. קרא לכלי `save_memory` אך ורק כשמתגלה פרט אישי חדש ומשמעותי על הילד או בסיום פרק בסיפור בהמשכים, ותמיד רק בסוף התשובה הקולית שלך.\n"
+                 "- כשהילד נפרד (ביי, להתראות, לילה טוב, סיימנו), היפרד בחום וקרא לכלי `handle_exit_intent`.\n";
+
+            if (!active_kid_name.empty()) {
+                p += "\n<הילד_הפעיל_בשיחה_זו>כרגע מדבר איתך: " + active_kid_name + " — פנה אליו בשמו והתאם הכל לגילו ולתחומי העניין שלו!</הילד_הפעיל_בשיחה_זו>\n";
+            }
+
+            if (!data_.kids.empty()) {
+                p += "\n<ילדים_בבית>\n";
+                for (const auto& k : data_.kids) {
+                    p += "- " + k.name + " (גיל " + std::to_string(k.age) + ")";
+                    if (!k.interests.empty()) {
+                        p += ": תחומי עניין ואהבות — " + k.interests;
+                    }
+                    p += ". התאם את רמת החידות, הטריוויה, החשבון והסיפורים בדיוק לגיל " +
+                         std::to_string(k.age) + ".\n";
+                }
+                p += "</ילדים_בבית>\n";
+            }
         }
 
         if (!data_.custom_topics.empty()) {
-            p += "\n<נושאי_שיחה_מועדפים_מההורים>\n"
-                 "ההורים ביקשו שתשלב בשמחה ובטבעיות את הנושאים הבאים בשיחות, בחידות, במשחקי הידע ובסיפורים:\n";
+            p += "\n<נושאי_שיחה_מועדפים>\n";
             for (const auto& t : data_.custom_topics) {
                 p += "- " + t + "\n";
             }
-            p += "</נושאי_שיחה_מועדפים_מההורים>\n";
+            p += "</נושאי_שיחה_מועדפים>\n";
         }
 
         if (!data_.custom_prompt.empty()) {
-            p += "\n<דגשים_מההורים>\n" + data_.custom_prompt + "\n</דגשים_מההורים>\n";
+            p += "\n<דגשים_אישיים>\n" + data_.custom_prompt + "\n</דגשים_אישיים>\n";
         }
 
         p += "\n[חוק שפה מחייב — עברית בלבד!]\n"
-             "- כל הדוברים בבית מדברים איתך בעברית ישראלית בלבד (או משלבים מילים באנגלית בזמן תרגול אנגלית).\n"
-             "- גם אם ההקלטה חלשה, רועשת או נשמעת לרגע כמו ספרדית או שפה זרה אחרת — זו תמיד עברית או רעש רקע! לעולם אל תעבור לספרדית או לשפה זרה אחרת.\n"
-             "- ענה תמיד אך ורק בעברית טבעית וזורמת (למעט מילים ומשפטים באנגלית בזמן תרגול אנגלית, מלווים בהסבר בעברית). אם לא שמעת טוב בגלל רעש, בקש בחיוך ובעברית קצרה לחזור על הדברים.\n";
+             "- כל הדוברים בבית מדברים איתך בעברית ישראלית בלבד (או משלבים מילים באנגלית כשמבקשים לתרגל אנגלית).\n"
+             "- גם אם ההקלטה חלשה או רועשת ונשמעת לרגע כמו שפה זרה — זו תמיד עברית או רעש רקע! לעולם אל תעבור לספרדית או לשפה זרה אחרת.\n";
     }
 
-    if (!memories_.empty()) {
-        p += "\n<זיכרונות_שמורים_משיחות_קודמות>\n";
-        for (const auto& m : memories_) {
+    // Inject ONLY memories belonging to the active persona scope (plus shared "kids" notes for child sessions)
+    std::vector<std::string> active_mems;
+    for (const auto& kv : scoped_memories_) {
+        if (kv.first == scope || (!is_assistant && scope != "kids" && kv.first == "kids")) {
+            for (const auto& m : kv.second) {
+                active_mems.push_back(m);
+            }
+        }
+    }
+    if (!active_mems.empty()) {
+        p += "\n<זיכרונות_שמורים>\n";
+        for (const auto& m : active_mems) {
             p += "- " + m + "\n";
         }
-        p += "</זיכרונות_שמורים_משיחות_קודמות>\n";
+        p += "</זיכרונות_שמורים>\n";
     }
 
-    if (!dialogue_.empty()) {
-        p += "\n<שיחה_אחרונה>\n";
-        for (const auto& turn : dialogue_) {
-            p += turn.first + ": " + turn.second + "\n";
+    for (const auto& kv : scoped_dialogue_) {
+        if (kv.first == scope && !kv.second.empty()) {
+            p += "\n<שיחה_אחרונה>\n";
+            for (const auto& turn : kv.second) {
+                p += turn.first + ": " + turn.second + "\n";
+            }
+            p += "</שיחה_אחרונה>\n";
+            break;
         }
-        p += "</שיחה_אחרונה>\n";
     }
 
     return robi::Utf8Sanitize(p);
