@@ -1,9 +1,14 @@
 <!DOCTYPE html>
-<html lang="he" dir="rtl">
+<html lang="en" dir="ltr">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>HeyRobi — אשף התקנה ועיצוב אישי בדפדפן</title>
+  <title>HeyRobi — Browser Setup &amp; Customization Wizard</title>
+  <meta name="description" content="Open-source, zero-server AI voice companion robot for kids powered by ESP32-S3 and Google Gemini Live. Configure and flash in 1 click directly from Chrome or Edge." />
+  <meta property="og:title" content="HeyRobi — 1-Click Browser Setup &amp; WebSerial Flasher" />
+  <meta property="og:description" content="Open-source zero-server AI voice robot for kids connecting directly to Google Gemini Live over WiFi. Live voice preview, 25 robot face combos, and 1-click USB-C flashing." />
+  <meta property="og:image" content="https://ilaykid.github.io/robi-firmware/hero-preview.jpg" />
+  <meta name="twitter:card" content="summary_large_image" />
   <link rel="stylesheet" href="./style.css" />
 </head>
 <body>
@@ -11,81 +16,86 @@
     <div class="brand">
       <div class="brand-orb" aria-hidden="true"></div>
       <div>
-        <h1>HeyRobi — אשף התקנה ועיצוב אישי</h1>
-        <p>רובוט AI קולי לילדים בחיבור ישיר ל-Gemini Live • ללא שרת • ללא התקנת תוכנה</p>
+        <h1 data-i18n="headerTitle">HeyRobi — Browser Setup &amp; Customization Wizard</h1>
+        <p data-i18n="headerSubtitle">Open-source AI voice robot for kids • Direct to Gemini Live • Zero server • No software install</p>
       </div>
     </div>
     <div class="top-actions">
-      <span class="badge">🔒 100% מקומי בדפדפן • אפס מידע נשלח לשרת</span>
-      <button type="button" id="btnExportJson" class="btn btn-secondary" style="padding:7px 13px;font-size:0.82rem;">ייצוא פרופיל</button>
+      <div class="lang-switch" role="group" aria-label="Interface language" data-i18n-aria="langSwitchAria">
+        <button type="button" class="lang-btn active" data-ui-lang="en">EN</button>
+        <button type="button" class="lang-btn" data-ui-lang="he">עברית</button>
+      </div>
+      <span class="badge" data-i18n="privacyBadge">🔒 100% Local in Browser • Zero Data Sent to Any Server</span>
+      <button type="button" id="btnExportJson" class="btn btn-secondary" style="padding:7px 13px;font-size:0.82rem;" data-i18n="btnExportProfile">Export Profile</button>
       <label class="btn btn-secondary" style="padding:7px 13px;font-size:0.82rem;margin:0;">
-        טעינת פרופיל
+        <span data-i18n="btnImportProfile">Load Profile</span>
         <input type="file" id="inpImportJson" accept=".json,application/json" style="display:none;" />
       </label>
     </div>
   </header>
 
   <section
-    aria-label="הצהרת פרטיות ואפס אחסון מידע"
+    aria-label="Privacy guarantee and zero data storage"
+    data-i18n-aria="privacyBannerAria"
     style="max-width:1220px;margin:14px auto 0;padding:0 20px;"
   >
     <div
       style="background:rgba(16,185,129,0.12);border:1.5px solid rgba(16,185,129,0.45);border-radius:14px;padding:12px 18px;display:flex;align-items:flex-start;gap:12px;line-height:1.55;font-size:0.88rem;color:#e2e8f0;"
     >
       <span style="font-size:1.35rem;line-height:1;">🛡️</span>
-      <div>
-        <strong style="color:#34d399;font-size:0.94rem;">התחייבות לפרטיות מוחלטת — שום מידע לא נשלח אלינו וקל וחומר לא מאוחסן אצלנו!</strong><br />
-        עמוד זה הוא כלי דפדפן סטטי ומקומי בלבד (<code>Client-Side WebSerial</code> ללא שרת אחורי וללא מסד נתונים).
-        <strong>מפתח ה-Gemini שלכם, פרטי ה-WiFi ושמות הילדים לעולם אינם נשלחים למפתחי הפרויקט או לאתר זה, אינם עוברים דרך שום שרת צד-שלישי, ואפילו אינם נשמרים ב-<code>localStorage</code> של הדפדפן שלכם</strong> — הם נכתבים ישירות מתוך הדפדפן דרך כבל ה-USB אל שבב הזיכרון הפנימי של רובי אצלכם בבית בלבד.
+      <div data-i18n-html="privacyBannerHtml">
+        <strong style="color:#34d399;font-size:0.94rem;">Total Privacy Guarantee — Zero data is sent to us, and nothing is ever stored by us!</strong><br />
+        This page is a static, client-side browser tool (<code>Client-Side WebSerial</code> with no backend server and no database).
+        <strong>Your Gemini API key, WiFi credentials, and kids' names are never sent to the project authors or this site, never pass through any third-party server, and are not even saved in your browser's <code>localStorage</code></strong> — they are flashed directly from your browser over USB-C into your HeyRobi's internal flash chip at home.
       </div>
     </div>
   </section>
 
   <main class="layout">
-    <!-- Right Column: 5-Step Wizard -->
+    <!-- Main Column: 5-Step Wizard -->
     <section class="wizard-col">
-      <nav class="stepper" aria-label="שלבי התקנה">
+      <nav class="stepper" aria-label="Setup steps" data-i18n-aria="stepperAria">
         <button type="button" class="step-tab active" data-step="1">
           <span class="step-num">1</span>
-          <span class="step-label">מפתח Gemini</span>
+          <span class="step-label" data-i18n="step1Label">Gemini Key</span>
         </button>
         <button type="button" class="step-tab" data-step="2">
           <span class="step-num">2</span>
-          <span class="step-label">שם וקול</span>
+          <span class="step-label" data-i18n="step2Label">Name &amp; Voice</span>
         </button>
         <button type="button" class="step-tab" data-step="3">
           <span class="step-num">3</span>
-          <span class="step-label">עיצוב פרצוף</span>
+          <span class="step-label" data-i18n="step3Label">Face Design</span>
         </button>
         <button type="button" class="step-tab" data-step="4">
           <span class="step-num">4</span>
-          <span class="step-label">נושאים וילדים</span>
+          <span class="step-label" data-i18n="step4Label">Topics &amp; Kids</span>
         </button>
         <button type="button" class="step-tab" data-step="5">
           <span class="step-num">5</span>
-          <span class="step-label">WiFi וצריבה</span>
+          <span class="step-label" data-i18n="step5Label">WiFi &amp; Flash</span>
         </button>
       </nav>
 
       <div class="card">
         <!-- STEP 1 -->
         <div class="step-pane active" data-pane="1">
-          <h2 class="pane-title">שלב 1 — חיבור ישיר ל-Google Gemini</h2>
-          <p class="pane-sub">
-            הרובוט מתחבר בעצמו דרך ה-WiFi הביתי ישירות ל-Google Gemini Live — בלי שום שרת באמצע! המפתח נשמר אך ורק בזיכרון הפנימי של רובי אצלכם בבית.
+          <h2 class="pane-title" data-i18n="s1Title">Step 1 — Direct Connection to Google Gemini</h2>
+          <p class="pane-sub" data-i18n="s1Sub">
+            Your robot connects directly over home WiFi to Google Gemini Live — with zero relay server in between! Your API key is stored exclusively inside HeyRobi's local memory at home.
           </p>
 
           <div class="info-box">
-            <strong>איך משיגים מפתח API תוך 30 שניות?</strong>
+            <strong data-i18n="s1GuideTitle">How to get a free API key in 30 seconds:</strong>
             <ol>
-              <li>נכנסים אל <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio — API Keys</a> ומתחברים עם חשבון Google.</li>
-              <li>לוחצים על <strong>Create API key</strong> ומעתיקים את המפתח שמתחיל ב-<code>AIza...</code>.</li>
-              <li>מדביקים כאן למטה ולוחצים על <strong>בדוק מפתח</strong> כדי לוודא שהוא פעיל.</li>
+              <li data-i18n-html="s1GuideStep1Html">Open <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio — API Keys</a> and sign in with your Google account.</li>
+              <li data-i18n-html="s1GuideStep2Html">Click <strong>Create API key</strong> and copy the key starting with <code>AIza...</code>.</li>
+              <li data-i18n-html="s1GuideStep3Html">Paste it below and click <strong>Verify Key</strong> to confirm it works.</li>
             </ol>
           </div>
 
           <div class="field">
-            <label for="inpGeminiKey">מפתח Google Gemini API</label>
+            <label for="inpGeminiKey" data-i18n="s1KeyLabel">Google Gemini API Key</label>
             <div class="input-action-row">
               <input
                 type="password"
@@ -96,127 +106,128 @@
                 data-lpignore="true"
                 data-1p-ignore="true"
               />
-              <button type="button" id="btnVerifyKey" class="btn btn-accent">בדוק מפתח</button>
+              <button type="button" id="btnVerifyKey" class="btn btn-accent" data-i18n="btnVerifyKey">Verify Key</button>
             </div>
-            <small>🔒 <strong>אפס שליחה ואפס אחסון:</strong> המפתח לעולם לא נשלח למפתחי האתר ולא נשמר בדפדפן — הוא נבדק ישירות מול Google ונצרב בכבל ה-USB לתוך רובי אצלכם בבית בלבד.</small>
+            <small data-i18n-html="s1KeyNoteHtml">🔒 <strong>Zero tracking &amp; zero storage:</strong> Your key is never sent to this site or stored in your browser — it is verified directly against Google and flashed over USB-C straight into your HeyRobi.</small>
             <div id="keyStatus" class="status-msg"></div>
           </div>
 
           <div class="field">
-            <label for="selPreferredModel">מודל Gemini Live לשיחה קולית בזמן אמת</label>
+            <label for="selPreferredModel" data-i18n="s1ModelLabel">Gemini Live Model for Real-Time Voice</label>
             <select id="selPreferredModel">
-              <option value="auto">אוטומטי חכם — Gemini 3.8 Live ראשי + גיבוי אוטומטי (מומלץ!)</option>
-              <option value="gemini-3.8-live">Gemini 3.8 Live — הדור החדש עם עברית מובנית (he-IL)</option>
-              <option value="gemini-2.5-flash-native-audio-preview-12-2025">Gemini 2.5 Flash Native Audio — מהיר ויציב</option>
-              <option value="gemini-2.0-flash-live-001">Gemini 2.0 Flash Live — מודל גיבוי רב-תכליתי</option>
+              <option value="auto" data-i18n="optModelAuto">Smart Auto — Gemini 3.8 Live Primary + Auto Failover (Recommended!)</option>
+              <option value="gemini-3.8-live" data-i18n="optModel38">Gemini 3.8 Live — Next-Gen Multilingual Native Voice</option>
+              <option value="gemini-2.5-flash-native-audio-preview-12-2025" data-i18n="optModel25">Gemini 2.5 Flash Native Audio — Fast &amp; Reliable</option>
+              <option value="gemini-2.0-flash-live-001" data-i18n="optModel20">Gemini 2.0 Flash Live — Versatile Fallback Model</option>
             </select>
-            <small>במסלול החינמי של Google (Free Tier) יש מכסה של כ-45 דקות שיחה נטו ביום (עד 500 סשנים / 1,000,000 טוקנים שמתאפסים אוטומטית אצל Google). ניתן לראות מד מעקב מקומי משוער בפורטל הביתי של רובי (<code>http://robi.local</code>).</small>
+            <small data-i18n-html="s1ModelNoteHtml">Google's Free Tier includes roughly ~45 minutes of active net voice talk time per day (up to 500 sessions / 1,000,000 tokens, resetting daily at Google). You can monitor estimated daily usage in HeyRobi's local Parent Portal (<code>http://robi.local</code>).</small>
           </div>
 
           <div class="pane-nav">
             <span></span>
-            <button type="button" class="btn btn-primary" data-goto="2">המשך לבחירת קול ←</button>
+            <button type="button" class="btn btn-primary" data-goto="2" data-i18n="navNextVoice">Next: Name &amp; Voice →</button>
           </div>
         </div>
 
         <!-- STEP 2 -->
         <div class="step-pane" data-pane="2">
-          <h2 class="pane-title">שלב 2 — שם הרובוט, שפה ובחירת קול</h2>
-          <p class="pane-sub">
-            בחרו איך יקראו לחבר הרובוטי שלכם, באיזו שפה הוא ידבר, ואיזה קול הכי מתאים לו — אפשר לשמוע דגימת קול חיה ממש כאן!
+          <h2 class="pane-title" data-i18n="s2Title">Step 2 — Robot Name, Language &amp; Voice</h2>
+          <p class="pane-sub" data-i18n="s2Sub">
+            Pick your robot companion's name, spoken language, and voice — you can preview the voice live right here!
           </p>
 
           <div class="row-2">
             <div class="field">
-              <label for="inpRobotName">שם הרובוט</label>
-              <input type="text" id="inpRobotName" maxlength="20" value="רובי" />
+              <label for="inpRobotName" data-i18n="s2RobotNameLabel">Robot Name</label>
+              <input type="text" id="inpRobotName" maxlength="20" value="Robi" />
             </div>
             <div class="field">
-              <label for="selLanguage">שפת שיחה קבועה (נעילת שפה)</label>
+              <label for="selLanguage" data-i18n="s2LanguageLabel">Spoken Language (Language Lock)</label>
               <select id="selLanguage">
-                <option value="he-IL">עברית בלבד (he-IL)</option>
-                <option value="en-US">English Only (en-US)</option>
+                <option value="en-US" data-i18n="optLangEn">English Only (en-US)</option>
+                <option value="he-IL" data-i18n="optLangHe">עברית בלבד — Hebrew Only (he-IL)</option>
               </select>
             </div>
           </div>
 
           <div class="field">
-            <label>בחרו את הקול של רובי</label>
+            <label data-i18n="s2VoiceLabel">Choose HeyRobi's Voice</label>
             <div id="voiceGrid" class="voice-grid"></div>
-            <button type="button" id="btnPlayVoice" class="btn btn-accent">
-              🔊 השמע דגימת קול חיה (עם סינכרון שפתיים!)
+            <button type="button" id="btnPlayVoice" class="btn btn-accent" data-i18n="btnPlayVoice">
+              🔊 Play Live Voice Sample (with Lip-Sync!)
             </button>
             <div id="voiceStatus" class="status-msg"></div>
           </div>
 
           <div class="pane-nav">
-            <button type="button" class="btn btn-secondary" data-goto="1">→ הקודם</button>
-            <button type="button" class="btn btn-primary" data-goto="3">המשך לעיצוב פרצוף ←</button>
+            <button type="button" class="btn btn-secondary" data-goto="1" data-i18n="navPrev">← Back</button>
+            <button type="button" class="btn btn-primary" data-goto="3" data-i18n="navNextFace">Next: Face Design →</button>
           </div>
         </div>
 
         <!-- STEP 3 -->
         <div class="step-pane" data-pane="3">
-          <h2 class="pane-title">שלב 3 — סגנון פרצוף רובוטי וצבעי ניאון</h2>
-          <p class="pane-sub">
-            בחרו גם את <strong>צורת הפנים הרובוטית</strong> וגם את <strong>צבע הניאון</strong> (25 שילובים שונים!). כל לחיצה מתעדכנת מיד בסימולטור משמאל.
+          <h2 class="pane-title" data-i18n="s3Title">Step 3 — Robot Face Style &amp; Neon Color Theme</h2>
+          <p class="pane-sub" data-i18n-html="s3SubHtml">
+            Pick both the <strong>robot face geometry</strong> and the <strong>neon color palette</strong> (25 unique combinations!). Every click updates the live simulator.
           </p>
 
-          <span class="section-lbl">1. בחרו סגנון פרצוף רובוטי:</span>
+          <span class="section-lbl" data-i18n="s3StyleHeading">1. Choose a Robot Face Style:</span>
           <div id="styleGrid" class="style-grid"></div>
 
-          <span class="section-lbl">2. בחרו ערכת צבעי ניאון:</span>
+          <span class="section-lbl" data-i18n="s3ThemeHeading">2. Choose a Neon Color Theme:</span>
           <div id="themeGrid" class="theme-grid"></div>
 
           <div class="row-2">
             <div class="field">
-              <label for="rngVolume">עוצמת שמע התחלתית: <strong id="lblVolume">80%</strong></label>
+              <label for="rngVolume"><span data-i18n="s3VolumeLabel">Initial Volume:</span> <strong id="lblVolume">80%</strong></label>
               <input type="range" id="rngVolume" dir="ltr" min="35" max="100" value="80" style="width:100%;accent-color:var(--accent-bright);" />
             </div>
             <div class="field">
-              <label for="rngBrightness">בהירות מסך AMOLED: <strong id="lblBrightness">85%</strong></label>
+              <label for="rngBrightness"><span data-i18n="s3BrightnessLabel">AMOLED Screen Brightness:</span> <strong id="lblBrightness">85%</strong></label>
               <input type="range" id="rngBrightness" dir="ltr" min="15" max="100" value="85" style="width:100%;accent-color:var(--accent-bright);" />
             </div>
           </div>
 
           <div class="pane-nav">
-            <button type="button" class="btn btn-secondary" data-goto="2">→ הקודם</button>
-            <button type="button" class="btn btn-primary" data-goto="4">המשך לנושאים וילדים ←</button>
+            <button type="button" class="btn btn-secondary" data-goto="2" data-i18n="navPrev">← Back</button>
+            <button type="button" class="btn btn-primary" data-goto="4" data-i18n="navNextTopics">Next: Topics &amp; Kids →</button>
           </div>
         </div>
 
         <!-- STEP 4 -->
         <div class="step-pane" data-pane="4">
-          <h2 class="pane-title">שלב 4 — מצב הפעלה (ילדים / עוזר אישי / משולב) ופרופילים</h2>
-          <p class="pane-sub">
-            בחרו האם רובי ישמש כחבר ומשחקייה לילדים, כעוזר אישי שולחני חכם למבוגר (עם חיפוש חי בגוגל), או במצב משולב לשניהם יחד!
+          <h2 class="pane-title" data-i18n="s4Title">Step 4 — Mode (Kids / Assistant / Hybrid), Topics &amp; Profiles</h2>
+          <p class="pane-sub" data-i18n="s4Sub">
+            Choose whether HeyRobi runs as a kids companion &amp; arcade, a smart desktop personal assistant (with live Google Search), or hybrid mode for the whole family!
           </p>
 
           <div class="field">
-            <label for="selPersonaMode">מצב הפעלה של רובי</label>
+            <label for="selPersonaMode" data-i18n="s4PersonaLabel">HeyRobi Operating Mode</label>
             <select id="selPersonaMode">
-              <option value="hybrid">משולב למשפחה — לחיצה על הפנים = עוזר אישי למבוגר, לחיצה על שם ילד = מצב ילדים (מומלץ!)</option>
-              <option value="kids">חבר ומשחקייה אינטראקטיבית לילדים בלבד</option>
-              <option value="assistant">עוזר אישי שולחני למבוגר בלבד (ללא כפתורי ילדים על המסך)</option>
+              <option value="hybrid" data-i18n="optPersonaHybrid">Family Hybrid — Tap face = Adult Personal Assistant, Tap kid button = Kids Mode (Recommended!)</option>
+              <option value="kids" data-i18n="optPersonaKids">Interactive Kids Companion &amp; Games Only</option>
+              <option value="assistant" data-i18n="optPersonaAssistant">Desktop Personal Assistant Only (no kid buttons on screen)</option>
             </select>
-            <small>💡 בכל המצבים החלקה הצידה על המסך העגול של רובי פותחת את משחקיית המגע וחיישן התנועה (כולל <strong>נחש מה על המצח</strong> שעובד גם ללא אינטרנט, ו<strong>טריוויה חיה על המסך</strong>)!</small>
+            <small data-i18n-html="s4PersonaNoteHtml">💡 In every mode, swiping sideways on HeyRobi's round screen opens the touch &amp; motion arcade (including offline <strong>Heads Up!</strong> forehead charades and live <strong>Screen Trivia</strong>)!</small>
           </div>
 
           <div class="topics-box">
-            <label for="inpNewTopic" style="font-weight:700;color:#ecfeff;margin-bottom:6px;display:block;">
-              💬 הוסיפו נושאי שיחה משלכם (כתיבה חופשית של ההורה)
+            <label for="inpNewTopic" style="font-weight:700;color:#ecfeff;margin-bottom:6px;display:block;" data-i18n="s4TopicsLabel">
+              💬 Add Your Own Conversation Topics (Parent Free-Text)
             </label>
-            <small style="display:block;color:var(--text-muted);margin-bottom:10px;">
-              כתבו כל נושא שמעניין את הילדים או שחשוב לכם שרובי יעודד — כדורסל, שחמט, הכנה לכיתה א', מיתולוגיה יוונית, חגי ישראל, מיינקראפט, נגינה, סקרנות מדעית ועוד:
+            <small style="display:block;color:var(--text-muted);margin-bottom:10px;" data-i18n="s4TopicsSub">
+              Type any topic your kids love or you'd like HeyRobi to encourage — basketball, chess, first-grade prep, Greek mythology, Minecraft, music, science curiosity, and more:
             </small>
             <div class="input-action-row">
               <input
                 type="text"
                 id="inpNewTopic"
                 maxlength="90"
-                placeholder="הקלידו נושא שיחה משלכם ולחצו Enter או הוסף..."
+                placeholder="Type a custom topic and press Enter or click Add..."
+                data-i18n-placeholder="s4TopicsPlaceholder"
               />
-              <button type="button" id="btnAddTopic" class="btn btn-accent">+ הוסף נושא</button>
+              <button type="button" id="btnAddTopic" class="btn btn-accent" data-i18n="btnAddTopic">+ Add Topic</button>
             </div>
             <div id="customTopicsList" class="topic-tags"></div>
           </div>
@@ -225,37 +236,38 @@
             <div id="kidsContainer"></div>
 
             <div style="margin-bottom:18px;">
-              <button type="button" id="btnAddKid" class="btn btn-accent">+ הוספת ילד/ה (עד 3)</button>
+              <button type="button" id="btnAddKid" class="btn btn-accent" data-i18n="btnAddKid">+ Add Kid Profile (up to 3)</button>
             </div>
           </div>
 
           <div class="field">
-            <label for="txtCustomPrompt">הנחיות מיוחדות מההורים לרובי (אופציונלי)</label>
+            <label for="txtCustomPrompt" data-i18n="s4PromptLabel">Special Parent Instructions for HeyRobi (Optional)</label>
             <textarea
               id="txtCustomPrompt"
               rows="3"
               maxlength="450"
-              placeholder="למשל: לעודד חשיבה עצמאית וסקרנות, לדבר במשפטים קצרים וברורים, לשלב הומור עדין..."
+              placeholder="e.g. Encourage curiosity and independent thinking, keep sentences short and clear, add gentle humor..."
+              data-i18n-placeholder="s4PromptPlaceholder"
             ></textarea>
           </div>
 
           <div class="pane-nav">
-            <button type="button" class="btn btn-secondary" data-goto="3">→ הקודם</button>
-            <button type="button" class="btn btn-primary" data-goto="5">המשך ל-WiFi וצריבה ←</button>
+            <button type="button" class="btn btn-secondary" data-goto="3" data-i18n="navPrev">← Back</button>
+            <button type="button" class="btn btn-primary" data-goto="5" data-i18n="navNextFlash">Next: WiFi &amp; Flash →</button>
           </div>
         </div>
 
         <!-- STEP 5 -->
         <div class="step-pane" data-pane="5">
-          <h2 class="pane-title">שלב 5 — חיבור ל-WiFi הביתי וצריבה בלחיצה אחת!</h2>
-          <p class="pane-sub">
-            חברו את רובי למחשב עם כבל USB-C. בלחיצה אחת הדפדפן יצרוב ישירות לשבב את מערכת HeyRobi ואת ההגדרות שלכם!
-            <br /><strong style="color:#34d399;">🔒 פרטי ה-WiFi שלכם מעובדים בזיכרון ה-RAM של הדפדפן שלכם בלבד — הם אינם נשלחים לאתר זה ואינם נשמרים בשום מקום מחוץ לרובי.</strong>
+          <h2 class="pane-title" data-i18n="s5Title">Step 5 — Home WiFi &amp; 1-Click USB-C Flash!</h2>
+          <p class="pane-sub" data-i18n-html="s5SubHtml">
+            Connect HeyRobi to your computer with a USB-C cable. One click flashes HeyRobi's firmware and your personal settings directly to the chip!
+            <br /><strong style="color:#34d399;">🔒 Your WiFi credentials live in your browser RAM only — they are never sent to this site or saved anywhere outside your HeyRobi.</strong>
           </p>
 
           <div class="row-2">
             <div class="field">
-              <label for="inpWifiSsid">שם רשת ה-WiFi הביתית (תדר 2.4GHz)</label>
+              <label for="inpWifiSsid" data-i18n="s5SsidLabel">Home WiFi Network Name (2.4GHz band)</label>
               <input
                 type="text"
                 id="inpWifiSsid"
@@ -263,10 +275,10 @@
                 placeholder="Home_WiFi_2.4G"
                 autocomplete="off"
               />
-              <small>שימו לב: בקר ESP32-S3 מתחבר לרשתות 2.4GHz (אם תשאירו ריק, רובי יפתח נקודת WiFi בשם <code>Robi-XXXX</code> להגדרה מהטלפון).</small>
+              <small data-i18n-html="s5SsidNoteHtml">Note: ESP32-S3 connects to 2.4GHz WiFi networks (leave blank if you prefer HeyRobi to open a <code>Robi-XXXX</code> hotspot for phone setup).</small>
             </div>
             <div class="field">
-              <label for="inpWifiPass">סיסמת WiFi</label>
+              <label for="inpWifiPass" data-i18n="s5PassLabel">WiFi Password</label>
               <input
                 type="password"
                 id="inpWifiPass"
@@ -278,29 +290,30 @@
           </div>
 
           <div class="field">
-            <label for="selBoard">דגם הלוח / החומרה לצריבה</label>
+            <label for="selBoard" data-i18n="s5BoardLabel">Target Hardware / Board Model</label>
             <select id="selBoard">
-              <option value="waveshare175">Waveshare 1.75" AMOLED — החומרה הראשית והבדוקה (מומלץ)</option>
-              <option value="spotpear128">Spotpear 1.28" BOX — חלופה זולה להורדת עלויות (ניסיוני — טרם נוסתה בפועל)</option>
+              <option value="waveshare175" data-i18n="optBoardWaveshare">Waveshare 1.75" AMOLED — Primary Tested Hardware (Recommended)</option>
+              <option value="spotpear128" data-i18n="optBoardSpotpear">Spotpear 1.28" BOX — Budget Alternative (Experimental — Untested on Hardware)</option>
             </select>
             <div
               id="boardExperimentalNote"
+              data-i18n-html="s5SpotpearNoteHtml"
               style="display:none;margin-top:8px;padding:10px 12px;border-radius:10px;background:rgba(245,158,11,0.12);border:1px solid rgba(245,158,11,0.35);color:#fcd34d;font-size:0.82rem;line-height:1.5;"
             >
-              🧪 <strong>גילוי נאות — גרסה ניסיונית:</strong> תמיכה בלוח <code>Spotpear 1.28" BOX</code> (מסך IPS <code>240×240</code>, כולל מארז וסוללה מובנים) נוספה לקוד ולבנייה האוטומטית כדי להוריד עלויות, אך <strong>טרם נוסתה בפועל על חומרה פיזית</strong>. אם הזמנתם וצרבתם — נשמח מאוד לביקורת ומשוב ב-<a href="https://github.com/ilaykid/robi-firmware/issues" target="_blank" rel="noopener" style="color:#fde68a;text-decoration:underline;">GitHub</a>!
+              🧪 <strong>Experimental Notice:</strong> Support for <code>Spotpear 1.28" BOX</code> (<code>240×240</code> IPS screen with built-in enclosure &amp; battery) was added to lower hardware costs, but has <strong>not yet been verified on physical hardware</strong>. If you flash one, please share feedback on <a href="https://github.com/ilaykid/robi-firmware/issues" target="_blank" rel="noopener" style="color:#fde68a;text-decoration:underline;">GitHub Issues</a>!
             </div>
           </div>
 
           <div class="field">
-            <label for="selWakeVariant">מילת הקריאה הקולית שמעירה את רובי</label>
+            <label for="selWakeVariant" data-i18n="s5WakeLabel">Voice Wake Word</label>
             <select id="selWakeVariant">
-              <option value="heyrobby">"Hey Robby" — מילת הקריאה הייעודית של HeyRobi (מומלץ)</option>
-              <option value="hiesp">"Hi ESP" — מודל קריאה חלופי מובנה</option>
+              <option value="heyrobby" data-i18n="optWakeRobi">"Hey Robby" — Dedicated HeyRobi Wake Word (Recommended)</option>
+              <option value="hiesp" data-i18n="optWakeEsp">"Hi ESP" — Alternative Built-in Wake Model</option>
             </select>
           </div>
 
-          <button type="button" id="btnFlashFull" class="btn btn-flash">
-            🚀 צריבה מלאה לרובי חדש (מערכת + הגדרות אישיות ב-USB)
+          <button type="button" id="btnFlashFull" class="btn btn-flash" data-i18n="btnFlashFull">
+            🚀 Full Flash for New Robi (Firmware + Personal Settings over USB)
           </button>
 
           <div style="margin-top:10px;display:flex;flex-direction:column;gap:10px;">
@@ -309,11 +322,12 @@
               id="btnFlashUpgradeOnly"
               class="btn btn-secondary"
               style="width:100%;border-color:rgba(34,211,238,0.55);background:rgba(8,47,73,0.45);color:#e0f2fe;font-weight:700;"
+              data-i18n="btnFlashUpgrade"
             >
-              🔄 שדרוג גרסה לרובי קיים (מעדכן קושחה ושומר על כל הזיכרונות, ה-WiFi והמפתח!)
+              🔄 Upgrade Existing Robi Firmware (Keeps All Memories, WiFi &amp; API Key!)
             </button>
-            <button type="button" id="btnFlashConfigOnly" class="btn btn-secondary" style="width:100%;">
-              ⚡ עדכון הגדרות בלבד ב-USB (לרובי שכבר מותקן — שנייה אחת!)
+            <button type="button" id="btnFlashConfigOnly" class="btn btn-secondary" style="width:100%;" data-i18n="btnFlashConfig">
+              ⚡ Update Settings Only over USB (Already Flashed — 1 Second!)
             </button>
           </div>
 
@@ -324,54 +338,54 @@
           <pre id="flashConsole" class="console-log"></pre>
 
           <details style="margin-top:16px;color:var(--text-muted);font-size:0.84rem;">
-            <summary style="cursor:pointer;">אפשרויות מתקדמות / שינוי הגדרות אלחוטי מהבית</summary>
+            <summary style="cursor:pointer;" data-i18n="s5AdvSummary">Advanced Options / Wireless Settings from Home</summary>
             <div style="padding-top:10px;">
-              <p style="margin:0 0 8px;">
-                💡 <strong>ידעתם?</strong> אחרי ההתקנה הראשונית לא צריך יותר לחבר כבל USB! בכל רגע אפשר לפתוח בדפדפן בבית את הכתובת
-                <code>http://robi.local</code> (או <code>http://robi</code>) ולשנות סגנון פרצוף, צבעים, קול, נושאים או ילדים אלחוטית מהטלפון!
+              <p style="margin:0 0 8px;" data-i18n-html="s5AdvWirelessHtml">
+                💡 <strong>Did you know?</strong> After the first flash you never need a USB cable again! Open
+                <code>http://robi.local</code> (or <code>http://robi</code>) on your home WiFi anytime to update face style, colors, voice, topics, or kids wirelessly from your phone!
               </p>
-              <p style="margin:0 0 8px;">
-                <strong>טיפ אם המחשב לא מזהה את רובי:</strong> החזיקו את כפתור ה-<code>BOOT</code> הקטן על הלוח לחוץ בזמן חיבור כבל ה-USB-C, ושחררו אחרי שנייה.
+              <p style="margin:0 0 8px;" data-i18n-html="s5AdvBootHtml">
+                <strong>Tip if your PC doesn't detect HeyRobi:</strong> Hold the small <code>BOOT</code> button on the board while plugging in USB-C, then release after 1 second.
               </p>
               <label style="display:block;margin-top:8px;">
-                בחירת קובץ קושחה (<code>.bin</code>) מקומי מהמחשב (אופציונלי למפתחים):
+                <span data-i18n-html="s5AdvLocalBinHtml">Load a local firmware (<code>.bin</code>) file from your computer (optional for developers):</span>
                 <input type="file" id="inpCustomBin" accept=".bin" style="margin-top:5px;" />
               </label>
             </div>
           </details>
 
           <div class="pane-nav">
-            <button type="button" class="btn btn-secondary" data-goto="4">→ הקודם</button>
+            <button type="button" class="btn btn-secondary" data-goto="4" data-i18n="navPrev">← Back</button>
             <span></span>
           </div>
         </div>
       </div>
     </section>
 
-    <!-- Left Column: Live 466x466 Circular AMOLED Simulator -->
+    <!-- Side Column: Live 466x466 Circular AMOLED Simulator -->
     <aside class="preview-col">
       <div class="sim-card">
         <div class="sim-bezel">
           <canvas id="robiCanvas" width="466" height="466"></canvas>
         </div>
         <div class="emo-bar">
-          <button type="button" class="emo-btn active" data-emo="happy">שמח</button>
-          <button type="button" class="emo-btn" data-emo="laughing">צוחק</button>
-          <button type="button" class="emo-btn" data-emo="surprised">מופתע</button>
-          <button type="button" class="emo-btn" data-emo="winking">קורץ</button>
-          <button type="button" class="emo-btn" data-emo="cool">מגניב</button>
-          <button type="button" class="emo-btn" data-emo="thinking">חושב</button>
-          <button type="button" class="emo-btn" data-emo="speaking">מדבר</button>
+          <button type="button" class="emo-btn active" data-emo="happy" data-i18n="emoHappy">Happy</button>
+          <button type="button" class="emo-btn" data-emo="laughing" data-i18n="emoLaughing">Laughing</button>
+          <button type="button" class="emo-btn" data-emo="surprised" data-i18n="emoSurprised">Surprised</button>
+          <button type="button" class="emo-btn" data-emo="winking" data-i18n="emoWinking">Winking</button>
+          <button type="button" class="emo-btn" data-emo="cool" data-i18n="emoCool">Cool</button>
+          <button type="button" class="emo-btn" data-emo="thinking" data-i18n="emoThinking">Thinking</button>
+          <button type="button" class="emo-btn" data-emo="speaking" data-i18n="emoSpeaking">Speaking</button>
         </div>
-        <div id="simCaption" class="sim-caption">
-          תצוגה חיה של מסך ה-AMOLED העגול (466×466) • לחצו על כפתורי הילדים בתוך המסך כדי לבדוק את תפריט הנושאים!
+        <div id="simCaption" class="sim-caption" data-i18n="simCaption">
+          Live preview of the round AMOLED display (466×466) • Click the kid buttons inside the screen to preview the activity menu!
         </div>
       </div>
 
       <div class="card" style="margin-top:16px;padding:16px 18px;">
-        <h3 style="margin:0 0 8px;font-size:1rem;color:var(--accent);">🛠️ בונים רובי חדש? רשימת החלקים והמארז</h3>
-        <p style="margin:0 0 12px;font-size:0.84rem;color:var(--text-muted);line-height:1.5;">
-          אפשר להרכיב את רובי לבד בבית תוך דקות (ללא הלחמות!), או להזמין מארז מודפס ומוכן בארץ:
+        <h3 style="margin:0 0 8px;font-size:1rem;color:var(--accent);" data-i18n="hwTitle">🛠️ Building a New HeyRobi? Parts &amp; Enclosure</h3>
+        <p style="margin:0 0 12px;font-size:0.84rem;color:var(--text-muted);line-height:1.5;" data-i18n="hwSub">
+          Assemble HeyRobi yourself at home in 10 minutes with zero soldering:
         </p>
         <div style="display:flex;flex-direction:column;gap:10px;">
           <a
@@ -382,11 +396,11 @@
             class="btn btn-secondary"
             style="width:100%;white-space:normal;text-decoration:none;justify-content:space-between;display:flex;align-items:center;font-size:0.86rem;padding:11px 14px;line-height:1.35;"
           >
-            <span style="text-align:right;">🔌 <strong>לוח Waveshare 1.75" AMOLED</strong><br /><span style="font-size:0.77rem;font-weight:400;color:var(--text-muted);">חיפוש המוצר ב-AliExpress (מומלץ עם רמקול וסוללה)</span></span>
-            <span style="color:var(--accent-bright);font-weight:700;white-space:nowrap;margin-right:10px;font-size:0.84rem;">לרכישה ↗</span>
+            <span style="text-align:start;" data-i18n-html="hwWaveshareHtml">🔌 <strong>Waveshare 1.75" AMOLED Board</strong><br /><span style="font-size:0.77rem;font-weight:400;color:var(--text-muted);">Search on AliExpress (bundle with speaker &amp; battery recommended)</span></span>
+            <span style="color:var(--accent-bright);font-weight:700;white-space:nowrap;margin-inline-start:10px;font-size:0.84rem;" data-i18n="hwBuyCta">Shop ↗</span>
           </a>
-          <small style="color:var(--text-muted);font-size:0.78rem;line-height:1.45;padding:0 2px;">
-            💡 <strong>טיפ לרכישה:</strong> הקישור פותח חיפוש של הדגם המדויק (<code>ESP32-S3-Touch-AMOLED-1.75</code>). מומלץ לבחור במוכר שמציע את הלוח החשוף (ללא קופסת מתכת) בבאנדל עם <strong>רמקול וסוללת LiPo 3.7V</strong> כדי שייכנס בול למארז של רובי!
+          <small style="color:var(--text-muted);font-size:0.78rem;line-height:1.45;padding:0 2px;" data-i18n-html="hwWaveshareTipHtml">
+            💡 <strong>Buying tip:</strong> Opens search for the exact model (<code>ESP32-S3-Touch-AMOLED-1.75</code>). Pick the bare board (no metal case) bundled with a <strong>speaker &amp; 3.7V LiPo battery</strong> so it fits right into the HeyRobi 3D case!
           </small>
           <a
             id="lnkBuySpotpear"
@@ -396,11 +410,11 @@
             class="btn btn-secondary"
             style="width:100%;white-space:normal;text-decoration:none;justify-content:space-between;display:flex;align-items:center;font-size:0.84rem;padding:10px 14px;line-height:1.35;border-color:rgba(245,158,11,0.35);"
           >
-            <span style="text-align:right;">💸 <strong>Spotpear 1.28" BOX (חלופה זולה — ניסיוני)</strong><br /><span style="font-size:0.76rem;font-weight:400;color:var(--text-muted);">כולל מסך עגול, מגע, רמקול, מיקרופון, סוללה ומארז (~₪77). <strong>טרם נוסה פיזית!</strong></span></span>
-            <span style="color:#fcd34d;font-weight:700;white-space:nowrap;margin-right:10px;font-size:0.82rem;">לרכישה ↗</span>
+            <span style="text-align:start;" data-i18n-html="hwSpotpearHtml">💸 <strong>Spotpear 1.28" BOX (Budget — Experimental)</strong><br /><span style="font-size:0.76rem;font-weight:400;color:var(--text-muted);">Includes round touch screen, speaker, mic, battery &amp; case (~$20). <strong>Untested!</strong></span></span>
+            <span style="color:#fcd34d;font-weight:700;white-space:nowrap;margin-inline-start:10px;font-size:0.82rem;" data-i18n="hwBuyCta">Shop ↗</span>
           </a>
-          <small style="color:var(--text-muted);font-size:0.76rem;line-height:1.4;padding:0 2px;">
-            🧪 אם בחרתם ב-Spotpear להורדת עלויות: הקפידו לבחור במוצר את האופציה <strong>With Touch &amp; Battery</strong>, ובשלב 5 באשף בחרו בדגם <strong>Spotpear 1.28" BOX (ניסיוני)</strong>. נשמח למשוב ממי שמזמין!
+          <small style="color:var(--text-muted);font-size:0.76rem;line-height:1.4;padding:0 2px;" data-i18n-html="hwSpotpearTipHtml">
+            🧪 If trying Spotpear on a budget: select the <strong>With Touch &amp; Battery</strong> option, then choose <strong>Spotpear 1.28" BOX (Experimental)</strong> in Step 5. Feedback welcome!
           </small>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:2px;">
             <a
@@ -410,17 +424,20 @@
               rel="noopener"
               class="btn btn-accent"
               style="width:100%;white-space:normal;text-decoration:none;text-align:center;font-size:0.82rem;padding:10px 8px;line-height:1.3;"
+              data-i18n="hwStlBtn"
             >
-              🖨️ מארז מודפס / קבצי STL
+              🖨️ 3D Case / STL Files
             </a>
             <a
+              id="lnkFullGuide"
               href="https://github.com/ilaykid/robi-firmware"
               target="_blank"
               rel="noopener"
               class="btn btn-secondary"
               style="width:100%;white-space:normal;text-decoration:none;text-align:center;font-size:0.82rem;padding:10px 8px;line-height:1.3;"
+              data-i18n="hwGuideBtn"
             >
-              📖 מדריך מלא (GitHub)
+              📖 Full Guide (GitHub)
             </a>
           </div>
         </div>
