@@ -78,10 +78,12 @@ private:
 
     ConnectResult TryConnectModel(const std::string& api_key, const std::string& model_name,
                                   const std::string& voice_name, const std::string& lang_code,
-                                  bool include_lang_code, bool include_google_search = true);
+                                  bool include_lang_code, bool include_google_search = true,
+                                  bool include_extended_vad = true);
     std::string BuildSetupJson(const std::string& model_name, const std::string& voice_name,
                                const std::string& lang_code, bool include_lang_code,
-                               bool include_google_search = true) const;
+                               bool include_google_search = true,
+                               bool include_extended_vad = true) const;
     static std::string BuildClientTurnJson(const std::string& text);
     static void CooldownModelByName(const std::string& model_name, int64_t cooldown_sec);
     void StopSessionInternal(bool notify_closed);
@@ -127,14 +129,18 @@ private:
     std::atomic<bool> user_turn_had_speech_{false};
     std::atomic<bool> server_ack_received_{false};
     std::atomic<bool> silent_nudge_used_{false};
+    std::atomic<bool> backstop_stream_end_sent_{false};
+    std::atomic<bool> thinking_face_shown_{false};
     std::atomic<int> consecutive_timeouts_{0};
     std::atomic<int> awaiting_nudges_{0};
     std::atomic<int> live_voice_level_{0};
     std::atomic<int64_t> live_voice_updated_us_{0};
+    std::atomic<uint64_t> dac_played_samples_{0};
     std::atomic<int64_t> awaiting_since_us_{0};
     std::atomic<int64_t> listen_started_us_{0};
     std::atomic<int64_t> post_playback_guard_until_us_{0};
     std::atomic<int64_t> last_input_tr_us_{0};
+    std::atomic<int64_t> local_speech_ended_us_{0};
     std::atomic<int64_t> tool_hold_until_us_{0};
     std::atomic<int64_t> tool_sent_at_us_{0};
     std::atomic<int64_t> last_rx_audio_us_{0};
@@ -181,7 +187,7 @@ private:
     std::condition_variable tx_cv_;
     std::deque<std::string> tx_queue_;
 
-    // Sample-accurate 24kHz PCM PSRAM jitter ring buffer (262,144 samples = 512 KB = 10.92s)
+    // Sample-accurate 24kHz PCM PSRAM jitter ring buffer (786,432 samples = 1.5 MB = 32.77s)
     int16_t* pcm_ring_mem_ = nullptr;
     robi::SampleSyncedJitterRing jitter_ring_;
 

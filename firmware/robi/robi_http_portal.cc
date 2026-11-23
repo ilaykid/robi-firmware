@@ -201,6 +201,8 @@ esp_err_t HandleStatusGet(httpd_req_t* req) {
         cJSON_AddNumberToObject(root, "noise_floor_rms", proto->GetNoiseFloorRms());
         cJSON_AddNumberToObject(root, "ring_avail", static_cast<double>(proto->GetRingAvailableSamples()));
         cJSON_AddBoolToObject(root, "playback_idle", app.GetAudioService().IsPlaybackIdle());
+        cJSON_AddNumberToObject(root, "playback_q_depth",
+                                static_cast<double>(app.GetAudioService().GetPlaybackQueueDepth()));
         cJSON_AddBoolToObject(root, "awaiting_response", proto->IsAwaitingResponse());
         cJSON_AddBoolToObject(root, "streaming_speech", proto->IsStreamingSpeech());
         if (open) {

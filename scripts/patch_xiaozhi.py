@@ -305,18 +305,106 @@ must_replace(
     "    WifiManager::GetInstance().SetPowerSaveLevel(WifiPowerSaveLevel::PERFORMANCE);\n",
 )
 
-# 5. AudioService raw PCM fast-path + zero-stall turn-around when ES7210 ADC is already active
+# 5. AudioService raw PCM fast-path, direct hardware-paced playback queue (700ms + 80ms DMA),
+#    priority-7 AudioOutputTask with DAC-synced lip-sync callback, and zero-stall ADC turn-around
+audio_codec_h = fw / "main/audio/audio_codec.h"
+must_replace(
+    audio_codec_h,
+    "#define AUDIO_CODEC_DMA_DESC_NUM 6\n",
+    "#define AUDIO_CODEC_DMA_DESC_NUM 8\n",
+)
 audio_h = fw / "main/audio/audio_service.h"
 must_replace(
     audio_h,
     "#define MAX_PLAYBACK_TASKS_IN_QUEUE 2\n",
-    "#define MAX_PLAYBACK_TASKS_IN_QUEUE 8\n",
+    "#define MAX_PLAYBACK_TASKS_IN_QUEUE 14\n",
+)
+must_replace(
+    audio_h,
+    "    bool PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait = false);\n",
+    "    bool PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait = false);\n"
+    "    bool PushRawPcmForPlayback(std::vector<int16_t>&& pcm, int wait_ms = 40);\n"
+    "    size_t GetPlaybackQueueDepth();\n"
+    "    void SetOutputPcmCallback(std::function<void(const int16_t*, size_t)> cb);\n",
+)
+must_replace(
+    audio_h,
+    "    AudioServiceCallbacks callbacks_;\n",
+    "    AudioServiceCallbacks callbacks_;\n"
+    "    std::function<void(const int16_t*, size_t)> output_pcm_cb_;\n",
 )
 audio_cc = fw / "main/audio/audio_service.cc"
 must_replace(
     audio_cc,
     '        "audio_output", 2048 * 2, this, 4, &audio_output_task_handle_);\n',
-    '        "audio_output", 2048 * 2, this, 6, &audio_output_task_handle_);\n',
+    '        "audio_output", 2048 * 2, this, 7, &audio_output_task_handle_);\n',
+)
+must_replace(
+    audio_cc,
+    "        auto task = std::move(audio_playback_queue_.front());\n"
+    "        audio_playback_queue_.pop_front();\n"
+    "        output_in_flight_ = true;\n"
+    "        audio_queue_cv_.notify_all();\n"
+    "        lock.unlock();\n",
+    "        auto task = std::move(audio_playback_queue_.front());\n"
+    "        audio_playback_queue_.pop_front();\n"
+    "        output_in_flight_ = true;\n"
+    "        auto pcm_cb = output_pcm_cb_;\n"
+    "        audio_queue_cv_.notify_all();\n"
+    "        lock.unlock();\n",
+)
+must_replace(
+    audio_cc,
+    "        codec_->OutputData(task.pcm);\n",
+    "        if (pcm_cb && !task.pcm.empty()) {\n"
+    "            pcm_cb(task.pcm.data(), task.pcm.size());\n"
+    "        }\n"
+    "        codec_->OutputData(task.pcm);\n",
+)
+must_replace(
+    audio_cc,
+    "    audio_decode_queue_.push_back(std::move(packet));\n"
+    "    audio_queue_cv_.notify_all();\n"
+    "    return true;\n"
+    "}\n",
+    "    audio_decode_queue_.push_back(std::move(packet));\n"
+    "    audio_queue_cv_.notify_all();\n"
+    "    return true;\n"
+    "}\n\n"
+    "bool AudioService::PushRawPcmForPlayback(std::vector<int16_t>&& pcm, int wait_ms) {\n"
+    "    if (pcm.empty()) return true;\n"
+    "    std::unique_lock<std::mutex> lock(audio_queue_mutex_);\n"
+    "    const uint32_t generation = playback_generation_;\n"
+    "    if (audio_playback_queue_.size() >= MAX_PLAYBACK_TASKS_IN_QUEUE) {\n"
+    "        if (wait_ms > 0) {\n"
+    "            audio_queue_cv_.wait_for(lock, std::chrono::milliseconds(wait_ms), [this, generation]() {\n"
+    "                return service_stopped_.load() || generation != playback_generation_ ||\n"
+    "                       audio_playback_queue_.size() < MAX_PLAYBACK_TASKS_IN_QUEUE;\n"
+    "            });\n"
+    "        }\n"
+    "        if (audio_playback_queue_.size() >= MAX_PLAYBACK_TASKS_IN_QUEUE) {\n"
+    "            return false;\n"
+    "        }\n"
+    "    }\n"
+    "    if (service_stopped_.load() || generation != playback_generation_) {\n"
+    "        return false;\n"
+    "    }\n"
+    "    AudioTask task;\n"
+    "    task.type = kAudioTaskTypeDecodeToPlaybackQueue;\n"
+    "    task.pcm = std::move(pcm);\n"
+    "    playback_drained_notified_ = false;\n"
+    "    audio_playback_queue_.push_back(std::move(task));\n"
+    "    audio_queue_cv_.notify_all();\n"
+    "    return true;\n"
+    "}\n\n"
+    "size_t AudioService::GetPlaybackQueueDepth() {\n"
+    "    std::lock_guard<std::mutex> lock(audio_queue_mutex_);\n"
+    "    return audio_playback_queue_.size();\n"
+    "}\n\n"
+    "void AudioService::SetOutputPcmCallback(std::function<void(const int16_t*, size_t)> cb) {\n"
+    "    std::lock_guard<std::mutex> lock(audio_queue_mutex_);\n"
+    "    output_pcm_cb_ = std::move(cb);\n"
+    "}\n",
 )
 must_replace(
     audio_cc,
@@ -505,9 +593,19 @@ must_replace(
     "    SetListeningMode(GetDefaultListeningMode());\n",
 )
 
-# 7. Dark AMOLED theme + black boot fill + 14KB LVGL task stack
+# 7. Dark AMOLED theme + black boot fill + 14KB LVGL task stack + reclaim 2MB unused PNG image cache PSRAM
 lcd_cc = fw / "main/display/lcd_display.cc"
 must_replace(lcd_cc, 'settings.GetString("theme", "light")', 'settings.GetString("theme", "dark")')
+must_replace(
+    lcd_cc,
+    "        const size_t extra_total = 2560 * 1024;\n",
+    "        const size_t extra_total = 512 * 1024;\n",
+)
+must_replace(
+    lcd_cc,
+    "        lv_image_cache_resize(2 * 1024 * 1024, true);\n",
+    "        lv_image_cache_resize(256 * 1024, true);\n",
+)
 must_replace(
     lcd_cc,
     "std::vector<uint16_t> buffer(width_, 0xFFFF);",

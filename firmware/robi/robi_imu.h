@@ -10,6 +10,8 @@
 #include <driver/i2c_master.h>
 #include <esp_log.h>
 #include <esp_timer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #endif
 
 namespace robi {
@@ -303,16 +305,13 @@ public:
             dev_ = dev;
             addr_ = addr;
             available_.store(true, std::memory_order_release);
-            ESP_LOGI("RobiImu", "QMI8658 6-axis IMU active at I2C 0x%02X", addr);
+            ESP_LOGI("RobiImu", "QMI8658 6-axis IMU active at I2C 0x%02X (low-prio task)", addr);
 
-            esp_timer_create_args_t targs = {};
-            targs.callback = [](void* arg) { static_cast<RobiImuService*>(arg)->PollTick(); };
-            targs.arg = this;
-            targs.dispatch_method = ESP_TIMER_TASK;
-            targs.name = "robi_imu";
-            if (esp_timer_create(&targs, &poll_timer_) == ESP_OK) {
-                esp_timer_start_periodic(poll_timer_, 40000ULL);  // 25 Hz (40ms)
-            }
+            // Run synchronous 100kHz I2C polling on a low-priority task (prio 2) instead of
+            // Priority-22 ESP_TIMER_TASK so IMU I2C reads never delay timers or audio DMA!
+            xTaskCreate(
+                [](void* arg) { static_cast<RobiImuService*>(arg)->PollTaskLoop(); },
+                "robi_imu", 3072, this, 2, &poll_task_);
             return true;
         }
 
@@ -431,8 +430,17 @@ private:
         }
     }
 
+    void PollTaskLoop() {
+        while (available_.load(std::memory_order_acquire)) {
+            PollTick();
+            const uint32_t delay_ms = forehead_mode_req_.load(std::memory_order_relaxed) ? 40u : 60u;
+            vTaskDelay(pdMS_TO_TICKS(delay_ms));
+        }
+        vTaskDelete(nullptr);
+    }
+
     i2c_master_dev_handle_t dev_ = nullptr;
-    esp_timer_handle_t poll_timer_ = nullptr;
+    TaskHandle_t poll_task_ = nullptr;
     uint8_t addr_ = 0;
     int64_t last_poll_us_ = 0;
     ImuGestureTracker tracker_;
