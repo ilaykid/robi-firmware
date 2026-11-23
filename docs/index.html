@@ -197,10 +197,20 @@
 
         <!-- STEP 4 -->
         <div class="step-pane" data-pane="4">
-          <h2 class="pane-title" data-i18n="s4Title">Step 4 — Custom Topics &amp; Kid Profiles</h2>
+          <h2 class="pane-title" data-i18n="s4Title">Step 4 — Mode (Kids / Assistant / Hybrid), Topics &amp; Profiles</h2>
           <p class="pane-sub" data-i18n="s4Sub">
-            Add any conversation topics you'd like HeyRobi to weave into chats, and set up 0–3 kid profiles with custom touch activity buttons on screen!
+            Choose whether HeyRobi runs as a kids companion &amp; arcade, a smart desktop personal assistant (with live Google Search), or hybrid mode for the whole family!
           </p>
+
+          <div class="field">
+            <label for="selPersonaMode" data-i18n="s4PersonaLabel">HeyRobi Operating Mode</label>
+            <select id="selPersonaMode">
+              <option value="hybrid" data-i18n="optPersonaHybrid">Family Hybrid — Tap face = Adult Personal Assistant, Tap kid button = Kids Mode (Recommended!)</option>
+              <option value="kids" data-i18n="optPersonaKids">Interactive Kids Companion &amp; Games Only</option>
+              <option value="assistant" data-i18n="optPersonaAssistant">Desktop Personal Assistant Only (no kid buttons on screen)</option>
+            </select>
+            <small data-i18n-html="s4PersonaNoteHtml">💡 In every mode, swiping sideways on HeyRobi's round screen opens the touch &amp; motion arcade (including offline <strong>Heads Up!</strong> forehead charades and live <strong>Screen Trivia</strong>)!</small>
+          </div>
 
           <div class="topics-box">
             <label for="inpNewTopic" style="font-weight:700;color:#ecfeff;margin-bottom:6px;display:block;" data-i18n="s4TopicsLabel">
@@ -222,10 +232,12 @@
             <div id="customTopicsList" class="topic-tags"></div>
           </div>
 
-          <div id="kidsContainer"></div>
+          <div id="kidsSectionWrap">
+            <div id="kidsContainer"></div>
 
-          <div style="margin-bottom:18px;">
-            <button type="button" id="btnAddKid" class="btn btn-accent" data-i18n="btnAddKid">+ Add Kid Profile (up to 3)</button>
+            <div style="margin-bottom:18px;">
+              <button type="button" id="btnAddKid" class="btn btn-accent" data-i18n="btnAddKid">+ Add Kid Profile (up to 3)</button>
+            </div>
           </div>
 
           <div class="field">

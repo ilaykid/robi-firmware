@@ -1,6 +1,9 @@
 #include "../firmware/robi/robi_audio_sync.h"
 #include "../firmware/robi/robi_face_math.h"
+#include "../firmware/robi/robi_games.h"
+#include "../firmware/robi/robi_imu.h"
 #include "../firmware/robi/robi_mdns.h"
+#include "../firmware/robi/robi_sfx.h"
 #include "../firmware/robi/robi_utf8.h"
 
 #include <cassert>
@@ -353,6 +356,408 @@ void TestMdnsParserAndNsecBuilder() {
     assert(!robi::ParseMdnsRobiLocalQuery(loop_pkt, sizeof(loop_pkt), qtype));
 }
 
+void TestImuGesturesAndForeheadTilt() {
+    robi::ImuGestureTracker trk;
+    trk.Reset();
+    trk.SetZFrontSign(-1.0f);  // Test inverted back-mounted PCB sign (`az = -1g` when screen faces sky)
+
+    // 1. Desk bump / speaker bass vibration WITHOUT gyro rotation must NEVER false-trigger dizzy!
+    for (int i = 0; i < 30; ++i) {
+        robi::ImuSample bump = {(i % 2 == 0) ? 1.9f : -1.9f, 0.0f, -0.95f, 15.0f, 10.0f, 5.0f};
+        auto ev = trk.Step(bump, 40);
+        assert(!ev.shake_dizzy && !ev.enter_face_down_sleep);
+    }
+
+    // 2. Deliberate in-hand shake (alternating linear g + >165 dps gyro) triggers shake_dizzy once!
+    bool got_dizzy = false;
+    for (int i = 0; i < 8; ++i) {
+        float dir = (i % 2 == 0) ? 1.0f : -1.0f;
+        robi::ImuSample shake = {2.1f * dir, 0.2f, -0.3f, 0.0f, 220.0f * dir, 90.0f};
+        auto ev = trk.Step(shake, 40);
+        if (ev.shake_dizzy) {
+            assert(!got_dizzy);  // Cooldown prevents immediate duplicate trigger
+            got_dizzy = true;
+        }
+    }
+    assert(got_dizzy);
+
+    // 3. Flipping flat face-down (`az = +0.96g` -> `screen_z = -0.96g`) enters sleep after 650ms,
+    //    and lifting back up exits sleep cleanly!
+    bool entered_sleep = false;
+    for (int i = 0; i < 20; ++i) {
+        robi::ImuSample face_down = {0.05f, -0.04f, 0.96f, 2.0f, 1.0f, 0.0f};
+        auto ev = trk.Step(face_down, 40);
+        if (ev.enter_face_down_sleep) entered_sleep = true;
+    }
+    assert(entered_sleep && trk.is_face_down());
+
+    bool exited_sleep = false;
+    for (int i = 0; i < 8; ++i) {
+        robi::ImuSample picked_up = {0.0f, 0.92f, -0.35f, 25.0f, 0.0f, 0.0f};
+        auto ev = trk.Step(picked_up, 40);
+        if (ev.exit_face_down_sleep) exited_sleep = true;
+    }
+    assert(exited_sleep && !trk.is_face_down());
+
+    // 4. Forehead game ("נחש מה על המצח"): works at ANY 360-degree roll of the round screen!
+    trk.SetForeheadMode(true);
+    // Wait out initial 300ms refractory + arm upright at rotated 60-degree grip (`ax=0.85, ay=0.50, az=0.0`)
+    for (int i = 0; i < 16; ++i) {
+        auto ev = trk.Step({0.85f, 0.50f, 0.02f, 5.0f, 5.0f, 5.0f}, 40);
+        assert(ev.forehead_action == robi::ForeheadAction::kNone);
+    }
+    assert(trk.is_forehead_armed());
+
+    // Nod glass toward floor (`screen_z = -0.82g` -> `az = +0.82g` since z_front_sign == -1) -> kCorrectDown!
+    int correct_hits = 0;
+    for (int i = 0; i < 6; ++i) {
+        auto ev = trk.Step({0.45f, 0.25f, 0.82f, 60.0f, 0.0f, 0.0f}, 40);
+        if (ev.forehead_action == robi::ForeheadAction::kCorrectDown) ++correct_hits;
+        assert(ev.forehead_action != robi::ForeheadAction::kSkipUp);
+    }
+    assert(correct_hits == 1);
+
+    // Immediate rebound overshoot upward within 650ms refractory must NOT false-trigger kSkipUp!
+    for (int i = 0; i < 10; ++i) {
+        auto ev = trk.Step({0.45f, 0.25f, -0.85f, -80.0f, 0.0f, 0.0f}, 40);
+        assert(ev.forehead_action == robi::ForeheadAction::kNone);
+    }
+
+    // Re-arm neutral upright, then tilt glass toward ceiling (`az = -0.80g` -> `screen_z = +0.80g`) -> kSkipUp!
+    for (int i = 0; i < 15; ++i) {
+        trk.Step({-0.50f, 0.85f, -0.05f, 3.0f, 3.0f, 3.0f}, 40);
+    }
+    assert(trk.is_forehead_armed());
+    int skip_hits = 0;
+    for (int i = 0; i < 6; ++i) {
+        auto ev = trk.Step({-0.30f, 0.45f, -0.80f, -55.0f, 0.0f, 0.0f}, 40);
+        if (ev.forehead_action == robi::ForeheadAction::kSkipUp) ++skip_hits;
+    }
+    assert(skip_hits == 1);
+}
+
+void TestSfxSynthAndGamesEngine() {
+    // 1. Verify all 8 procedural SFX IDs produce non-empty, click-free, non-clipping 24kHz PCM
+    for (int id = 0; id <= 7; ++id) {
+        auto pcm = robi::SynthesizeSfxPcm(static_cast<robi::RobiSfxId>(id), 24000);
+        assert(pcm.size() >= 1200 && pcm.size() <= 24000);
+        int max_abs = 0;
+        for (int16_t s : pcm) {
+            max_abs = std::max(max_abs, std::abs(static_cast<int>(s)));
+        }
+        assert(max_abs > 2000 && max_abs <= 28000);
+        assert(pcm.back() == 0);  // Trailing zero settle sample
+    }
+
+    // 2. Verify every built-in Hebrew & English word across all 5 categories is strict valid UTF-8
+    for (const auto& cat : robi::kHeadsUpCategories) {
+        assert(IsStrictlyValidUtf8(cat.title_he));
+        assert(cat.count_he >= 30 && cat.count_en >= 20);
+        for (size_t i = 0; i < cat.count_he; ++i) {
+            assert(std::strlen(cat.words_he[i]) > 0);
+            assert(IsStrictlyValidUtf8(cat.words_he[i]));
+        }
+        for (size_t i = 0; i < cat.count_en; ++i) {
+            assert(std::strlen(cat.words_en[i]) > 0);
+            assert(IsStrictlyValidUtf8(cat.words_en[i]));
+        }
+    }
+
+    // 3. Test HeadsUpEngine full lifecycle (3s countdown -> play -> flash -> summary)
+    robi::HeadsUpEngine hu;
+    hu.SeedRng(42);
+    hu.StartOfflineRound(-1, false, 20);
+    assert(hu.phase() == robi::HeadsUpEngine::Phase::kCountdown);
+    assert(hu.countdown_sec() == 3);
+
+    bool started = false;
+    for (int i = 0; i < 32; ++i) {
+        auto ev = hu.Step(100);
+        if (ev.round_started) started = true;
+    }
+    assert(started && hu.phase() == robi::HeadsUpEngine::Phase::kPlaying);
+    std::string w1 = hu.CurrentWord();
+    assert(!w1.empty() && IsStrictlyValidUtf8(w1));
+
+    assert(hu.MarkCorrect());
+    assert(hu.phase() == robi::HeadsUpEngine::Phase::kFlashCorrect);
+    assert(hu.correct_count() == 1);
+    for (int i = 0; i < 10; ++i) hu.Step(100);
+    assert(hu.phase() == robi::HeadsUpEngine::Phase::kPlaying);
+    assert(hu.CurrentWord() != w1);
+
+    // 4. Test deterministic 8-Question TriviaEngine (Solo + Head-to-Head + Shuffling + Fallback)
+    for (const auto& tcat : robi::kTriviaCategories) {
+        assert(IsStrictlyValidUtf8(tcat.title_he));
+        assert(IsStrictlyValidUtf8(tcat.ai_topic_he));
+        assert(tcat.count_he >= 8 && tcat.count_en >= 6);
+        for (size_t i = 0; i < tcat.count_he; ++i) {
+            assert(std::strlen(tcat.items_he[i].q) > 0 && IsStrictlyValidUtf8(tcat.items_he[i].q));
+            assert(std::strlen(tcat.items_he[i].o0) > 0 && IsStrictlyValidUtf8(tcat.items_he[i].o0));
+            assert(std::strlen(tcat.items_he[i].o1) > 0 && IsStrictlyValidUtf8(tcat.items_he[i].o1));
+            assert(std::strlen(tcat.items_he[i].o2) > 0 && IsStrictlyValidUtf8(tcat.items_he[i].o2));
+            assert(std::strlen(tcat.items_he[i].o3) > 0 && IsStrictlyValidUtf8(tcat.items_he[i].o3));
+        }
+        for (size_t i = 0; i < tcat.count_en; ++i) {
+            assert(std::strlen(tcat.items_en[i].q) > 0 && IsStrictlyValidUtf8(tcat.items_en[i].q));
+            assert(std::strlen(tcat.items_en[i].o0) > 0 && IsStrictlyValidUtf8(tcat.items_en[i].o0));
+            assert(std::strlen(tcat.items_en[i].o1) > 0 && IsStrictlyValidUtf8(tcat.items_en[i].o1));
+            assert(std::strlen(tcat.items_en[i].o2) > 0 && IsStrictlyValidUtf8(tcat.items_en[i].o2));
+            assert(std::strlen(tcat.items_en[i].o3) > 0 && IsStrictlyValidUtf8(tcat.items_en[i].o3));
+        }
+    }
+
+    robi::TriviaEngine tr;
+    tr.SeedRng(20261118u);
+    tr.StartOfflineDeck(-1, /*head_to_head=*/true, "לביא", "אורי", /*english=*/false, 8);
+    assert(tr.IsActive() && tr.phase() == robi::TriviaEngine::Phase::kQuestion);
+    assert(tr.total_questions() == 8);
+
+    bool slot_seen[4] = {false, false, false, false};
+    for (size_t qi = 0; qi < 8; ++qi) {
+        assert(tr.question_index() == qi);
+        assert(tr.CurrentPlayerIndex() == static_cast<int>(qi % 2));
+        assert(tr.CurrentPlayerName() == ((qi % 2 == 0) ? "לביא" : "אורי"));
+        const auto* q = tr.CurrentQuestion();
+        assert(q != nullptr && q->options.size() == 4);
+        assert(q->correct_index >= 0 && q->correct_index < 4);
+        slot_seen[q->correct_index] = true;
+
+        // Lavi (even turns: 0,2,4,6) answers 3/4 right; Ori (odd turns: 1,3,5,7) answers 4/4 right!
+        std::string sc_line = tr.FormatScoreText();
+        assert(!sc_line.empty() && IsStrictlyValidUtf8(sc_line));
+        assert(sc_line.find(" | ") != std::string::npos);
+        assert(sc_line.find("   ") == std::string::npos);
+        int pick = (qi == 2) ? ((q->correct_index + 1) % 4) : q->correct_index;
+        assert(tr.SubmitAnswer(pick));
+        assert(tr.phase() == robi::TriviaEngine::Phase::kReveal);
+        assert(!tr.SubmitAnswer(0));  // Double-tap during reveal must be ignored!
+
+        bool next_q = false;
+        bool summary = false;
+        for (int step = 0; step < 16; ++step) {
+            auto tev = tr.Step(100);
+            if (tev.advanced_to_next_question) next_q = true;
+            if (tev.finished_to_summary) summary = true;
+        }
+        if (qi < 7) {
+            assert(next_q && !summary);
+            assert(tr.phase() == robi::TriviaEngine::Phase::kQuestion);
+        } else {
+            assert(summary && !next_q);
+            assert(tr.phase() == robi::TriviaEngine::Phase::kSummary);
+        }
+    }
+    assert(tr.score(0) == 3 && tr.score(1) == 4);
+    assert(tr.FormatHeaderText().find("אורי") != std::string::npos);
+    assert(IsStrictlyValidUtf8(tr.FormatSummaryBody()));
+    int distinct_slots = (slot_seen[0] ? 1 : 0) + (slot_seen[1] ? 1 : 0) +
+                         (slot_seen[2] ? 1 : 0) + (slot_seen[3] ? 1 : 0);
+    assert(distinct_slots >= 2);  // Options were genuinely shuffled across indices
+
+    // Test preserve_first_question_order for voice-launched custom deck + loading timeout fallback
+    std::vector<robi::TriviaQuestionItem> custom_qs = {
+        {"שאלה ראשונה קבועה?", {"נכון1", "לא2", "לא3", "לא4"}, 0},
+        {"שאלה שנייה?", {"נכון2", "לא2", "לא3", "לא4"}, 0},
+        {"שאלה שלישית?", {"נכון3", "לא2", "לא3", "לא4"}, 0},
+        {"שאלה רביעית?", {"נכון4", "לא2", "לא3", "לא4"}, 0},
+    };
+    tr.StartCustomDeck("כדורגל", custom_qs, 2, false, "לביא", "אורי", false, 4, true);
+    assert(tr.CurrentQuestion() != nullptr);
+    assert(tr.CurrentQuestion()->question == "שאלה ראשונה קבועה?");
+    assert(tr.CurrentQuestion()->options[static_cast<size_t>(tr.CurrentQuestion()->correct_index)] == "נכון1");
+
+    tr.BeginLoading("חלל", false, "לביא", "אורי", false);
+    assert(tr.phase() == robi::TriviaEngine::Phase::kLoading);
+    bool timed_out = false;
+    for (int i = 0; i < 92; ++i) {
+        if (tr.Step(100).loading_timed_out) timed_out = true;
+    }
+    assert(timed_out);
+
+    // 5. Test RobiGameHub request-id cancellation, anti-repeat rolling memory, & mic-mute gate
+    auto& hub = robi::RobiGameHub::GetInstance();
+    uint32_t r1 = hub.NextTriviaRequestId();
+    uint32_t r2 = hub.NextTriviaRequestId();
+    hub.DeliverAsyncTriviaDeck(r1, custom_qs);  // Stale r1 must be ignored!
+    std::vector<robi::TriviaQuestionItem> popped_qs;
+    assert(!hub.PopAsyncTriviaDeck(r2, popped_qs));
+    hub.DeliverAsyncTriviaDeck(r2, custom_qs);
+    assert(hub.PopAsyncTriviaDeck(r2, popped_qs) && popped_qs.size() == 4);
+    assert(!hub.PopAsyncTriviaDeck(r2, popped_qs));
+
+    // Verify rolling 40-question anti-repeat history & offline unseen prioritization
+    std::vector<robi::TriviaQuestionItem> many_qs;
+    for (int i = 0; i < 48; ++i) {
+        many_qs.push_back({"שאלת בדיקה #" + std::to_string(i), {"א", "ב", "ג", "ד"}, 0});
+    }
+    hub.RecordPlayedTriviaQuestions(many_qs);
+    auto recent16 = hub.GetRecentTriviaQuestions(16);
+    assert(recent16.size() == 16);
+    assert(recent16.front() == "שאלת בדיקה #32");
+    assert(recent16.back() == "שאלת בדיקה #47");  // Most recent at back
+    auto recent_all = hub.GetRecentTriviaQuestions(50);
+    assert(recent_all.size() == 40);  // Capped at rolling 40
+
+    // Offline Mega-Mix deck should pick 8 completely unseen questions in Round 2!
+    robi::TriviaEngine tr_r1;
+    tr_r1.SeedRng(1001u);
+    tr_r1.StartOfflineDeck(-1, false, "לביא", "אורי", false, 8);
+    std::vector<std::string> seen_r1;
+    for (const auto& item : tr_r1.deck()) seen_r1.push_back(item.question);
+    robi::TriviaEngine tr_r2;
+    tr_r2.SeedRng(1001u);  // Even with identical RNG seed, avoid_questions forces 8 fresh questions!
+    tr_r2.StartOfflineDeck(-1, false, "לביא", "אורי", false, 8, seen_r1);
+    assert(tr_r2.deck().size() == 8);
+    for (const auto& item : tr_r2.deck()) {
+        assert(std::find(seen_r1.begin(), seen_r1.end(), item.question) == seen_r1.end());
+    }
+
+    hub.SetMicMutedForScreenGame(true);
+    assert(hub.IsMicMutedForScreenGame());
+    hub.SetMicMutedForScreenGame(false);
+    assert(!hub.IsMicMutedForScreenGame());
+
+    auto dizzy_res = robi::RobiComputePresetParams("dizzy", robi::ROBI_THEME_CYBER_CYAN,
+                                                   robi::ROBI_STYLE_CYBER_VISOR);
+    assert(dizzy_res.tremor_shock);
+    assert(std::strcmp(robi::RobiNormalizeEmotionName("wink"), "winking") == 0);
+    assert(std::strcmp(robi::RobiNormalizeEmotionName("love"), "loving") == 0);
+}
+
+void TestNoiseGatedUplinkAgcAndExpander() {
+    // 1. Active quiet speech (250 RMS) gets boosted cleanly toward ~2200 RMS (max 4.2x)
+    float gain = 1.0f;
+    std::vector<int16_t> frame(320);
+    for (int f = 0; f < 6; ++f) {
+        for (size_t i = 0; i < frame.size(); ++i) frame[i] = (i & 1) ? 250 : -250;
+        robi::ProcessUplinkFramePcm(frame.data(), frame.size(), 250.0f, 30.0f, 90.0f,
+                                    /*is_voice_active=*/true, /*in_hangover=*/false, gain);
+    }
+    assert(gain > 3.2f && gain <= 4.21f);
+    assert(std::abs(frame[0]) >= 800 && std::abs(frame[0]) <= 1100);
+
+    // 2. Post-speech consonant hangover NEVER amplifies noise/silence, decays gain toward 1.0x
+    for (size_t i = 0; i < frame.size(); ++i) frame[i] = (i & 1) ? 80 : -80;
+    float gain_before_hang = gain;
+    float ret_hang = robi::ProcessUplinkFramePcm(frame.data(), frame.size(), 80.0f, 30.0f, 90.0f,
+                                                 /*is_voice_active=*/false, /*in_hangover=*/true, gain);
+    assert(ret_hang == 1.0f);
+    assert(frame[0] == -80 && frame[1] == 80);  // Unboosted, unmodified natural consonant tail!
+    assert(gain < gain_before_hang);
+
+    // 3. Post-hangover background noise floor gets -18 dB (>> 3) soft downward expansion
+    for (size_t i = 0; i < frame.size(); ++i) frame[i] = (i & 1) ? 160 : -160;
+    float ret_exp = robi::ProcessUplinkFramePcm(frame.data(), frame.size(), 160.0f, 110.0f, 220.0f,
+                                                /*is_voice_active=*/false, /*in_hangover=*/false, gain);
+    assert(ret_exp <= 0.13f);
+    assert(std::abs(frame[0]) <= 20 && std::abs(frame[1]) <= 20);
+
+    // 4. Strong mid-level sound well above noise gate passes untouched at 1.0x
+    for (size_t i = 0; i < frame.size(); ++i) frame[i] = (i & 1) ? 700 : -700;
+    float ret_pass = robi::ProcessUplinkFramePcm(frame.data(), frame.size(), 700.0f, 110.0f, 220.0f,
+                                                 /*is_voice_active=*/false, /*in_hangover=*/false, gain);
+    assert(ret_pass == 1.0f);
+    assert(frame[0] == -700 && frame[1] == 700);
+}
+
+void TestContinuousStreamingVadAndNoisyRoom() {
+    robi::AdaptiveSpeechTracker tr;
+    tr.ResetSession();
+    // Lively living room with guests (~120 RMS steady ambient background)
+    for (int i = 0; i < 30; ++i) {
+        auto d = tr.OnFrame(120.0f + static_cast<float>(i % 3) * 8.0f, 60);
+        assert(!d.stream_active && !d.start_utterance && !d.strong_speech_ended);
+    }
+    assert(tr.noise_floor_rms() >= 110.0f && tr.noise_floor_rms() <= 145.0f);
+
+    // Frame #1 of speech immediately wakes stream & requests pre-roll flush (0ms first-syllable clip!)
+    auto f1 = tr.OnFrame(1100.0f, 60);
+    assert(f1.stream_active && f1.flush_preroll && f1.voice_active && !f1.start_utterance);
+
+    // Frame #2 confirms utterance onset (120ms) without re-flushing pre-roll
+    auto f2 = tr.OnFrame(1300.0f, 60);
+    assert(f2.stream_active && !f2.flush_preroll && f2.start_utterance && f2.in_speech && f2.voice_active);
+
+    for (int i = 0; i < 8; ++i) {
+        auto d = tr.OnFrame(1450.0f, 60);
+        assert(d.stream_active && d.in_speech && d.voice_active && !d.strong_speech_ended);
+    }
+
+    // User finishes sentence -> room drops back to 130 RMS background
+    int hangover_frames = 0;
+    int strong_end_count = 0;
+    int commit_count = 0;
+    int tail_active_frames = 0;
+    for (int i = 0; i < 35; ++i) {
+        auto d = tr.OnFrame(130.0f, 60);
+        if (d.in_hangover) ++hangover_frames;
+        if (d.strong_speech_ended) ++strong_end_count;
+        if (d.commit_utterance) ++commit_count;
+        if (d.stream_active) ++tail_active_frames;
+    }
+    assert(hangover_frames == 4);       // Exact 240ms consonant hangover (4 * 60ms)
+    assert(strong_end_count == 1);      // Fires once at 420ms quiet
+    assert(commit_count == 1);          // Commits at 600ms
+    assert(tail_active_frames == 25);   // Full 1500ms continuous clean silence tail (25 * 60ms)
+    assert(!tr.stream_active());        // Cleanly stops streaming after 1500ms tail
+
+    // Continuous 9s monologue must NEVER falsely emit strong_speech_ended while user is still speaking!
+    tr.ResetSession();
+    for (int i = 0; i < 155; ++i) {
+        auto d = tr.OnFrame(1600.0f, 60);
+        assert(!d.strong_speech_ended);
+    }
+}
+
+void TestDacCursorMultiTurnEmotionsAndOddWrap() {
+    std::vector<int16_t> backing(4096, 0);
+    robi::SampleSyncedJitterRing ring;
+    ring.AttachBuffer(backing.data(), backing.size());
+    std::atomic<bool> stopping{false};
+    std::atomic<bool> drop_turn{false};
+
+    // Turn 1: push 2400 samples with "happy"@0, "surprised"@1200, pop all 2400 ahead of DAC cursor
+    std::vector<int16_t> t1(1200);
+    for (size_t i = 0; i < t1.size(); ++i) t1[i] = static_cast<int16_t>(i);
+    ring.QueueEmotionAtWriteCursor("happy");
+    ring.PushSamples(t1.data(), 1200, stopping, drop_turn);
+    ring.QueueEmotionAtWriteCursor("surprised");
+    ring.PushSamples(t1.data(), 1200, stopping, drop_turn);
+
+    std::vector<int16_t> out(2400);
+    assert(ring.PopSamples(out.data(), 2400) == 2400);
+    assert(ring.popped_samples() == 2400);
+
+    // DAC cursor at 600: ONLY "happy" is due even though ring already popped 2400 into 700ms queue!
+    std::string emo;
+    assert(ring.PopDueEmotionAt(600, false, emo) && emo == "happy");
+    assert(!ring.PopDueEmotionAt(600, false, emo));
+    assert(ring.PopDueEmotionAt(1200, false, emo) && emo == "surprised");
+    assert(!ring.PopDueEmotionAt(2400, false, emo));
+
+    // Turn 2 WITHOUT Clear(): verify monotonic offsets stay 100% aligned across turns + odd wrap memcpy!
+    uint64_t turn2_dac = ring.popped_samples();  // 2400
+    assert(turn2_dac == 2400);
+    ring.QueueEmotionAtWriteCursor("cool");  // scheduled at 2400
+    std::vector<int16_t> odd1(3000);
+    for (size_t i = 0; i < odd1.size(); ++i) odd1[i] = static_cast<int16_t>(10000 + i);
+    ring.PushSamples(odd1.data(), 3000, stopping, drop_turn);  // wraps across 4096 boundary!
+    ring.QueueEmotionAtWriteCursor("winking");  // scheduled at 5400
+    std::vector<int16_t> odd2(777);
+    for (size_t i = 0; i < odd2.size(); ++i) odd2[i] = static_cast<int16_t>(20000 + i);
+    ring.PushSamples(odd2.data(), 777, stopping, drop_turn);
+
+    assert(ring.PopDueEmotionAt(turn2_dac, false, emo) && emo == "cool");
+    assert(!ring.PopDueEmotionAt(turn2_dac + 2999, false, emo));
+    assert(ring.PopDueEmotionAt(turn2_dac + 3000, false, emo) && emo == "winking");
+
+    std::vector<int16_t> verify_buf(3777);
+    assert(ring.PopSamples(verify_buf.data(), 3777) == 3777);
+    for (size_t i = 0; i < 3000; ++i) assert(verify_buf[i] == static_cast<int16_t>(10000 + i));
+    for (size_t i = 0; i < 777; ++i) assert(verify_buf[3000 + i] == static_cast<int16_t>(20000 + i));
+}
+
 }  // namespace
 
 int main() {
@@ -361,8 +766,13 @@ int main() {
     TestSampleSyncedEmotionRing();
     TestConcurrentRingWrapAround();
     TestAdaptiveSpeechTracker();
+    TestNoiseGatedUplinkAgcAndExpander();
+    TestContinuousStreamingVadAndNoisyRoom();
+    TestDacCursorMultiTurnEmotionsAndOddWrap();
     TestThemeColorPreservationAcrossAllEmotions();
     TestMdnsParserAndNsecBuilder();
-    std::printf("ALL ROBI SYNC & LATENCY UNIT TESTS PASSED!\n");
+    TestImuGesturesAndForeheadTilt();
+    TestSfxSynthAndGamesEngine();
+    std::printf("ALL ROBI v3.2 SYNC, IMU, SFX & GAMES UNIT TESTS PASSED!\n");
     return 0;
 }

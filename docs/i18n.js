@@ -63,8 +63,13 @@ export const I18N = {
     navNextTopics: "Next: Topics & Kids →",
 
     // Step 4
-    s4Title: "Step 4 — Custom Topics & Kid Profiles",
-    s4Sub: "Add any conversation topics you'd like HeyRobi to weave into chats, and set up 0–3 kid profiles with custom touch activity buttons on screen!",
+    s4Title: "Step 4 — Mode (Kids / Assistant / Hybrid), Topics & Profiles",
+    s4Sub: "Choose whether HeyRobi runs as a kids companion & arcade, a smart desktop personal assistant (with live Google Search), or hybrid mode for the whole family!",
+    s4PersonaLabel: "HeyRobi Operating Mode",
+    optPersonaHybrid: "Family Hybrid — Tap face = Adult Personal Assistant, Tap kid button = Kids Mode (Recommended!)",
+    optPersonaKids: "Interactive Kids Companion & Games Only",
+    optPersonaAssistant: "Desktop Personal Assistant Only (no kid buttons on screen)",
+    s4PersonaNoteHtml: "💡 In every mode, swiping sideways on HeyRobi's round screen opens the touch &amp; motion arcade (including offline <strong>Heads Up!</strong> forehead charades and live <strong>Screen Trivia</strong>)!",
     s4TopicsLabel: "💬 Add Your Own Conversation Topics (Parent Free-Text)",
     s4TopicsSub: "Type any topic your kids love or you'd like HeyRobi to encourage — basketball, chess, first-grade prep, Greek mythology, Minecraft, music, science curiosity, and more:",
     s4TopicsPlaceholder: "Type a custom topic and press Enter or click Add...",
@@ -293,8 +298,13 @@ export const I18N = {
     navNextTopics: "המשך לנושאים וילדים ←",
 
     // Step 4
-    s4Title: "שלב 4 — נושאי שיחה אישיים ופרופילי ילדים",
-    s4Sub: "הזינו חופשי כל נושא שיחה משלכם שתרצו שרובי ישלב בשיחות, והגדירו עד 3 ילדים עם כפתורי נושאים מותאמים אישית על המסך!",
+    s4Title: "שלב 4 — מצב הפעלה (ילדים / עוזר אישי / משולב) ופרופילים",
+    s4Sub: "בחרו האם רובי ישמש כחבר ומשחקייה לילדים, כעוזר אישי שולחני חכם למבוגר (עם חיפוש חי בגוגל), או במצב משולב לשניהם יחד!",
+    s4PersonaLabel: "מצב הפעלה של רובי",
+    optPersonaHybrid: "משולב למשפחה — לחיצה על הפנים = עוזר אישי למבוגר, לחיצה על שם ילד = מצב ילדים (מומלץ!)",
+    optPersonaKids: "חבר ומשחקייה אינטראקטיבית לילדים בלבד",
+    optPersonaAssistant: "עוזר אישי שולחני למבוגר בלבד (ללא כפתורי ילדים על המסך)",
+    s4PersonaNoteHtml: "💡 בכל המצבים החלקה הצידה על המסך העגול של רובי פותחת את משחקיית המגע וחיישן התנועה (כולל <strong>נחש מה על המצח</strong> שעובד גם ללא אינטרנט, ו<strong>טריוויה חיה על המסך</strong>)!",
     s4TopicsLabel: "💬 הוסיפו נושאי שיחה משלכם (כתיבה חופשית של ההורה)",
     s4TopicsSub: "כתבו כל נושא שמעניין את הילדים או שחשוב לכם שרובי יעודד — כדורסל, שחמט, הכנה לכיתה א', מיתולוגיה יוונית, חגי ישראל, מיינקראפט, נגינה, סקרנות מדעית ועוד:",
     s4TopicsPlaceholder: "הקלידו נושא שיחה משלכם ולחצו Enter או הוסף...",

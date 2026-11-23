@@ -1,8 +1,10 @@
 #include "robi_http_portal.h"
 #include "robi_config.h"
 #include "robi_gemini_live.h"
+#include "robi_imu.h"
 #include "robi_mdns.h"
 #include "robi_portal_html.h"
+#include "robi_sfx.h"
 
 #include "application.h"
 #include "audio_codec.h"
@@ -130,11 +132,17 @@ esp_err_t HandleConfigPost(httpd_req_t* req) {
 }
 
 esp_err_t HandleStatusGet(httpd_req_t* req) {
+    bool include_ui = false;
     char query_buf[64] = {};
     if (httpd_req_get_url_query_str(req, query_buf, sizeof(query_buf)) == ESP_OK) {
         char day_buf[16] = {};
         if (httpd_query_key_value(query_buf, "day", day_buf, sizeof(day_buf)) == ESP_OK) {
             RobiConfig::GetInstance().SyncUsageDay(day_buf);
+        }
+        char ui_buf[8] = {};
+        if (httpd_query_key_value(query_buf, "ui", ui_buf, sizeof(ui_buf)) == ESP_OK &&
+            ui_buf[0] == '1') {
+            include_ui = true;
         }
     }
 
@@ -153,6 +161,8 @@ esp_err_t HandleStatusGet(httpd_req_t* req) {
     }
     cJSON_AddItemToObject(root, "saved_ssids", saved_arr);
     cJSON_AddStringToObject(root, "preferred_model", cfg.preferred_model.c_str());
+    cJSON_AddStringToObject(root, "persona_mode", cfg.persona_mode.c_str());
+    cJSON_AddStringToObject(root, "active_scope", RobiConfig::GetInstance().GetActiveScope().c_str());
     cJSON_AddStringToObject(root, "usage_day", RobiConfig::GetInstance().GetUsageDay().c_str());
 
     const char* st_str = "unknown";
@@ -191,6 +201,8 @@ esp_err_t HandleStatusGet(httpd_req_t* req) {
         cJSON_AddNumberToObject(root, "noise_floor_rms", proto->GetNoiseFloorRms());
         cJSON_AddNumberToObject(root, "ring_avail", static_cast<double>(proto->GetRingAvailableSamples()));
         cJSON_AddBoolToObject(root, "playback_idle", app.GetAudioService().IsPlaybackIdle());
+        cJSON_AddNumberToObject(root, "playback_q_depth",
+                                static_cast<double>(app.GetAudioService().GetPlaybackQueueDepth()));
         cJSON_AddBoolToObject(root, "awaiting_response", proto->IsAwaitingResponse());
         cJSON_AddBoolToObject(root, "streaming_speech", proto->IsStreamingSpeech());
         if (open) {
@@ -267,6 +279,26 @@ esp_err_t HandleStatusGet(httpd_req_t* req) {
     }
     cJSON_AddItemToObject(root, "memories", mems);
 
+    auto& imu = robi::RobiImuService::GetInstance();
+    cJSON* imu_obj = cJSON_CreateObject();
+    cJSON_AddBoolToObject(imu_obj, "ok", imu.IsAvailable());
+    cJSON_AddNumberToObject(imu_obj, "addr", imu.GetAddress());
+    cJSON_AddBoolToObject(imu_obj, "face_down", imu.IsFaceDown());
+    cJSON_AddNumberToObject(imu_obj, "z_sign", imu.GetZFrontSign());
+    auto samp = imu.GetLastSample();
+    cJSON_AddNumberToObject(imu_obj, "ax", std::round(samp.ax * 100.0f) / 100.0f);
+    cJSON_AddNumberToObject(imu_obj, "ay", std::round(samp.ay * 100.0f) / 100.0f);
+    cJSON_AddNumberToObject(imu_obj, "az", std::round(samp.az * 100.0f) / 100.0f);
+    cJSON_AddItemToObject(root, "imu", imu_obj);
+
+    if (include_ui) {
+        std::string ui_raw = RobiConfig::GetInstance().GetUiStatusJson();
+        cJSON* ui_obj = cJSON_ParseWithLength(ui_raw.data(), ui_raw.size());
+        if (ui_obj != nullptr) {
+            cJSON_AddItemToObject(root, "ui", ui_obj);
+        }
+    }
+
     char* s = cJSON_PrintUnformatted(root);
     std::string out = s ? s : "{}";
     if (s) cJSON_free(s);
@@ -337,6 +369,21 @@ esp_err_t HandleControlPost(httpd_req_t* req) {
             if (auto* proto = GeminiLiveProtocol::GetActiveInstance()) {
                 proto->CommitListeningUtterance();
             }
+        });
+    }
+    const cJSON* p_scope = cJSON_GetObjectItemCaseSensitive(root, "persona_scope");
+    if (cJSON_IsString(p_scope) && p_scope->valuestring != nullptr && p_scope->valuestring[0] != '\0') {
+        RobiConfig::GetInstance().SetActiveScope(p_scope->valuestring);
+    }
+    const cJSON* z_sign = cJSON_GetObjectItemCaseSensitive(root, "imu_z_sign");
+    if (cJSON_IsNumber(z_sign)) {
+        robi::RobiImuService::GetInstance().OverrideZFrontSign(static_cast<float>(z_sign->valuedouble));
+    }
+    const cJSON* sfx = cJSON_GetObjectItemCaseSensitive(root, "play_sfx");
+    if (cJSON_IsNumber(sfx)) {
+        int s_id = std::clamp(sfx->valueint, 0, 7);
+        Application::GetInstance().Schedule([s_id]() {
+            robi::PlayRobiSfx(static_cast<robi::RobiSfxId>(s_id), false);
         });
     }
     const cJSON* prompt = cJSON_GetObjectItemCaseSensitive(root, "prompt");

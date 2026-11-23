@@ -168,13 +168,27 @@ struct EmotionPresetResult {
     bool tremor_shock = false;
 };
 
+inline const char* RobiNormalizeEmotionName(const char* name) {
+    if (name == nullptr || name[0] == '\0') return "neutral";
+    if (std::strcmp(name, "wink") == 0) return "winking";
+    if (std::strcmp(name, "love") == 0 || std::strcmp(name, "affectionate") == 0) return "loving";
+    if (std::strcmp(name, "laugh") == 0 || std::strcmp(name, "amused") == 0) return "laughing";
+    if (std::strcmp(name, "excited") == 0 || std::strcmp(name, "amazed") == 0) return "surprised";
+    if (std::strcmp(name, "proud") == 0) return "confident";
+    if (std::strcmp(name, "curious") == 0) return "thinking";
+    if (std::strcmp(name, "playful") == 0) return "silly";
+    if (std::strcmp(name, "tired") == 0) return "sleepy";
+    return name;
+}
+
 // Computes procedural target FaceParams for any emotion while strictly preserving
 // the user's selected theme color (`RobiThemeBaseHex(theme_id)`).
-inline EmotionPresetResult RobiComputePresetParams(const char* name, RobiThemeId theme_id,
+inline EmotionPresetResult RobiComputePresetParams(const char* raw_name, RobiThemeId theme_id,
                                                    RobiFaceStyle style_id) {
     EmotionPresetResult res;
     res.params = RobiDefaultParams(theme_id, style_id);
-    if (name == nullptr) return res;
+    if (raw_name == nullptr) return res;
+    const char* name = RobiNormalizeEmotionName(raw_name);
 
     FaceParams& tgt = res.params;
     if (std::strcmp(name, "listening") == 0) {
@@ -386,6 +400,23 @@ inline EmotionPresetResult RobiComputePresetParams(const char* name, RobiThemeId
         tgt.brow_opa = 0.40f;
         tgt.mouth_w = 16.0f;
         tgt.mouth_o = 0.55f;
+    } else if (std::strcmp(name, "dizzy") == 0) {
+        res.tremor_shock = true;
+        tgt.eye_w = 108.0f;
+        tgt.eye_h = 108.0f;
+        tgt.eye_radius = 54.0f;
+        tgt.pupil_scale = 0.22f;
+        tgt.squint_top_l = 0.26f;
+        tgt.squint_bot_r = 0.26f;
+        tgt.brow_ang_l = 16.0f;
+        tgt.brow_ang_r = 16.0f;
+        tgt.brow_y_l = -10.0f;
+        tgt.brow_y_r = 4.0f;
+        tgt.brow_opa = 1.0f;
+        tgt.mouth_w = 48.0f;
+        tgt.mouth_curve = 0.0f;
+        tgt.mouth_wave = 9.5f;
+        tgt.cheek_opa = 0.45f;
     }
     return res;
 }
