@@ -118,11 +118,12 @@ public:
     // Builds full system instruction for Gemini Live tailored to active persona scope
     std::string BuildSystemPrompt() const;
 
-    // Live UI reload & telemetry hooks (registered by CustomLcdDisplay)
+    // Live UI reload, telemetry & audio-busy hooks
     void SetUiReloadCallback(std::function<void()> cb);
     void NotifyUiReload();
     void SetUiStatusProvider(std::function<std::string()> cb);
     std::string GetUiStatusJson() const;
+    void SetAudioBusyProvider(std::function<bool()> cb);
 
     static uint32_t ParseHexColor(const std::string& s, uint32_t fallback = 0x0284C7);
 
@@ -158,6 +159,7 @@ private:
     std::vector<RobiModelUsage> model_usage_;
     std::function<void()> ui_reload_cb_;
     std::function<std::string()> ui_status_cb_;
+    std::function<bool()> audio_busy_cb_;
 };
 
 #endif  // ROBI_CONFIG_H_

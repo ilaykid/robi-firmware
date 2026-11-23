@@ -941,6 +941,21 @@ void RobiConfig::LoadMemoriesFromNvsLocked() {
 }
 
 void RobiConfig::FlushNvsFromInternalStack() {
+    std::function<bool()> busy_cb;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        busy_cb = audio_busy_cb_;
+    }
+    if (busy_cb && busy_cb()) {
+        // Defer SPI flash NVS commit while audio is playing/receiving so flash cache never stalls speech!
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (s_nvs_flush_timer != nullptr) {
+            esp_timer_stop(s_nvs_flush_timer);
+            esp_timer_start_once(s_nvs_flush_timer, 1500000ULL);  // Retry 1.5s later
+        }
+        return;
+    }
+
     std::string mem_raw;
     std::string dlg_raw;
     std::string usage_raw;
@@ -1259,6 +1274,11 @@ std::string RobiConfig::GetUiStatusJson() const {
         cb = ui_status_cb_;
     }
     return cb ? cb() : "{}";
+}
+
+void RobiConfig::SetAudioBusyProvider(std::function<bool()> cb) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    audio_busy_cb_ = std::move(cb);
 }
 
 std::string RobiConfig::BuildSystemPrompt() const {

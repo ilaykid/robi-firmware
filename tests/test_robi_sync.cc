@@ -625,6 +625,139 @@ void TestSfxSynthAndGamesEngine() {
     assert(std::strcmp(robi::RobiNormalizeEmotionName("love"), "loving") == 0);
 }
 
+void TestNoiseGatedUplinkAgcAndExpander() {
+    // 1. Active quiet speech (250 RMS) gets boosted cleanly toward ~2200 RMS (max 4.2x)
+    float gain = 1.0f;
+    std::vector<int16_t> frame(320);
+    for (int f = 0; f < 6; ++f) {
+        for (size_t i = 0; i < frame.size(); ++i) frame[i] = (i & 1) ? 250 : -250;
+        robi::ProcessUplinkFramePcm(frame.data(), frame.size(), 250.0f, 30.0f, 90.0f,
+                                    /*is_voice_active=*/true, /*in_hangover=*/false, gain);
+    }
+    assert(gain > 3.2f && gain <= 4.21f);
+    assert(std::abs(frame[0]) >= 800 && std::abs(frame[0]) <= 1100);
+
+    // 2. Post-speech consonant hangover NEVER amplifies noise/silence, decays gain toward 1.0x
+    for (size_t i = 0; i < frame.size(); ++i) frame[i] = (i & 1) ? 80 : -80;
+    float gain_before_hang = gain;
+    float ret_hang = robi::ProcessUplinkFramePcm(frame.data(), frame.size(), 80.0f, 30.0f, 90.0f,
+                                                 /*is_voice_active=*/false, /*in_hangover=*/true, gain);
+    assert(ret_hang == 1.0f);
+    assert(frame[0] == -80 && frame[1] == 80);  // Unboosted, unmodified natural consonant tail!
+    assert(gain < gain_before_hang);
+
+    // 3. Post-hangover background noise floor gets -18 dB (>> 3) soft downward expansion
+    for (size_t i = 0; i < frame.size(); ++i) frame[i] = (i & 1) ? 160 : -160;
+    float ret_exp = robi::ProcessUplinkFramePcm(frame.data(), frame.size(), 160.0f, 110.0f, 220.0f,
+                                                /*is_voice_active=*/false, /*in_hangover=*/false, gain);
+    assert(ret_exp <= 0.13f);
+    assert(std::abs(frame[0]) <= 20 && std::abs(frame[1]) <= 20);
+
+    // 4. Strong mid-level sound well above noise gate passes untouched at 1.0x
+    for (size_t i = 0; i < frame.size(); ++i) frame[i] = (i & 1) ? 700 : -700;
+    float ret_pass = robi::ProcessUplinkFramePcm(frame.data(), frame.size(), 700.0f, 110.0f, 220.0f,
+                                                 /*is_voice_active=*/false, /*in_hangover=*/false, gain);
+    assert(ret_pass == 1.0f);
+    assert(frame[0] == -700 && frame[1] == 700);
+}
+
+void TestContinuousStreamingVadAndNoisyRoom() {
+    robi::AdaptiveSpeechTracker tr;
+    tr.ResetSession();
+    // Lively living room with guests (~120 RMS steady ambient background)
+    for (int i = 0; i < 30; ++i) {
+        auto d = tr.OnFrame(120.0f + static_cast<float>(i % 3) * 8.0f, 60);
+        assert(!d.stream_active && !d.start_utterance && !d.strong_speech_ended);
+    }
+    assert(tr.noise_floor_rms() >= 110.0f && tr.noise_floor_rms() <= 145.0f);
+
+    // Frame #1 of speech immediately wakes stream & requests pre-roll flush (0ms first-syllable clip!)
+    auto f1 = tr.OnFrame(1100.0f, 60);
+    assert(f1.stream_active && f1.flush_preroll && f1.voice_active && !f1.start_utterance);
+
+    // Frame #2 confirms utterance onset (120ms) without re-flushing pre-roll
+    auto f2 = tr.OnFrame(1300.0f, 60);
+    assert(f2.stream_active && !f2.flush_preroll && f2.start_utterance && f2.in_speech && f2.voice_active);
+
+    for (int i = 0; i < 8; ++i) {
+        auto d = tr.OnFrame(1450.0f, 60);
+        assert(d.stream_active && d.in_speech && d.voice_active && !d.strong_speech_ended);
+    }
+
+    // User finishes sentence -> room drops back to 130 RMS background
+    int hangover_frames = 0;
+    int strong_end_count = 0;
+    int commit_count = 0;
+    int tail_active_frames = 0;
+    for (int i = 0; i < 35; ++i) {
+        auto d = tr.OnFrame(130.0f, 60);
+        if (d.in_hangover) ++hangover_frames;
+        if (d.strong_speech_ended) ++strong_end_count;
+        if (d.commit_utterance) ++commit_count;
+        if (d.stream_active) ++tail_active_frames;
+    }
+    assert(hangover_frames == 4);       // Exact 240ms consonant hangover (4 * 60ms)
+    assert(strong_end_count == 1);      // Fires once at 420ms quiet
+    assert(commit_count == 1);          // Commits at 600ms
+    assert(tail_active_frames == 25);   // Full 1500ms continuous clean silence tail (25 * 60ms)
+    assert(!tr.stream_active());        // Cleanly stops streaming after 1500ms tail
+
+    // Continuous 9s monologue must NEVER falsely emit strong_speech_ended while user is still speaking!
+    tr.ResetSession();
+    for (int i = 0; i < 155; ++i) {
+        auto d = tr.OnFrame(1600.0f, 60);
+        assert(!d.strong_speech_ended);
+    }
+}
+
+void TestDacCursorMultiTurnEmotionsAndOddWrap() {
+    std::vector<int16_t> backing(4096, 0);
+    robi::SampleSyncedJitterRing ring;
+    ring.AttachBuffer(backing.data(), backing.size());
+    std::atomic<bool> stopping{false};
+    std::atomic<bool> drop_turn{false};
+
+    // Turn 1: push 2400 samples with "happy"@0, "surprised"@1200, pop all 2400 ahead of DAC cursor
+    std::vector<int16_t> t1(1200);
+    for (size_t i = 0; i < t1.size(); ++i) t1[i] = static_cast<int16_t>(i);
+    ring.QueueEmotionAtWriteCursor("happy");
+    ring.PushSamples(t1.data(), 1200, stopping, drop_turn);
+    ring.QueueEmotionAtWriteCursor("surprised");
+    ring.PushSamples(t1.data(), 1200, stopping, drop_turn);
+
+    std::vector<int16_t> out(2400);
+    assert(ring.PopSamples(out.data(), 2400) == 2400);
+    assert(ring.popped_samples() == 2400);
+
+    // DAC cursor at 600: ONLY "happy" is due even though ring already popped 2400 into 700ms queue!
+    std::string emo;
+    assert(ring.PopDueEmotionAt(600, false, emo) && emo == "happy");
+    assert(!ring.PopDueEmotionAt(600, false, emo));
+    assert(ring.PopDueEmotionAt(1200, false, emo) && emo == "surprised");
+    assert(!ring.PopDueEmotionAt(2400, false, emo));
+
+    // Turn 2 WITHOUT Clear(): verify monotonic offsets stay 100% aligned across turns + odd wrap memcpy!
+    uint64_t turn2_dac = ring.popped_samples();  // 2400
+    assert(turn2_dac == 2400);
+    ring.QueueEmotionAtWriteCursor("cool");  // scheduled at 2400
+    std::vector<int16_t> odd1(3000);
+    for (size_t i = 0; i < odd1.size(); ++i) odd1[i] = static_cast<int16_t>(10000 + i);
+    ring.PushSamples(odd1.data(), 3000, stopping, drop_turn);  // wraps across 4096 boundary!
+    ring.QueueEmotionAtWriteCursor("winking");  // scheduled at 5400
+    std::vector<int16_t> odd2(777);
+    for (size_t i = 0; i < odd2.size(); ++i) odd2[i] = static_cast<int16_t>(20000 + i);
+    ring.PushSamples(odd2.data(), 777, stopping, drop_turn);
+
+    assert(ring.PopDueEmotionAt(turn2_dac, false, emo) && emo == "cool");
+    assert(!ring.PopDueEmotionAt(turn2_dac + 2999, false, emo));
+    assert(ring.PopDueEmotionAt(turn2_dac + 3000, false, emo) && emo == "winking");
+
+    std::vector<int16_t> verify_buf(3777);
+    assert(ring.PopSamples(verify_buf.data(), 3777) == 3777);
+    for (size_t i = 0; i < 3000; ++i) assert(verify_buf[i] == static_cast<int16_t>(10000 + i));
+    for (size_t i = 0; i < 777; ++i) assert(verify_buf[3000 + i] == static_cast<int16_t>(20000 + i));
+}
+
 }  // namespace
 
 int main() {
@@ -633,6 +766,9 @@ int main() {
     TestSampleSyncedEmotionRing();
     TestConcurrentRingWrapAround();
     TestAdaptiveSpeechTracker();
+    TestNoiseGatedUplinkAgcAndExpander();
+    TestContinuousStreamingVadAndNoisyRoom();
+    TestDacCursorMultiTurnEmotionsAndOddWrap();
     TestThemeColorPreservationAcrossAllEmotions();
     TestMdnsParserAndNsecBuilder();
     TestImuGesturesAndForeheadTilt();

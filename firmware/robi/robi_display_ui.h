@@ -3,6 +3,19 @@
     // Uses pure procedural face math from `robi_face_math.h`, dirty-checked LVGL style setters
     // to minimize QSPI DMA & DisplayLockGuard contention, and 20Hz lock-free atomic lip-sync.
 
+    virtual void UpdateStatusBar(bool update_all = false) override {
+        if (!update_all &&
+            Application::GetInstance().GetDeviceState() == kDeviceStateSpeaking) {
+            // Avoid 1Hz Priority-10 DisplayLockGuard + I2C PMIC + WiFi IPC stalls mid-speech;
+            // safety-refresh only if continuous speech exceeds 30 seconds.
+            if (++speaking_status_skip_ < 30) {
+                return;
+            }
+        }
+        speaking_status_skip_ = 0;
+        SpiLcdDisplay::UpdateStatusBar(update_all);
+    }
+
     virtual void SetTheme(Theme* theme) override {
         SpiLcdDisplay::SetTheme(theme);
         DisplayLockGuard lock(this);
@@ -208,6 +221,8 @@ private:
     int last_applied_bri_ = -1;
     std::string last_hint_txt_;
     int hint_poll_div_ = 0;
+    int speaking_status_skip_ = 0;
+    int hud_tick_div_ = 0;
     char robi_last_emotion_[24] = "neutral";
     lv_timer_t* robi_face_timer_ = nullptr;
     int64_t robi_last_tick_us_ = 0;
@@ -690,24 +705,30 @@ private:
         if (color_dirty) {
             lv_obj_set_style_border_color(hud_track_, c_mid, 0);
         }
-        for (int i = 0; i < kHudNodes; i++) {
-            float ang = static_cast<float>(i) * (6.2831853f / static_cast<float>(kHudNodes));
-            float wave = 0.5f + 0.5f * std::cos(2.0f * (ang - hud_phase_));
-            float glow = wave * wave;
-            if (robi_face_mode_ == robi::ROBI_MODE_SPEAKING) {
-                glow = robi::RobiClamp(0.22f + glow * 0.45f + robi_voice_smooth_ * 0.55f, 0.0f, 1.0f);
-            } else if (voice_in) {
-                glow = robi::RobiClamp(0.35f + glow * 0.65f, 0.0f, 1.0f);
-            }
-            int nd = 7 + static_cast<int>(glow * 6.0f + 0.5f);
-            float r_ring = 219.0f - glow * 2.5f;
-            int nx = static_cast<int>(233.0f + std::cos(ang) * r_ring - nd * 0.5f + 0.5f);
-            int ny = static_cast<int>(233.0f + std::sin(ang) * r_ring - nd * 0.5f + 0.5f);
-            RobiSetRect(hud_nodes_[i], nx, ny, nd, nd);
-            lv_opa_t n_opa = static_cast<lv_opa_t>(robi::RobiClamp(38.0f + glow * 217.0f, 30.0f, 255.0f));
-            RobiSetBgOpa(hud_nodes_[i], n_opa);
-            if (color_dirty) {
-                lv_obj_set_style_bg_color(hud_nodes_[i], (i % 2 == 0) ? c_hi : c_mid, 0);
+        // Throttle outer 16-node perimeter ring to 12.5Hz with quantized opacity to slash
+        // full-screen 466x466 QSPI DMA traffic while keeping eyes & lip-sync at full 25Hz.
+        const bool update_hud = color_dirty || ((++hud_tick_div_ & 1) == 0);
+        if (update_hud) {
+            for (int i = 0; i < kHudNodes; i++) {
+                float ang = static_cast<float>(i) * (6.2831853f / static_cast<float>(kHudNodes));
+                float wave = 0.5f + 0.5f * std::cos(2.0f * (ang - hud_phase_));
+                float glow = wave * wave;
+                if (robi_face_mode_ == robi::ROBI_MODE_SPEAKING) {
+                    glow = robi::RobiClamp(0.22f + glow * 0.45f + robi_voice_smooth_ * 0.55f, 0.0f, 1.0f);
+                } else if (voice_in) {
+                    glow = robi::RobiClamp(0.35f + glow * 0.65f, 0.0f, 1.0f);
+                }
+                int nd = 7 + static_cast<int>(glow * 6.0f + 0.5f);
+                float r_ring = 219.0f - glow * 2.5f;
+                int nx = static_cast<int>(233.0f + std::cos(ang) * r_ring - nd * 0.5f + 0.5f);
+                int ny = static_cast<int>(233.0f + std::sin(ang) * r_ring - nd * 0.5f + 0.5f);
+                RobiSetRect(hud_nodes_[i], nx, ny, nd, nd);
+                lv_opa_t n_opa = static_cast<lv_opa_t>(
+                    static_cast<int>(robi::RobiClamp(38.0f + glow * 217.0f, 30.0f, 255.0f)) & ~7);
+                RobiSetBgOpa(hud_nodes_[i], n_opa);
+                if (color_dirty) {
+                    lv_obj_set_style_bg_color(hud_nodes_[i], (i % 2 == 0) ? c_hi : c_mid, 0);
+                }
             }
         }
 

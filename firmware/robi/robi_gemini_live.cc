@@ -81,17 +81,19 @@ constexpr EventBits_t kDoneTx = (1 << 1);
 constexpr EventBits_t kDonePlay = (1 << 2);
 constexpr EventBits_t kDoneAll = kDoneRx | kDoneTx | kDonePlay;
 
-constexpr size_t kPsramRingSamples = 262144;    // 512 KB = 10.92s @ 24kHz
+constexpr size_t kPsramRingSamples = 786432;        // 1.5 MB = 32.77s @ 24kHz (zero mid-sentence overflow)
+constexpr size_t kPsramRingMediumSamples = 393216;  // 768 KB fallback = 16.38s @ 24kHz
 constexpr size_t kFallbackRingSamples = 48000;
-constexpr size_t kPreBufferStrongSamples = 10800;  // 450ms @ 24kHz cushion on good WiFi
-constexpr size_t kPreBufferWeakSamples = 16800;    // 700ms @ 24kHz cushion on weak WiFi (<-76 dBm)
-constexpr size_t kRebufferStrongSamples = 9600;    // 400ms @ 24kHz recovery cushion
-constexpr size_t kRebufferWeakSamples = 14400;     // 600ms @ 24kHz recovery cushion on weak WiFi
-constexpr size_t kPlaybackFrameSamples = 1200;     // 50ms @ 24kHz (divides 2400/4800/9600 evenly)
-constexpr size_t kUplinkBatchBytes = 2048;      // 64ms @ 16kHz int16
-constexpr int64_t kPostPlaybackGuardUs = 180000LL;  // 180ms OGG_POPUP / speaker room-reverb settle
+constexpr size_t kPreBufferStrongSamples = 4800;    // 200ms @ 24kHz snappy start on normal WiFi
+constexpr size_t kPreBufferWeakSamples = 8400;      // 350ms @ 24kHz cushion on very weak WiFi (<-78 dBm)
+constexpr size_t kRebufferStrongSamples = 4800;     // 200ms @ 24kHz recovery cushion
+constexpr size_t kRebufferWeakSamples = 8400;       // 350ms @ 24kHz recovery cushion on weak WiFi
+constexpr size_t kPlaybackFrameSamples = 1200;      // 50ms @ 24kHz
+constexpr size_t kUplinkBatchBytes = 1920;          // 60ms @ 16kHz int16 (1:1 match with AfeAudioEngine!)
+constexpr int64_t kPostPlaybackGuardUs = 120000LL;  // 120ms speaker room-reverb settle
 
 std::atomic<int64_t> g_model_cooldown_until_us[3] = {{0}, {0}, {0}};
+std::atomic<bool> g_model_minimal_setup[3] = {{false}, {false}, {false}};
 std::mutex g_last_model_mutex;
 std::string g_last_connected_model;
 std::string g_fast_rest_model;
@@ -314,8 +316,14 @@ GeminiLiveProtocol::GeminiLiveProtocol() {
     if (pcm_ring_mem_ != nullptr) {
         jitter_ring_.AttachBuffer(pcm_ring_mem_, kPsramRingSamples);
     } else {
-        pcm_ring_mem_ = static_cast<int16_t*>(malloc(kFallbackRingSamples * sizeof(int16_t)));
-        jitter_ring_.AttachBuffer(pcm_ring_mem_, pcm_ring_mem_ ? kFallbackRingSamples : 0);
+        pcm_ring_mem_ = static_cast<int16_t*>(
+            heap_caps_malloc(kPsramRingMediumSamples * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        if (pcm_ring_mem_ != nullptr) {
+            jitter_ring_.AttachBuffer(pcm_ring_mem_, kPsramRingMediumSamples);
+        } else {
+            pcm_ring_mem_ = static_cast<int16_t*>(malloc(kFallbackRingSamples * sizeof(int16_t)));
+            jitter_ring_.AttachBuffer(pcm_ring_mem_, pcm_ring_mem_ ? kFallbackRingSamples : 0);
+        }
     }
 
     rx_stack_ = static_cast<StackType_t*>(heap_caps_malloc(16384, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
@@ -327,6 +335,8 @@ GeminiLiveProtocol::GeminiLiveProtocol() {
 }
 
 GeminiLiveProtocol::~GeminiLiveProtocol() {
+    Application::GetInstance().GetAudioService().SetOutputPcmCallback(nullptr);
+    RobiConfig::GetInstance().SetAudioBusyProvider(nullptr);
     if (g_active_protocol == this) {
         g_active_protocol = nullptr;
     }
@@ -398,6 +408,7 @@ int GeminiLiveProtocol::GetModelCooldownSec(int idx) {
 void GeminiLiveProtocol::ResetModelCooldowns() {
     for (int i = 0; i < 3; ++i) {
         g_model_cooldown_until_us[i].store(0, std::memory_order_relaxed);
+        g_model_minimal_setup[i].store(false, std::memory_order_relaxed);
     }
 }
 
@@ -417,6 +428,27 @@ void GeminiLiveProtocol::CooldownModelByName(const std::string& model_name, int6
 }
 
 bool GeminiLiveProtocol::Start() {
+    // Wire DAC-synchronized 20Hz lip-sync & exact played-sample cursor directly from AudioOutputTask
+    Application::GetInstance().GetAudioService().SetOutputPcmCallback(
+        [this](const int16_t* pcm, size_t count) {
+            if (pcm == nullptr || count == 0) return;
+            if (speaking_active_.load(std::memory_order_relaxed)) {
+                int lvl = robi::ComputeVoiceLevel0To100(pcm, count);
+                live_voice_level_.store(lvl, std::memory_order_relaxed);
+                live_voice_updated_us_.store(esp_timer_get_time(), std::memory_order_relaxed);
+                dac_played_samples_.fetch_add(static_cast<uint64_t>(count),
+                                              std::memory_order_relaxed);
+            }
+        });
+
+    // Defer NVS SPI flash writes while speaking or receiving audio so flash cache never stalls speech!
+    RobiConfig::GetInstance().SetAudioBusyProvider([this]() -> bool {
+        auto& app = Application::GetInstance();
+        return speaking_active_.load(std::memory_order_relaxed) ||
+               receiving_model_audio_.load(std::memory_order_relaxed) ||
+               app.GetDeviceState() == kDeviceStateSpeaking ||
+               !app.GetAudioService().IsPlaybackIdle();
+    });
     return true;
 }
 
@@ -437,6 +469,10 @@ void GeminiLiveProtocol::ResetTurnRuntimeFlags() {
     speaking_audio_ready_.store(false);
     streaming_speech_.store(false);
     user_turn_had_speech_.store(false);
+    backstop_stream_end_sent_.store(false);
+    thinking_face_shown_.store(false);
+    local_speech_ended_us_.store(0);
+    last_input_tr_us_.store(0);
     tool_hold_until_us_.store(0);
     tool_sent_at_us_.store(0);
     awaiting_nudges_.store(0);
@@ -467,6 +503,7 @@ void GeminiLiveProtocol::StopSessionInternal(bool notify_closed) {
     tx_cv_.notify_all();
 
     jitter_ring_.Clear();
+    dac_played_samples_.store(0, std::memory_order_relaxed);
     jitter_ring_.NotifyAll();
 
     if (rx_task_ != nullptr || tx_task_ != nullptr || play_task_ != nullptr) {
@@ -475,6 +512,8 @@ void GeminiLiveProtocol::StopSessionInternal(bool notify_closed) {
         tx_task_ = nullptr;
         play_task_ = nullptr;
     }
+
+    FlushPendingTranscripts();
 
     if (websocket_ != nullptr) {
         websocket_.reset();
@@ -505,7 +544,8 @@ std::string GeminiLiveProtocol::BuildSetupJson(const std::string& model_name,
                                                const std::string& voice_name,
                                                const std::string& lang_code,
                                                bool include_lang_code,
-                                               bool include_google_search) const {
+                                               bool include_google_search,
+                                               bool include_extended_vad) const {
     std::string sys_prompt = RobiConfig::GetInstance().BuildSystemPrompt();
 
     cJSON* root = cJSON_CreateObject();
@@ -519,6 +559,13 @@ std::string GeminiLiveProtocol::BuildSetupJson(const std::string& model_name,
     cJSON* modalities = cJSON_CreateArray();
     cJSON_AddItemToArray(modalities, cJSON_CreateString("AUDIO"));
     cJSON_AddItemToObject(gen_cfg, "responseModalities", modalities);
+
+    if (include_extended_vad && model_name.find("2.5") != std::string::npos) {
+        // Disable hidden chain-of-thought on Gemini 2.5 Native Audio for instant conversational turns
+        cJSON* tcfg = cJSON_CreateObject();
+        cJSON_AddNumberToObject(tcfg, "thinkingBudget", 0);
+        cJSON_AddItemToObject(gen_cfg, "thinkingConfig", tcfg);
+    }
 
     cJSON* speech_cfg = cJSON_CreateObject();
     if (include_lang_code && !lang_code.empty()) {
@@ -534,7 +581,11 @@ std::string GeminiLiveProtocol::BuildSetupJson(const std::string& model_name,
 
     cJSON* rt_cfg = cJSON_CreateObject();
     cJSON* aad = cJSON_CreateObject();
-    cJSON_AddNumberToObject(aad, "silenceDurationMs", 420);
+    cJSON_AddNumberToObject(aad, "silenceDurationMs", 360);
+    if (include_extended_vad) {
+        cJSON_AddStringToObject(aad, "endOfSpeechSensitivity", "END_SENSITIVITY_HIGH");
+        cJSON_AddNumberToObject(aad, "prefixPaddingMs", 40);
+    }
     cJSON_AddItemToObject(rt_cfg, "automaticActivityDetection", aad);
     cJSON_AddItemToObject(setup, "realtimeInputConfig", rt_cfg);
 
@@ -767,7 +818,8 @@ std::string GeminiLiveProtocol::BuildClientTurnJson(const std::string& text) {
 
 GeminiLiveProtocol::ConnectResult GeminiLiveProtocol::TryConnectModel(
     const std::string& api_key, const std::string& model_name, const std::string& voice_name,
-    const std::string& lang_code, bool include_lang_code, bool include_google_search) {
+    const std::string& lang_code, bool include_lang_code, bool include_google_search,
+    bool include_extended_vad) {
     StopSessionInternal(false);
 
     stopping_.store(false);
@@ -893,8 +945,8 @@ GeminiLiveProtocol::ConnectResult GeminiLiveProtocol::TryConnectModel(
         },
         "gemini_play", 10240, this, 6, play_stack_, play_tcb_);
 
-    std::string setup_msg =
-        BuildSetupJson(model_name, voice_name, lang_code, include_lang_code, include_google_search);
+    std::string setup_msg = BuildSetupJson(model_name, voice_name, lang_code, include_lang_code,
+                                           include_google_search, include_extended_vad);
     if (!websocket_->Send(setup_msg)) {
         ESP_LOGW(TAG, "Failed to send Gemini setup message (%s)", model_name.c_str());
         StopSessionInternal(false);
@@ -904,8 +956,8 @@ GeminiLiveProtocol::ConnectResult GeminiLiveProtocol::TryConnectModel(
     EventBits_t bits = xEventGroupWaitBits(event_group_, kEvtSetupComplete | kEvtWsClosed, pdTRUE,
                                            pdFALSE, pdMS_TO_TICKS(6000));
     if (bits & kEvtSetupComplete) {
-        ESP_LOGI(TAG, "Gemini Live ready! (%s / %s, search=%d)", model_name.c_str(),
-                 voice_name.c_str(), include_google_search ? 1 : 0);
+        ESP_LOGI(TAG, "Gemini Live ready! (%s / %s, ext_vad=%d)", model_name.c_str(),
+                 voice_name.c_str(), include_extended_vad ? 1 : 0);
         {
             std::lock_guard<std::mutex> lk(model_mutex_);
             active_model_ = model_name;
@@ -988,7 +1040,15 @@ bool GeminiLiveProtocol::OpenAudioChannel() {
             continue;
         }
         tried_in_first_pass[c.idx] = true;
-        auto res = TryConnectModel(cfg.gemini_key, c.model, cfg.voice, cfg.language, c.with_lang, false);
+        bool use_ext_vad = !g_model_minimal_setup[c.idx].load(std::memory_order_relaxed);
+        auto res = TryConnectModel(cfg.gemini_key, c.model, cfg.voice, cfg.language, c.with_lang,
+                                   false, use_ext_vad);
+        if (res == ConnectResult::kSetupRejected && use_ext_vad && IsWifiOnlineWithIp()) {
+            // Model rejected extended VAD/thinkingConfig — remember and retry immediately with minimal setup
+            g_model_minimal_setup[c.idx].store(true, std::memory_order_relaxed);
+            res = TryConnectModel(cfg.gemini_key, c.model, cfg.voice, cfg.language, c.with_lang,
+                                  false, false);
+        }
         if (res == ConnectResult::kConnected) {
             g_model_cooldown_until_us[c.idx].store(0, std::memory_order_relaxed);
             return true;
@@ -998,8 +1058,9 @@ bool GeminiLiveProtocol::OpenAudioChannel() {
             // never burn 48s across 3 models or poison model cooldowns on a WiFi glitch!
             if (IsWifiOnlineWithIp()) {
                 vTaskDelay(pdMS_TO_TICKS(350));
-                if (TryConnectModel(cfg.gemini_key, c.model, cfg.voice, cfg.language, c.with_lang) ==
-                    ConnectResult::kConnected) {
+                bool retry_ext = !g_model_minimal_setup[c.idx].load(std::memory_order_relaxed);
+                if (TryConnectModel(cfg.gemini_key, c.model, cfg.voice, cfg.language, c.with_lang,
+                                    false, retry_ext) == ConnectResult::kConnected) {
                     g_model_cooldown_until_us[c.idx].store(0, std::memory_order_relaxed);
                     return true;
                 }
@@ -1007,7 +1068,7 @@ bool GeminiLiveProtocol::OpenAudioChannel() {
             network_failed = true;
             break;
         }
-        g_model_cooldown_until_us[c.idx].store(esp_timer_get_time() + 600LL * 1000000LL,
+        g_model_cooldown_until_us[c.idx].store(esp_timer_get_time() + 90LL * 1000000LL,
                                                std::memory_order_relaxed);
     }
 
@@ -1015,7 +1076,14 @@ bool GeminiLiveProtocol::OpenAudioChannel() {
         for (const auto& c : ordered) {
             if (tried_in_first_pass[c.idx]) continue;
             g_model_cooldown_until_us[c.idx].store(0, std::memory_order_relaxed);
-            auto res = TryConnectModel(cfg.gemini_key, c.model, cfg.voice, cfg.language, c.with_lang, false);
+            bool use_ext_vad = !g_model_minimal_setup[c.idx].load(std::memory_order_relaxed);
+            auto res = TryConnectModel(cfg.gemini_key, c.model, cfg.voice, cfg.language, c.with_lang,
+                                       false, use_ext_vad);
+            if (res == ConnectResult::kSetupRejected && use_ext_vad && IsWifiOnlineWithIp()) {
+                g_model_minimal_setup[c.idx].store(true, std::memory_order_relaxed);
+                res = TryConnectModel(cfg.gemini_key, c.model, cfg.voice, cfg.language, c.with_lang,
+                                      false, false);
+            }
             if (res == ConnectResult::kConnected) {
                 return true;
             }
@@ -1023,7 +1091,7 @@ bool GeminiLiveProtocol::OpenAudioChannel() {
                 network_failed = true;
                 break;
             }
-            g_model_cooldown_until_us[c.idx].store(esp_timer_get_time() + 600LL * 1000000LL,
+            g_model_cooldown_until_us[c.idx].store(esp_timer_get_time() + 90LL * 1000000LL,
                                                    std::memory_order_relaxed);
         }
     }
@@ -1132,18 +1200,19 @@ void GeminiLiveProtocol::FinishSpeechUtterance() {
     user_turn_had_speech_.store(true);
     server_ack_received_.store(false);
     silent_nudge_used_.store(false);
+    backstop_stream_end_sent_.store(true);
+    local_speech_ended_us_.store(esp_timer_get_time());
     {
         std::lock_guard<std::mutex> clk(client_turn_mutex_);
         last_client_turn_text_.clear();
     }
-    awaiting_response_.store(true);
-    awaiting_since_us_.store(esp_timer_get_time());
-    awaiting_nudges_.store(0);
-    // Feed 750ms of pure zero-PCM digital silence (5 compact 150ms frames, ~1.8x silenceDurationMs=420ms)
-    // ONCE right after speech. Never send delayed audioStreamEnd or clientContent mid-generation,
-    // which caused Gemini to interrupt its own first answer and reply twice on weak WiFi!
-    EnqueueSilence16k(750);
-    EmitEmotion("thinking");
+    // Explicit manual commit (face tap / push-to-talk release): flush brief 180ms zero-PCM + stream-end
+    // without locking the microphone for 11 seconds!
+    EnqueueSilence16k(180);
+    EnqueueAudioStreamEnd();
+    if (!thinking_face_shown_.exchange(true)) {
+        EmitEmotion("thinking");
+    }
 }
 
 bool GeminiLiveProtocol::CommitListeningUtterance() {
@@ -1170,7 +1239,7 @@ bool GeminiLiveProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
     }
 
     int64_t now_us = esp_timer_get_time();
-    // Hold mic while speaker is playing (e.g. OGG_POPUP chime) + 180ms room reverb settle window
+    // Hold mic while speaker is playing (e.g. OGG_POPUP chime) + 120ms room reverb settle window
     if (!app.GetAudioService().IsPlaybackIdle()) {
         post_playback_guard_until_us_.store(now_us + kPostPlaybackGuardUs);
         return true;
@@ -1205,7 +1274,7 @@ bool GeminiLiveProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
         if (!streaming_speech_.exchange(true)) {
             drop_turn_.store(false);
             speech_pre_gain_ = 1.0f;
-            EnqueueSilence16k(150);
+            EnqueueSilence16k(120);
             EmitEmotion("listening");
         }
         robi::NormalizeSpeechPcm(samples, sample_count, ac_rms, speech_pre_gain_);
@@ -1220,40 +1289,52 @@ bool GeminiLiveProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
         return true;
     }
 
-    // Turn-framed adaptive speech engine (immune to Waveshare ES7210 +30dB self-noise & VAD_MODE_0):
-    // Buffers a rolling ~420ms pre-roll locally during silence, normalizes attenuated 3D-enclosure speech,
-    // and commits end-of-speech after 600ms quiet with pure 0x0000 digital silence + audioStreamEnd backstop.
+    // Ultra-responsive continuous-utterance streaming to Google's Neural Server VAD:
+    // - Wakes on Frame #1 (0ms clip, flushing 240ms rolling pre-roll).
+    // - Noise-gated AGC boosts active speech cleanly, NEVER boosts silence/room noise!
+    // - Streams 240ms unboosted consonant hangover followed by -18 dB clean silence tail (1500ms)
+    //   so Google's neural VAD (silenceDurationMs=360ms, END_SENSITIVITY_HIGH) commits at ~360-500ms
+    //   with ZERO double-VAD wait and ZERO 11-second mic-mute lockouts in lively rooms!
     auto speech_dec = speech_tracker_.OnFrame(ac_rms, frame_ms);
-    last_noise_floor_rms_.store(static_cast<int>(speech_tracker_.noise_floor_rms() + 0.5f),
-                                std::memory_order_relaxed);
+    const float noise_floor = speech_tracker_.noise_floor_rms();
+    last_noise_floor_rms_.store(static_cast<int>(noise_floor + 0.5f), std::memory_order_relaxed);
+    streaming_speech_.store(speech_tracker_.in_speech() || speech_dec.voice_active);
 
-    if (!speech_dec.in_speech && !speech_dec.commit_utterance) {
-        streaming_speech_.store(false);
-        if (pre_roll_.size() >= 7) {
+    if (!speech_dec.stream_active) {
+        if (!tx_pcm_batch_.empty()) {
+            EnqueuePcm16k(tx_pcm_batch_.data(), tx_pcm_batch_.size());
+            tx_pcm_batch_.clear();
+        }
+        speech_pre_gain_ = 1.0f;
+        if (pre_roll_.size() >= 4) {
             pre_roll_.pop_front();
         }
         pre_roll_.push_back(std::move(packet->payload));
         return true;
     }
 
-    if (speech_dec.start_utterance) {
-        ESP_LOGI(TAG, "Speech onset (rms=%.0f, floor=%.0f, thresh=%.0f, preroll=%u)",
-                 static_cast<double>(ac_rms),
-                 static_cast<double>(speech_tracker_.noise_floor_rms()),
-                 static_cast<double>(speech_tracker_.current_onset_thresh()),
-                 static_cast<unsigned>(pre_roll_.size()));
-        streaming_speech_.store(true);
-        idle_farewell_sent_ = false;
+    if (speech_dec.flush_preroll) {
         drop_turn_.store(false);
+        idle_farewell_sent_ = false;
         last_activity_us_.store(now_us);
         speech_pre_gain_ = 1.0f;
-
-        EnqueueSilence16k(150);
+        local_speech_ended_us_.store(0);
+        backstop_stream_end_sent_.store(false);
+        if (thinking_face_shown_.exchange(false)) {
+            EmitEmotion("listening");
+        }
         tx_pcm_batch_.clear();
         for (auto& old_frame : pre_roll_) {
             if (old_frame.size() >= sizeof(int16_t)) {
-                robi::NormalizeSpeechPcm(reinterpret_cast<int16_t*>(old_frame.data()),
-                                         old_frame.size() / sizeof(int16_t), ac_rms, speech_pre_gain_);
+                auto* old_s = reinterpret_cast<int16_t*>(old_frame.data());
+                size_t old_n = old_frame.size() / sizeof(int16_t);
+                // Keep pre-roll clean & unboosted (gently expand pure floor) so Google VAD hears crisp onset
+                float old_rms = robi::RemoveDcAndComputeRms(old_s, old_n);
+                float dummy_gain = 1.0f;
+                robi::ProcessUplinkFramePcm(old_s, old_n, old_rms, noise_floor,
+                                            speech_tracker_.last_quiet_thresh(),
+                                            /*is_voice_active=*/false, /*in_hangover=*/true,
+                                            dummy_gain);
             }
             turn_uplink_pcm_bytes_.fetch_add(static_cast<uint32_t>(old_frame.size()));
             tx_pcm_batch_.insert(tx_pcm_batch_.end(), old_frame.begin(), old_frame.end());
@@ -1265,21 +1346,43 @@ bool GeminiLiveProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
         pre_roll_.clear();
     }
 
-    robi::NormalizeSpeechPcm(samples, sample_count, ac_rms, speech_pre_gain_);
-    idle_farewell_sent_ = false;
-    last_activity_us_.store(now_us);
+    if (speech_dec.start_utterance) {
+        ESP_LOGI(TAG, "Speech onset (rms=%.0f, floor=%.0f, thresh=%.0f)",
+                 static_cast<double>(ac_rms), static_cast<double>(noise_floor),
+                 static_cast<double>(speech_tracker_.current_onset_thresh()));
+        user_turn_had_speech_.store(true);
+        silent_nudge_used_.store(false);
+    }
+
+    if (speech_dec.voice_active) {
+        idle_farewell_sent_ = false;
+        last_activity_us_.store(now_us);
+        local_speech_ended_us_.store(0);
+        backstop_stream_end_sent_.store(false);
+        if (thinking_face_shown_.exchange(false)) {
+            EmitEmotion("listening");
+        }
+    }
+
+    if (speech_dec.strong_speech_ended) {
+        ESP_LOGI(TAG, "Speech pause detected -> server VAD tail active (rms=%.0f, floor=%.0f)",
+                 static_cast<double>(ac_rms), static_cast<double>(noise_floor));
+        user_turn_had_speech_.store(true);
+        local_speech_ended_us_.store(now_us);
+        backstop_stream_end_sent_.store(false);
+        if (!thinking_face_shown_.exchange(true)) {
+            EmitEmotion("thinking");
+        }
+    }
+
+    robi::ProcessUplinkFramePcm(samples, sample_count, ac_rms, noise_floor,
+                                speech_tracker_.last_quiet_thresh(), speech_dec.voice_active,
+                                speech_dec.in_hangover, speech_pre_gain_);
     turn_uplink_pcm_bytes_.fetch_add(static_cast<uint32_t>(packet->payload.size()));
     tx_pcm_batch_.insert(tx_pcm_batch_.end(), packet->payload.begin(), packet->payload.end());
     if (tx_pcm_batch_.size() >= kUplinkBatchBytes) {
         EnqueuePcm16k(tx_pcm_batch_.data(), tx_pcm_batch_.size());
         tx_pcm_batch_.clear();
-    }
-
-    if (speech_dec.commit_utterance) {
-        ESP_LOGI(TAG, "Speech utterance complete -> committing silence + stream-end (rms=%.0f, floor=%.0f)",
-                 static_cast<double>(ac_rms),
-                 static_cast<double>(speech_tracker_.noise_floor_rms()));
-        FinishSpeechUtterance();
     }
 
     return true;
@@ -1384,6 +1487,7 @@ void GeminiLiveProtocol::CancelPendingTurnAudio() {
         turn_complete_.store(false);
         ResetTurnRuntimeFlags();
         jitter_ring_.Clear();
+        dac_played_samples_.store(0, std::memory_order_relaxed);
         jitter_ring_.NotifyAll();
     }
 }
@@ -1440,6 +1544,9 @@ void GeminiLiveProtocol::SendStartListening(ListeningMode mode) {
     peak_mic_rms_.store(0, std::memory_order_relaxed);
     streaming_speech_.store(false);
     receiving_model_audio_.store(false);
+    local_speech_ended_us_.store(0);
+    backstop_stream_end_sent_.store(false);
+    thinking_face_shown_.store(false);
     int64_t now_us = esp_timer_get_time();
     // Preserve awaiting_response_ when an activity-button clientContent turn was just submitted
     if (!awaiting_response_.load() || (now_us - awaiting_since_us_.load()) > 5500000LL) {
@@ -1469,8 +1576,10 @@ void GeminiLiveProtocol::SendAbortSpeaking(AbortReason reason) {
     turn_complete_.store(false);
     ResetTurnRuntimeFlags();
     jitter_ring_.Clear();
+    dac_played_samples_.store(0, std::memory_order_relaxed);
     jitter_ring_.NotifyAll();
     Application::GetInstance().GetAudioService().ResetDecoder();
+    FlushPendingTranscripts();
     EmitEmotion("v:0");
     EmitTtsState("stop");
 }
@@ -1539,44 +1648,26 @@ void GeminiLiveProtocol::TxWorkerLoop() {
 
         int64_t now_us = esp_timer_get_time();
 
-        // 1. Safe turn recovery while awaiting Gemini's spoken reply (ZERO duplicate-turn triggers!):
-        //    - Never send audioStreamEnd or clientContent once inputTranscription has arrived (which
-        //      proves Google already committed endOfSpeech and is generating audio over weak WiFi!).
-        //    - Only if 3.2s pass with ZERO inputTranscription and ZERO audio, send one audioStreamEnd.
-        //    - Unlock cleanly at 6.5s if WiFi dropped the turn completely.
+        // 1. Explicit clientContent / tap-commit turn timeout guard (8.5s; 90s short cooldown on 2x fail)
         if (awaiting_response_.load() && !receiving_model_audio_.load() &&
             !speaking_active_.load() && jitter_ring_.Available() == 0 && !stopping_.load()) {
             int64_t waited_us = now_us - awaiting_since_us_.load();
-            int nudges = awaiting_nudges_.load();
-
-            if (user_turn_had_speech_.load()) {
-                if (waited_us > 3200000LL && nudges == 0 && tool_hold_until_us_.load() == 0) {
-                    bool has_input_tr = false;
-                    {
-                        std::lock_guard<std::mutex> lk(transcript_mutex_);
-                        has_input_tr = !pending_user_transcript_.empty();
-                    }
-                    if (!has_input_tr && awaiting_nudges_.exchange(1) == 0) {
-                        ESP_LOGW(TAG, "No inputTranscription after 3.2s — sending single stream-end flush");
-                        EnqueueAudioStreamEnd();
-                        continue;
-                    }
-                }
-            }
             // Note: Never re-send clientContent over an open TCP/TLS WebSocket; TCP guarantees
             // reliable ordered delivery, and re-sending caused Gemini to speak questions twice!
-
-            if (waited_us > 11000000LL) {
+            if (waited_us > 8500000LL) {
                 int timeouts = consecutive_timeouts_.fetch_add(1) + 1;
-                ESP_LOGW(TAG, "Awaiting response timed out after %.1fs (consecutive=%d)",
+                ESP_LOGW(TAG, "Explicit turn response timed out after %.1fs (consecutive=%d)",
                          static_cast<double>(waited_us) / 1000000.0, timeouts);
                 awaiting_response_.store(false);
                 awaiting_nudges_.store(0);
                 user_turn_had_speech_.store(false);
                 server_ack_received_.store(false);
                 tool_hold_until_us_.store(0);
+                local_speech_ended_us_.store(0);
+                backstop_stream_end_sent_.store(false);
+                thinking_face_shown_.store(false);
                 if (timeouts >= 2) {
-                    CooldownModelByName(GetActiveModel(), 600);
+                    CooldownModelByName(GetActiveModel(), 90);
                     HandleFatalSocketError("consecutive_response_timeouts");
                     break;
                 }
@@ -1586,12 +1677,61 @@ void GeminiLiveProtocol::TxWorkerLoop() {
             }
         }
 
-        // 3. Periodic 90s idle farewell check while channel is sitting quiet in Listening
+        // 2. Non-blocking live voice turn soft backstop & clean quiet recovery:
+        //    - Microphone stays live the whole time (zero 11-second lockouts or false model bans!).
+        //    - Google's neural server VAD (360ms) normally commits automatically in ~360-420ms.
+        //    - If 950ms elapse after local speech pause / last inputTranscription with no reply,
+        //      send ONE gentle audioStreamEnd flush; if 4.5s pass with no reply (e.g. room noise
+        //      that Google rightly ignored), silently restore Listening eyes with zero timeout penalty.
+        if (!awaiting_response_.load() && !receiving_model_audio_.load() &&
+            !speaking_active_.load() && jitter_ring_.Available() == 0 && !stopping_.load() &&
+            tool_hold_until_us_.load() == 0 && !streaming_speech_.load()) {
+            int64_t end_ref_us = std::max(local_speech_ended_us_.load(), last_input_tr_us_.load());
+            if (end_ref_us > 0) {
+                bool had_speech = user_turn_had_speech_.load();
+                if (!had_speech) {
+                    std::lock_guard<std::mutex> lk(transcript_mutex_);
+                    had_speech = robi::HasMeaningfulSpeechText(pending_user_transcript_);
+                }
+                if (had_speech) {
+                    int64_t quiet_since_end_us = now_us - end_ref_us;
+                    if (quiet_since_end_us >= 950000LL && !backstop_stream_end_sent_.exchange(true)) {
+                        ESP_LOGI(TAG, "Server VAD backstop after %.0fms quiet -> single audioStreamEnd",
+                                 static_cast<double>(quiet_since_end_us) / 1000.0);
+                        EnqueueAudioStreamEnd();
+                    } else if (quiet_since_end_us >= 4500000LL) {
+                        ESP_LOGI(TAG, "No model reply 4.5s after voice pause -> restoring listening state");
+                        local_speech_ended_us_.store(0);
+                        last_input_tr_us_.store(0);
+                        user_turn_had_speech_.store(false);
+                        backstop_stream_end_sent_.store(false);
+                        {
+                            std::lock_guard<std::mutex> lk(transcript_mutex_);
+                            pending_user_transcript_.clear();
+                        }
+                        if (thinking_face_shown_.exchange(false) &&
+                            Application::GetInstance().GetDeviceState() == kDeviceStateListening) {
+                            EmitEmotion("listening");
+                        }
+                    }
+                } else {
+                    local_speech_ended_us_.store(0);
+                    if (thinking_face_shown_.exchange(false) &&
+                        Application::GetInstance().GetDeviceState() == kDeviceStateListening) {
+                        EmitEmotion("listening");
+                    }
+                }
+            }
+        }
+
+        // 3. Periodic 75s idle farewell check while channel is sitting quiet in Listening
         int64_t idle_us = now_us - last_activity_us_.load();
         if (!idle_farewell_sent_ && channel_opened_.load() && !awaiting_response_.load() &&
+            !streaming_speech_.load() && !receiving_model_audio_.load() && !speaking_active_.load() &&
+            local_speech_ended_us_.load() == 0 &&
             !robi::RobiGameHub::GetInstance().IsMicMutedForScreenGame() &&
             Application::GetInstance().GetDeviceState() == kDeviceStateListening &&
-            idle_us > 90LL * 1000000LL) {
+            idle_us > 75LL * 1000000LL) {
             idle_farewell_sent_ = true;
             close_after_turn_.store(true);
             auto lang = RobiConfig::GetInstance().Get().language;
@@ -1779,9 +1919,13 @@ void GeminiLiveProtocol::RxWorkerLoop() {
                         int64_t now_rx_us = esp_timer_get_time();
                         last_activity_us_.store(now_rx_us);
                         last_rx_audio_us_.store(now_rx_us);
-                        receiving_model_audio_.store(true);
+                        bool first_rx_chunk = !receiving_model_audio_.exchange(true);
                         streaming_speech_.store(false);
-                        {
+                        local_speech_ended_us_.store(0);
+                        last_input_tr_us_.store(0);
+                        backstop_stream_end_sent_.store(false);
+                        thinking_face_shown_.store(false);
+                        if (first_rx_chunk) {
                             std::lock_guard<std::mutex> ulk(uplink_mutex_);
                             pre_roll_.clear();
                             tx_pcm_batch_.clear();
@@ -1816,13 +1960,17 @@ void GeminiLiveProtocol::RxWorkerLoop() {
                 std::lock_guard<std::mutex> lk(transcript_mutex_);
                 peek_user_tr = robi::CleanTranscriptText(pending_user_transcript_);
             }
-            FlushPendingTranscripts();
 
             if (drop_turn_.exchange(false)) {
                 jitter_ring_.Clear();
+                dac_played_samples_.store(0, std::memory_order_relaxed);
                 receiving_model_audio_.store(false);
                 user_turn_had_speech_.store(false);
+                local_speech_ended_us_.store(0);
+                backstop_stream_end_sent_.store(false);
+                thinking_face_shown_.store(false);
                 turn_complete_.store(false);
+                FlushPendingTranscripts();
             } else if (user_turn_had_speech_.exchange(false) &&
                        turn_downlink_samples_.load() == 0 &&
                        jitter_ring_.Available() == 0 &&
@@ -1830,10 +1978,13 @@ void GeminiLiveProtocol::RxWorkerLoop() {
                        tool_hold_until_us_.load() == 0 &&
                        robi::HasMeaningfulSpeechText(peek_user_tr) &&
                        !silent_nudge_used_.exchange(true)) {
+                FlushPendingTranscripts();
                 ESP_LOGW(TAG, "Silent turnComplete after user said '%s' — nudging spoken reply",
                          peek_user_tr.c_str());
                 EnqueueSilentTurnNudge(peek_user_tr);
             } else {
+                // Defer FlushPendingTranscripts() to PlaybackFeederLoop after hardware I2S drains
+                // so nvs_commit() never freezes SPI flash cache mid-sentence!
                 turn_complete_.store(true);
                 jitter_ring_.NotifyAll();
             }
@@ -1844,25 +1995,28 @@ void GeminiLiveProtocol::RxWorkerLoop() {
 }
 
 void GeminiLiveProtocol::PlaybackFeederLoop() {
-    std::vector<int16_t> frame_buf(kPlaybackFrameSamples);
     bool speaking_active = false;
     bool rebuffer_needed = false;
-    int initial_burst_left = 0;
-    int64_t next_feed_us = 0;
+    bool rssi_sampled_for_turn = false;
+    size_t prebuf_target = kPreBufferStrongSamples;
+    size_t rebuf_target = kRebufferStrongSamples;
     uint32_t active_gen = 0;
 
-    auto current_prebuffer_samples = []() -> size_t {
-        int rssi = WifiManager::GetInstance().GetRssi();
-        return (rssi != 0 && rssi < -76) ? kPreBufferWeakSamples : kPreBufferStrongSamples;
-    };
-    auto current_rebuffer_samples = []() -> size_t {
-        int rssi = WifiManager::GetInstance().GetRssi();
-        return (rssi != 0 && rssi < -76) ? kRebufferWeakSamples : kRebufferStrongSamples;
+    auto flush_due_emotions = [this](bool flush_all) {
+        std::string due_emo;
+        std::string latest_emo;
+        uint64_t played = dac_played_samples_.load(std::memory_order_relaxed);
+        while (jitter_ring_.PopDueEmotionAt(played, flush_all, due_emo)) {
+            if (!due_emo.empty()) {
+                latest_emo = std::move(due_emo);
+            }
+        }
+        if (!latest_emo.empty()) {
+            EmitEmotion(latest_emo);
+        }
     };
 
     while (!stopping_.load()) {
-        const size_t prebuf_target = current_prebuffer_samples();
-        const size_t rebuf_target = current_rebuffer_samples();
         size_t min_needed = speaking_active
                                 ? (rebuffer_needed ? rebuf_target : kPlaybackFrameSamples)
                                 : prebuf_target;
@@ -1890,21 +2044,35 @@ void GeminiLiveProtocol::PlaybackFeederLoop() {
                 speaking_active_.store(false);
             }
             rebuffer_needed = false;
+            rssi_sampled_for_turn = false;
             continue;
         }
 
         size_t avail = jitter_ring_.Available();
         int64_t idle_rx_us = esp_timer_get_time() - last_rx_audio_us_.load();
         if (!speaking_active) {
+            if (avail == 0) {
+                rssi_sampled_for_turn = false;
+            } else if (!rssi_sampled_for_turn) {
+                // Sample WiFi RSSI ONCE per turn (never 40x/sec inside the audio hot loop!)
+                rssi_sampled_for_turn = true;
+                int rssi = WifiManager::GetInstance().GetRssi();
+                bool weak_wifi = (rssi != 0 && rssi < -76);
+                prebuf_target = weak_wifi ? kPreBufferWeakSamples : kPreBufferStrongSamples;
+                rebuf_target = weak_wifi ? kRebufferWeakSamples : kRebufferStrongSamples;
+            }
+
             if (avail >= prebuf_target ||
                 ((turn_complete_.load() || idle_rx_us > 1500000LL) && avail > 0)) {
                 speaking_active = true;
                 speaking_active_.store(true);
                 rebuffer_needed = false;
-                initial_burst_left = 4;  // Preload 200ms (4 * 50ms) into AudioService DMA queue
                 active_gen = turn_gen_.load();
                 awaiting_response_.store(false);
                 awaiting_nudges_.store(0);
+                local_speech_ended_us_.store(0);
+                backstop_stream_end_sent_.store(false);
+                thinking_face_shown_.store(false);
                 {
                     std::lock_guard<std::mutex> clk(client_turn_mutex_);
                     last_client_turn_text_.clear();
@@ -1928,7 +2096,9 @@ void GeminiLiveProtocol::PlaybackFeederLoop() {
                         });
                     }
                 }
-                next_feed_us = esp_timer_get_time();
+                // Align DAC sample cursor to exact ring read offset right after ResetDecoder()
+                // so multi-turn emotion timestamps stay sample-accurate across turns 1..N.
+                dac_played_samples_.store(jitter_ring_.popped_samples(), std::memory_order_relaxed);
             } else {
                 int64_t now_chk_us = esp_timer_get_time();
                 int64_t th_until = tool_hold_until_us_.load();
@@ -1937,11 +2107,14 @@ void GeminiLiveProtocol::PlaybackFeederLoop() {
                     tool_hold_until_us_.store(0);
                 }
                 if (avail == 0 && now_chk_us >= tool_hold_until_us_.load() && turn_complete_.load()) {
-                    FlushPendingTranscripts();
                     turn_complete_.store(false);
                     receiving_model_audio_.store(false);
                     awaiting_response_.store(false);
                     awaiting_nudges_.store(0);
+                    local_speech_ended_us_.store(0);
+                    backstop_stream_end_sent_.store(false);
+                    thinking_face_shown_.store(false);
+                    FlushPendingTranscripts();
                     if (Application::GetInstance().GetDeviceState() == kDeviceStateListening) {
                         EmitEmotion("listening");
                     }
@@ -1958,85 +2131,42 @@ void GeminiLiveProtocol::PlaybackFeederLoop() {
             speaking_active = false;
             speaking_active_.store(false);
             rebuffer_needed = false;
+            rssi_sampled_for_turn = false;
             continue;
         }
 
-        // Emit any facial emotion whose exact 24kHz audio sample offset has now reached the speaker
-        {
-            bool flush_remaining = turn_complete_.load() && jitter_ring_.Available() == 0;
-            std::string due_emo;
-            std::string latest_emo;
-            while (jitter_ring_.PopDueEmotion(flush_remaining, due_emo)) {
-                if (!due_emo.empty()) {
-                    latest_emo = std::move(due_emo);
-                }
-            }
-            if (!latest_emo.empty()) {
-                EmitEmotion(latest_emo);
-            }
-        }
+        // Emit any facial emotion whose exact 24kHz audio sample has now reached the ES8311 DAC
+        flush_due_emotions(false);
 
         avail = jitter_ring_.Available();
         idle_rx_us = esp_timer_get_time() - last_rx_audio_us_.load();
         size_t pop_threshold = rebuffer_needed ? rebuf_target : kPlaybackFrameSamples;
         if (avail >= pop_threshold ||
             ((turn_complete_.load() || idle_rx_us > 1500000LL) && avail > 0)) {
-            if (rebuffer_needed) {
-                rebuffer_needed = false;
-                initial_burst_left = 4;
-                next_feed_us = esp_timer_get_time();
-            }
+            rebuffer_needed = false;
             size_t to_pop = std::min(kPlaybackFrameSamples, avail);
-            size_t got = jitter_ring_.PopSamples(frame_buf.data(), to_pop);
+            std::vector<int16_t> pcm_frame(to_pop);
+            size_t got = jitter_ring_.PopSamples(pcm_frame.data(), to_pop);
             jitter_ring_.NotifyOne();
 
             if (got > 0) {
+                if (got < pcm_frame.size()) {
+                    pcm_frame.resize(got);
+                }
                 audio_frames_played_.fetch_add(1);
-                int lvl = robi::ComputeVoiceLevel0To100(frame_buf.data(), got);
-                live_voice_level_.store(lvl, std::memory_order_relaxed);
-                live_voice_updated_us_.store(esp_timer_get_time(), std::memory_order_relaxed);
 
-                auto pkt = std::make_unique<AudioStreamPacket>();
-                pkt->sample_rate = 24000;
-                pkt->frame_duration = 0;  // 0 = raw 24kHz int16 PCM bypass in AudioService
-                pkt->payload.resize(got * sizeof(int16_t));
-                std::memcpy(pkt->payload.data(), frame_buf.data(), pkt->payload.size());
-
+                // Direct hardware-clocked playback push (bypasses OpusCodecTask & manual vTaskDelay!):
+                // AudioService holds up to 14 * 50ms = 700ms (+80ms I2S DMA) of smooth audio cushion;
+                // PushRawPcmForPlayback blocks on audio_queue_cv_ only when the 700ms cushion is full!
                 auto& as = Application::GetInstance().GetAudioService();
                 while (!stopping_.load() && active_gen == turn_gen_.load() && !drop_turn_.load()) {
                     if (Application::GetInstance().GetDeviceState() != kDeviceStateSpeaking) {
                         break;
                     }
-                    if (as.PushPacketToDecodeQueue(std::move(pkt), false)) {
+                    if (as.PushRawPcmForPlayback(std::move(pcm_frame), 40)) {
                         break;
                     }
-                    pkt = std::make_unique<AudioStreamPacket>();
-                    pkt->sample_rate = 24000;
-                    pkt->frame_duration = 0;
-                    pkt->payload.resize(got * sizeof(int16_t));
-                    std::memcpy(pkt->payload.data(), frame_buf.data(), pkt->payload.size());
-                    vTaskDelay(pdMS_TO_TICKS(10));
-                }
-
-                // PLL-locked microsecond pacing: keeps ~200ms (4 frames) in AudioService DMA queue
-                // while holding bulk seconds of audio in our 512 KB PSRAM jitter_ring_ (saving SRAM!)
-                const int64_t frame_dur_us = (static_cast<int64_t>(got) * 1000000LL) / 24000LL;
-                if (initial_burst_left > 0) {
-                    --initial_burst_left;
-                    next_feed_us = esp_timer_get_time() + frame_dur_us;
-                } else {
-                    int64_t now_feed_us = esp_timer_get_time();
-                    if (now_feed_us < next_feed_us) {
-                        int64_t sleep_ms = (next_feed_us - now_feed_us) / 1000LL;
-                        if (sleep_ms >= 10) {
-                            vTaskDelay(pdMS_TO_TICKS(sleep_ms));
-                        }
-                    }
-                    next_feed_us += frame_dur_us;
-                    int64_t after_us = esp_timer_get_time();
-                    if (after_us - next_feed_us > 150000LL) {
-                        next_feed_us = after_us;
-                    }
+                    flush_due_emotions(false);
                 }
             }
             continue;
@@ -2062,17 +2192,18 @@ void GeminiLiveProtocol::PlaybackFeederLoop() {
             }
         }
 
-        // Turn is complete and ring is completely drained; wait for hardware I2S DMA playback queue to drain
+        // Turn is complete and ring is completely drained; wait for 780ms I2S DMA queue to finish playing
         auto& as = Application::GetInstance().GetAudioService();
         int wait_loops = 0;
         bool more_audio_arrived = false;
         while (!stopping_.load() && active_gen == turn_gen_.load() &&
-               !as.IsPlaybackIdle() && wait_loops < 250) {
+               !as.IsPlaybackIdle() && wait_loops < 150) {
+            flush_due_emotions(false);
             if (jitter_ring_.Available() > 0 || esp_timer_get_time() < tool_hold_until_us_.load()) {
                 more_audio_arrived = true;
                 break;
             }
-            vTaskDelay(pdMS_TO_TICKS(10));
+            vTaskDelay(pdMS_TO_TICKS(20));
             ++wait_loops;
         }
         if (more_audio_arrived) {
@@ -2080,13 +2211,14 @@ void GeminiLiveProtocol::PlaybackFeederLoop() {
             continue;
         }
 
-        FlushPendingTranscripts();
+        flush_due_emotions(true);
         turn_complete_.store(false);
         receiving_model_audio_.store(false);
         speaking_active = false;
         speaking_active_.store(false);
         speaking_audio_ready_.store(false);
         rebuffer_needed = false;
+        rssi_sampled_for_turn = false;
         ClearLiveVoiceLevel();
 
         if (!stopping_.load() && active_gen == turn_gen_.load()) {
@@ -2100,7 +2232,6 @@ void GeminiLiveProtocol::PlaybackFeederLoop() {
             if (srv_tok == 0) {
                 srv_tok = audio_sec_delta * 35 + 140;
             }
-            RobiConfig::GetInstance().RecordModelTurn(GetActiveModel(), audio_sec_delta, srv_tok);
             awaiting_response_.store(false);
             awaiting_nudges_.store(0);
             int64_t end_us = esp_timer_get_time();
@@ -2108,6 +2239,10 @@ void GeminiLiveProtocol::PlaybackFeederLoop() {
             EmitEmotion("v:0");
             last_activity_us_.store(end_us);
             EmitTtsState("stop");
+
+            // Persist dialogue & usage AFTER speech stops & tts=stop is posted (never mid-speech!)
+            FlushPendingTranscripts();
+            RobiConfig::GetInstance().RecordModelTurn(GetActiveModel(), audio_sec_delta, srv_tok);
 
             if (close_after_turn_.exchange(false)) {
                 vTaskDelay(pdMS_TO_TICKS(220));
